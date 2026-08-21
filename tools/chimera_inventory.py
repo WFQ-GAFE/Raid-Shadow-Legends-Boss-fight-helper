@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline inventory for the local RAID and RSL Helper installations.
+"""Offline inventory for the local RAID installation.
 
 The script never opens a process and never writes to the game directory. It
 prints a JSON report to stdout.
@@ -9,14 +9,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import struct
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_BUILD = Path(r"C:\EXTEND\PlariumPlay\StandAloneApps\raid-shadow-legends\build")
-DEFAULT_HELPER = Path(r"C:\Program Files\RSL_Helper_V6")
 
 REQUIRED_IL2CPP_EXPORTS = {
     "il2cpp_domain_get",
@@ -43,15 +41,6 @@ REQUIRED_METADATA_NAMES = {
     "ChimeraSequenceForms",
     "ChimeraTurnsCountBetweenForm",
 }
-
-INJECTION_IMPORTS = {
-    "OpenProcess",
-    "VirtualAllocEx",
-    "WriteProcessMemory",
-    "CreateRemoteThread",
-    "ReadProcessMemory",
-}
-
 
 def _cstring(data: bytes, offset: int | None) -> str:
     if offset is None or not 0 <= offset < len(data):
@@ -167,62 +156,33 @@ def metadata_names(path: Path) -> tuple[int, set[str]]:
     return version, names
 
 
-def printable_strings(path: Path) -> set[str]:
-    data = path.read_bytes()
-    values = {
-        match.decode("ascii", "ignore").strip()
-        for match in re.findall(rb"[ -~]{4,}", data)
-    }
-    values.update(
-        match.decode("utf-16le", "ignore").strip()
-        for match in re.findall(rb"(?:[ -~]\x00){4,}", data)
-    )
-    return {value for value in values if value}
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--build", type=Path, default=DEFAULT_BUILD)
-    parser.add_argument("--helper", type=Path, default=DEFAULT_HELPER)
     args = parser.parse_args()
 
     build = args.build.resolve()
-    helper = args.helper.resolve()
     manifest = json.loads((build / "manifest.json").read_text(encoding="utf-8"))
 
     metadata_version, names = metadata_names(
         build / "Raid_Data" / "il2cpp_data" / "Metadata" / "global-metadata.dat"
     )
     game_assembly = inspect_pe(build / "GameAssembly.dll")
-    helper_exe = inspect_pe(helper / "RSLHelper.exe")
-
-    helper_import_names = {
-        name for imports in helper_exe["imports"].values() for name in imports
-    }
     manifest_chimera_paths = sorted(
         chunk["path"]
         for chunk in manifest.get("chunks", [])
         if "chimera" in chunk.get("path", "").lower()
     )
 
-    helper_main_strings = printable_strings(helper / "RSLHelper.exe")
-    helper_agent_strings = printable_strings(helper / "rslhelper.dll")
     game_exports = set(game_assembly["exports"])
 
     report = {
         "gameBuild": str(build),
-        "helperDirectory": str(helper),
         "metadataVersion": metadata_version,
         "counts": {
             "metadataNames": len(names),
             "metadataNamesContainingChimera": sum(
                 "chimera" in name.lower() for name in names
-            ),
-            "helperMainStringsContainingChimera": sum(
-                "chimera" in value.lower() for value in helper_main_strings
-            ),
-            "helperAgentStringsContainingChimera": sum(
-                "chimera" in value.lower() for value in helper_agent_strings
             ),
             "manifestChimeraPaths": len(manifest_chimera_paths),
         },
@@ -234,16 +194,6 @@ def main() -> int:
             "requiredMetadataNames": {
                 name: name in names for name in sorted(REQUIRED_METADATA_NAMES)
             },
-        },
-        "rslHelperEvidence": {
-            "machine": helper_exe["machine"],
-            "injectionImports": {
-                name: name in helper_import_names for name in sorted(INJECTION_IMPORTS)
-            },
-            "battleStatePipeNamePresent": "RSLPIPEBATTLESTATE" in helper_agent_strings,
-            "manualCastPathPresent": any(
-                "CreateCmdManually" in value for value in helper_agent_strings
-            ),
         },
         "manifestChimeraPaths": manifest_chimera_paths,
     }

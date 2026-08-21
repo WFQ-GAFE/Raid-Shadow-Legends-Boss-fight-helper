@@ -1,86 +1,99 @@
-# Raid Chimera Controller
+# RAID Alliance Boss Strategy Studio
 
-这是一个面向《RAID: Shadow Legends》奇美拉战斗的实验项目。当前原型可从进程内读取战斗状态、生成策略决策，并通过受保护的主线程队列开始首场战斗和提交单条技能命令。
+A local Windows strategy editor and battle controller for the Alliance Chimera and Hydra encounters in **RAID: Shadow Legends**.
 
-## 当前范围
+The application reads live battle state from the selected RAID client, evaluates user-defined rules, and submits guarded in-game actions. It includes an English and Chinese interface, separate Chimera and Hydra workspaces, multiple saved strategy profiles, live team discovery, hero and skill catalogs, target priorities, and independent run logs.
 
-- 游戏版本基线：11.70.0 / Unity 6000.3 / IL2CPP x64
-- 目标模式：Alliance Chimera
-- 已验证：回合、形态、英雄/技能中文名、血量、状态效果类别、技能冷却、即时合法目标、试炼进度、三条并行试炼链及 Easy→Normal→Hard 解锁关系、当前伤害和竞赛积分
-- 从游戏静态数据读取 6 个难度共 162 条试炼的中文条件、形态、部位、关联效果和当前奖励；六个难度属于同一个时间奖励版本，不被当作六个轮换
-- 稳定试炼定义与随时间变化的奖励表分开存储；每次奖励变化产生新的 `rewardRotationFingerprint` 并保留历史版本，内容未变时不会重复保存试炼定义
-- Boss 属性阶段与试炼奖励轮换独立跟踪；新奖励版本或新属性阶段只归档一次到 `data/chimera-rotation-catalogs.json`，不会覆盖旧版本或按回合写盘
-- 已验证：`CreateCmdManually` 单条命令、主线程调度、安全卸载与重新载入
-- 已验证神话英雄主动变形：原形态与变形形态使用独立技能目录，变形可在同一行动中继续匹配新形态技能，旧形态命令会被进程内形态守卫拒绝
-- 已验证不绑定英雄的效果维护：控制器可从实体上的技能来源自动学习技能会向 Boss、自己或友方施加何种效果，并据此完成 Ram/Paw/Easy 试炼 `8000507`；能力映射仅在发生变化且控制器退出时写盘一次
-- 已加入 27 类试炼的结构化配方动作：按当前形态、链上 Easy→Normal→Hard 顺序、必要/禁用效果、效果槽、存活人数和目标类型决策；目标形态前会保护队伍并保留关键效果技能，条件满足后按实测技能伤害与试炼计入伤害选择动作
-- 运行时账户、回合快照和命令回执通过每 PID 共享内存传递，不持续读写硬盘日志
-- 代理与工具启动时校验构建版本、通信版本、命令版本和 Hook 就绪状态
-- 执行模式可用当前选定的五人队伍开始首场战斗；代理会关闭并复核自动战斗，快速战斗开启时仍拒绝开始
-- 控制器启动时绑定游戏内用户名和玩家 ID，不允许只按 PID 接管；账户变化时外部控制器立即退出，新版代理也会在游戏主线程执行技能、重整或开战前再次核对玩家 ID 并清空待执行命令
-- 游戏窗口中的鼠标、键盘和手动技能操作不会结束接管；点击游戏内暂停按钮或主工具的“暂停接管”会主动解除当前会话。账户变化及不可恢复的非法命令仍会安全中断；由手动操作造成的旧状态、旧回合或重复回合拒绝会等待下一快照继续
-- 结算时读取伤害、竞赛积分和已完成试炼数，停留在结算画面，不保存结果且不自动开始下一轮
-- 必要试炼被运行时明确判定为不可能时，可调用游戏原生免费重整入口，动态核对原五人队伍、关闭自动战斗并以手动模式进入下一次尝试；判定使用游戏当前轮换表和试炼所属形态，只有错过该形态最后一次窗口才失败，默认最多重试 10 次，未知状态不会误触发
-- 当前限制：仅支持 Alliance Chimera；五英雄连续闭环与单项试炼自动完成已验证，27 类配方中仍有依赖反击/组队攻击、Duel 条、反弹伤害或多目标复活精确事件的试炼只提供辅助判断或安全暂停
-- 不包含：反检测、隐藏模块、保护绕过或服务端数据修改
+## Current capabilities
 
-## 目录
+### Shared features
 
-- `docs/chimera-research.md`：本地资源与实现可行性调查
-- `docs/chimera-state-contract.md`：注入模块和策略引擎之间的数据契约
-- `docs/chimera-strategy-reference.md`：完整策略节点、条件、效果、试炼和目标参考
-- `tools/chimera_inventory.py`：可重复运行的离线盘点工具
-- `tools/raid_processes.py`：列出可绑定的 Raid 窗口和 PID
-- `tools/listen_probe.py`：接收只读代理的探测结果
-- `tools/inject_probe.py`：向显式选择的 Raid PID 加载只读代理
-- `tools/chimera_controller.py`：读取每回合快照并执行外部策略
-- `tools/test_chimera_regroup_reentry.py`：仅用于显式验证“免费重整—原队伍—新战斗实例”的开发闭环
-- `tools/chimera_web.py`：新版 React 桌面界面的本机服务与控制器桥接
-- `ui`：React、Vite、TypeScript 构建的自适应策略界面
-- `tools/chimera_gui.py`：中文经典界面，作为离线兼容入口保留
-- `src/agent`：IL2CPP 状态代理与受保护命令队列
-- `config/chimera-strategy.example.json`：策略配置示例
-- `config/chimera-strategy-tree.example.json`：目标与嵌套策略树示例
+- Detects running RAID accounts and binds a controller session to both the player name and player ID.
+- Reads the currently selected preparation team and refreshes it when heroes are changed.
+- Builds local hero, skill, effect, trial, and visual-asset catalogs from RAID data.
+- Supports multiple named strategy profiles for different teams.
+- Provides English as the default language, with Chinese available from the language selector.
+- Shows hero portraits, skill icons, buff/debuff icons, and encounter-specific boss icons.
+- Keeps Chimera and Hydra strategies, live state, and run logs separate.
+- Supports strict ordered rules, fallback skill orders, skill cooldown conditions, effect conditions, remaining-turn checks, and preferred targets.
+- Revalidates the account, acting hero, skill readiness, legal targets, battle mode, and current turn on the game thread before executing an action.
+- Allows normal manual interaction. A stale action is rejected safely when manual input or turn progression changes the battle state.
 
-## 离线盘点
+### Chimera
 
-```powershell
-python .\tools\chimera_inventory.py
-python .\tools\raid_processes.py
-```
+- Tracks forms, form transitions, trials, trial chains, damage, clash points, effects, cooldowns, and legal targets.
+- Supports trial-aware automatic decisions and structured recipes for known trial categories.
+- Handles Mythical champion transformations and keeps the two forms' skill catalogs separate.
+- Can perform a guarded free regroup when a required trial becomes impossible, then verify the same five champions before re-entering battle.
 
-该命令只读取游戏和 RSL Helper 的安装文件，并将 JSON 报告输出到终端。
+### Hydra
 
-## 构建代理
+- Identifies Hydra heads by head type rather than by screen position.
+- Supports conditions and target priorities for all heads, any head, or preferred head types.
+- Uses loose head matching so respawns and rotation changes do not invalidate a strategy unnecessarily.
+- Tracks total encounter damage without accumulating obsolete per-head health entries after respawns.
+- Can stop at the result screen when the damage target is met or safely restart with the verified six-champion team when it is not.
+- Prioritizes dead allies for revive skills and falls back to automatic legal-target selection when no preferred target is available.
 
-项目使用 Visual Studio 2022、MSVC x64、Windows SDK 10.0.26100 和 CMake。代理静态链接 C/C++ 运行库，最终 DLL 只有 `KERNEL32.dll` 系统依赖。
+## Architecture and dependencies
 
-当前固定使用 MinHook v1.3.4（commit `c3fcafdc10146beb5919319d0683e44e3c30d537`），许可证保存在 `third_party/minhook/LICENSE.txt`。
+The runtime consists of this project's Python controller, React interface, and native IL2CPP agent. The native agent uses the bundled MinHook source and Windows system APIs. Python UI dependencies are vendored under `third_party/python`, and the web interface is built from the packages declared in `ui/package.json`.
 
-## 策略控制器
+## Requirements
 
-普通使用直接双击 `run-raid-boss-tool.cmd`。主界面提供“奇美拉”和“六头蛇”两个大模式；账户识别、英雄/技能库、图标、效果目录、注入代理、控制器生命周期和缓存全部共用，只有各自的策略与专属状态分开保存。默认 React 界面中账户与实时状态固定在顶部，战斗目标和始终可见的开始/暂停控制位于左侧，策略树在右侧独立滚动，运行记录按需展开。主工具会在“刷新账户”时自动加载只读组件，并以游戏内玩家名和玩家 ID 列出每个 Raid 账户，不需要单独运行账户探测程序，也不依赖 PID 供用户判断。选择账户后点击“开始执行”即可持续接管，游戏内暂停或“暂停接管”可随时停止。需要兼容界面时可运行 `powershell -File .\tools\run_chimera_tool.ps1 -Classic`。
+- Windows 10 or Windows 11, x64
+- RAID: Shadow Legends installed through Plarium Play
+- Python available as `python.exe` when running from source
+- Administrator permission when requested, because the local state agent must be loaded into the selected RAID process
 
-策略编辑界面不要求用户输入英雄、技能、效果或试炼编号。行动英雄和指定队友从已有英雄库中按英雄名或缓存技能名搜索选择，英雄选择器、规则按钮和主策略表都显示英雄头像；选定行动英雄后，技能选择器显示游戏原始技能名、技能图标、完整说明、冷却和已学习效果，规则同时保存 `skillTypeId`，不再用 Buff 图标冒充技能图标。增益/减益图标只在效果资料中使用，弱/强版本以具体百分比、独立图标和独立 `effectTypeId` 保存，不会合并为同一条件；试炼表的“试炼内容”列显示未经截断的完整说明，只把形态、等级和最近读取的轮换奖励单列，部位、读取状态及前置条件集中到选中项的详细内容中。主界面的必做试炼是一整块带奇美拉图标的选择区域，已选摘要与选择入口不再分离。工具启动时会一次性准备 `cache/chimera-icons`、`cache/chimera-visual-assets`、`cache/chimera-ui-catalog.json` 和 `cache/chimera-hero-catalog.json`；原生头像和技能图片只在首次发现新地址时由后台缓存，因此不阻塞界面，也不参与战斗期间的重复硬盘写入。旧策略中的编号与英文效果名称仍可载入并继续执行。
+Building the native agent additionally requires Visual Studio 2022 with MSVC x64, CMake, and a compatible Windows SDK. Building the React interface requires Node.js and npm.
 
-观察模式只评估规则并发送不执行的验证请求：
+## Run from source
+
+Build the web interface once if `ui/dist` is not already present:
 
 ```powershell
-python .\tools\chimera_controller.py --pid 73664
+cd ui
+npm install
+npm run build
+cd ..
 ```
 
-只有配置文件的 `mode` 为 `execute`，且启动时同时传入 `--execute`，控制器才允许提交实际动作。主界面会同时启用首场自动开始：它只复用奇美拉队伍界面中已选满的五名英雄，不修改队伍；自动战斗或快速战斗开启、界面实例改变或不在区域 13 时都会拒绝。每次技能动作仍会在游戏主线程重新验证奇美拉模式、当前行动英雄、技能冷却和游戏返回的合法目标集合。
+Then double-click:
 
-控制器收到主线程的 `submitted` 回执后，还会等待回合标识实际变化。若提交后暂时没有观察到回合推进，进程内代理会继续阻止同一回合再次提交，控制器保持接管并等待新快照。`--bootstrap-current` 可从已经停在手动等待界面的当前回合启动，但只跳过外部快照年龄检查，进程内守卫仍会重新核验当前英雄、技能对象、冷却、合法目标、区域和手动等待状态。
+```text
+run-raid-boss-tool.cmd
+```
 
-主界面只允许一个实例运行，每个 Raid PID 也只允许一个控制器；运行期间会锁定账户选择，避免多个控制器重复提交。选定账户会同时绑定游戏内用户名和玩家 ID，控制器启动前、运行中及每个游戏主线程命令前都会复核，PID 复用或账户切换不会继承原接管会话。
+The launcher requests administrator permission when required and starts the local interface. Select the RAID account, choose Chimera or Hydra, verify the preparation team and strategy profile, then use **Start Control**. Use the in-game pause button or **Pause Control** in the tool to stop the session.
 
-接管不是输入独占。用户可以继续操作游戏窗口；手动操作若改变当前英雄、形态、技能、目标或回合，旧命令会被主线程即时守卫拒绝，但这类过期/重复回合回执不会结束控制器，控制器会等待新的有效快照继续且不会重复旧回合。游戏内 `BattleHUDContext.OnPauseClick()` 或主工具中的“暂停接管”会解除代理会话并停在游戏当前状态。战斗进入结算画面后，控制器读取台账并正常退出，绝不调用保存结果或快速重新战斗入口。
+The classic compatibility interface can be started with:
 
-策略树支持优先选择器和条件分支。条件可以组合稳定试炼定义指纹、当前奖励时间版本 `rewardRotationFingerprint`、属性版本、当前属性 `stageId`/轮换序号、难度、奇美拉形态、神话英雄自身形态、固定/玩家/Boss 回合数、实时伤害和积分、必要试炼的开始/完成/进度、Boss 或队友效果的类型与剩余回合，以及每个实体最多 10 个效果槽的占用数量。`maintainEffects` 动作可以按所需效果动态选择已学习的提供技能，不要求规则预先知道英雄或技能槽；`executeTrialRecipe` 可从 27 类结构化配方中选择当前链上试炼，提前保护队伍并保留必要效果技能，在有效窗口内按实测试炼伤害选择输出。学习数据在运行时保存在内存中，接管结束时最多合并写盘一次。神话英雄的“切换形态”是独立动作，变形后的三项技能仍按当前形态的即时 HUD 目录选择。旧版平铺 `rules` 配置仍兼容。
+```powershell
+powershell -File .\tools\run_chimera_tool.ps1 -Classic
+```
 
-正式策略中的必要试炼失败默认执行“免费重整并以手动模式重试”。若重整使游戏重新打开自动战斗，代理会通过游戏原生响应式属性关闭并重新读取确认，然后要求原五人队伍仍完整、快速战斗关闭、队伍可开战且新旧战斗实例地址不同；任一条件不满足就停在当前页面。`maxRegroupRetries` 限制同一次接管会话的重试次数，设为 `0` 才表示不限制。
+## Repository layout
 
-## 安全边界
+- `src/agent` — native IL2CPP state agent and guarded command queue
+- `tools/chimera_controller.py` — live state evaluation and strategy execution
+- `tools/chimera_web.py` — local React application service and controller bridge
+- `tools/boss_modes.py` — Chimera/Hydra mode and strategy-profile handling
+- `tools/chimera_inventory.py` — read-only offline inventory of the local RAID installation
+- `ui` — React, TypeScript, and Vite interface
+- `config` — example strategies and local user-strategy location
+- `data` — stable encounter definitions and rotation catalogs
+- `docs` — state contracts, strategy reference, and historical research notes
+- `third_party` — vendored runtime/build dependencies and their licenses
 
-注入和自动操作可能违反游戏规则并造成账号处罚。项目不实现隐藏模块、绕过检测或修改服务端数据。任何命令执行功能都必须先通过只读状态验证，并在免费的重新组队测试中进行。
+Local user strategies, caches, logs, compiled binaries, and build output are excluded from Git.
+
+## Safety boundaries
+
+Injection and automated play may violate the game's rules and can result in account penalties. Use this project at your own risk.
+
+The project does not implement anti-detection, stealth loading, protection bypasses, network manipulation, or server-side data modification. State-changing actions are allowed only after local state validation, and every submitted action is checked again inside the game process.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0. See `LICENSE` for the full text. Third-party licenses are listed in `THIRD_PARTY_NOTICES.md` and the corresponding directories under `third_party`.
