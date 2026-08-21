@@ -1,0 +1,39 @@
+{
+  "name": "chimera-lydia-skill2-test",
+  "mode": "observe",
+  "scope": {
+    "battleKind": "AllianceChimera",
+    "difficulties": [
+      "Easy",
+      "Normal",
+      "Hard",
+      "Brutal",
+      "Nightmare",
+      "UltraNightmare"
+    ]
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "rules": [
+    {
+      "name": "终极形态-莉迪亚技能2攻击奇美拉",
+      "when": {
+        "form": "Ultimate",
+        "activeHeroTypeId": 4716
+      },
+      "action": {
+        "type": "cast",
+        "skillTypeId": 47102,
+        "target": {
+          "type": "boss"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,512 @@
+"""Query dialogs and querybox facade for data input."""
+
+import textwrap
+import tkinter
+from tkinter import filedialog
+from datetime import date
+from typing import Any, List, Optional, Tuple
+
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+from ttkbootstrap.localization import MessageCatalog
+from ttkbootstrap.style._compat import normalize_datepicker_kwargs
+from ttkbootstrap.utils import windowing_system
+from .base import Dialog
+from .datepicker import DatePickerDialog
+from .fontdialog import FontDialog
+from .message import Messagebox
+
+
+class QueryDialog(Dialog):
+    """A simple modal dialog class for collecting user input."""
+
+    def __init__(
+            self,
+            prompt: str,
+            title: str = " ",
+            initialvalue: Any = "",
+            minvalue: Optional[Any] = None,
+            maxvalue: Optional[Any] = None,
+            width: int = 65,
+            datatype: Any = str,
+            padding: "tuple[int, int] | int" = (20, 20),
+            parent: Optional[tkinter.Misc] = None,
+            items: Optional[List[str]] = None,
+    ) -> None:
+        """Create a query dialog for collecting user input.
+
+        Parameters:
+
+            prompt (str):
+                The prompt text to display above the input field. Supports
+                multiline strings (separated by \\n).
+
+            title (str):
+                The dialog window title (default=' ').
+
+            initialvalue (Any):
+                The initial value to populate in the input field (default='').
+
+            minvalue (Any):
+                Minimum allowed value for numeric data types (int, float, complex).
+                Ignored for strings.
+
+            maxvalue (Any):
+                Maximum allowed value for numeric data types (int, float, complex).
+                Ignored for strings.
+
+            width (int):
+                Maximum width in characters for text wrapping of the prompt
+                (default=65).
+
+            datatype (type):
+                Expected data type for validation (str, int, float, complex).
+                When set to int, float, or complex, the input will be validated
+                and converted (default=str).
+
+            padding (int | tuple):
+                Padding around the dialog content. Can be a single int or
+                tuple (horizontal, vertical) (default=(20, 20)).
+
+            parent (Widget):
+                Parent widget. The dialog will be centered on this widget.
+
+            items (List[str]):
+                Optional list of items for dropdown selection. If provided,
+                shows a Combobox instead of Entry. The Combobox supports
+                filtering by typing. If items are provided, the input must
+                match one from the list.
+        """
+        super().__init__(parent, title)
+        self._prompt = prompt
+        self._initialvalue = initialvalue
+        self._items = items
+        self._minvalue = minvalue
+        self._maxvalue = maxvalue
+        self._width = width
+        self._datatype = datatype
+        self._padding = padding
+        self._result = None
+
+    def create_body(self, master: tkinter.Misc) -> None:
+        """Build the prompt label and input widget (Entry or Combobox)."""
+        frame = ttk.Frame(master, padding=self._padding)
+        if self._prompt:
+            for p in self._prompt.split("\n"):
+                prompt = "\n".join(textwrap.wrap(p, width=self._width))
+                ttk.Label(frame, text=prompt).pack(pady=(0, 5), fill=X, anchor=N)
+        if self._items is None or len(self._items) == 0:
+            entry = ttk.Entry(master=frame)
+        else:
+            entry = ttk.Combobox(master=frame, values=self._items)
+            entry.bind("<KeyRelease>", self.on_filter_list)
+        entry.insert(END, self._initialvalue)
+        entry.pack(pady=(0, 5), fill=X)
+        entry.bind("<Return>", self.on_submit)
+        entry.bind("<KP_Enter>", self.on_submit)
+        entry.bind("<Escape>", self.on_cancel)
+        frame.pack(fill=X, expand=True)
+        self._initial_focus = entry
+
+    def create_buttonbox(self, master: tkinter.Misc) -> None:
+        """Build the Submit/Cancel button row."""
+        frame = ttk.Frame(master, padding=(5, 10))
+
+        submit = ttk.Button(
+            master=frame,
+            bootstyle="primary",
+            text=MessageCatalog.translate("Submit"),
+            command=self.on_submit,
+        )
+        submit.pack(padx=2, side=RIGHT)
+        submit.lower()
+
+        cancel = ttk.Button(
+            master=frame,
+            text=MessageCatalog.translate("Cancel"),
+            command=self.on_cancel,
+        )
+        cancel.pack(padx=2, side=RIGHT)
+        cancel.lower()
+
+        ttk.Separator(self._toplevel).pack(fill=X)
+        frame.pack(side=BOTTOM, fill=X, anchor=S)
+
+    def on_submit(self, *_: Any) -> None:
+        """Capture the input value, validate it, and close the dialog if valid."""
+        self._result = self._initial_focus.get()
+        valid_result = self.validate()
+        if not valid_result:
+            return  # keep toplevel open for valid response
+        self._toplevel.destroy()
+        self.apply()
+
+    def on_cancel(self, *_: Any) -> None:
+        """Close the dialog without setting a result."""
+        self._toplevel.destroy()
+        return
+
+    def on_filter_list(self, event: tkinter.Event) -> None:
+        """Filter the Combobox values to those matching the typed text."""
+        value = event.widget.get().lower()
+        if not value:
+            event.widget["values"] = self._items
+        else:
+            data = [k for k in self._items if value in k.lower()]
+            event.widget["values"] = data
+
+    def validate(self) -> bool:
+        """Validate the data before closing."""
+        # no default checks required for string data types,
+        # unless there is a list of items to pick from
+        if self._datatype not in [float, int, complex] and (self._items is None or len(self._items) == 0):
+            return True
+
+        # convert result to appropriate data type
+        try:
+            self._result = self._datatype(self._result)
+        except ValueError:
+            msg = MessageCatalog.translate("Should be of data type")
+            Messagebox.ok(
+                message=f"{msg} `{self._datatype}`",
+                title=MessageCatalog.translate("Invalid data type"),
+                parent=self._toplevel,
+            )
+            return False
+
+        # max value range
+        if self._maxvalue is not None and self._result > self._maxvalue:
+            msg = MessageCatalog.translate("Number cannot be greater than")
+            Messagebox.ok(
+                message=f"{msg} {self._maxvalue}",
+                title=MessageCatalog.translate("Out of range"),
+                parent=self._toplevel,
+            )
+            return False
+
+        # min value range
+        if self._minvalue is not None and self._result < self._minvalue:
+            msg = MessageCatalog.translate("Number cannot be less than")
+            Messagebox.ok(
+                message=f"{msg} {self._minvalue}",
+                title=MessageCatalog.translate("Out of range"),
+                parent=self._toplevel,
+            )
+            return False
+
+        # item in list
+        if self._items is not None and len(self._items) > 0 and self._result not in self._items:
+            msg = MessageCatalog.translate("Select an item from the list")
+            Messagebox.ok(
+                message=msg,
+                title=MessageCatalog.translate("Out of range"),
+                parent=self._toplevel,
+            )
+            return False
+
+        return True
+
+    def apply(self) -> None:
+        """Process the data after closing (no-op by default)."""
+        pass
+
+
+class Querybox:
+    """Static methods that request data from the end user."""
+
+    @staticmethod
+    def get_color(
+            parent: Optional[tkinter.Misc] = None,
+            title: str = "Color Chooser",
+            initialcolor: Optional[str] = None,
+            *,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ) -> Any:
+        """Show a color picker and return the selected color when OK is pressed.
+
+        Returns a ``ColorChoice`` namedtuple, or ``None`` if cancelled.
+        """
+        from ttkbootstrap.dialogs.colorchooser import ColorChooserDialog
+
+        dialog = ColorChooserDialog(parent, title, initialcolor)
+        dialog.show(position)
+        return dialog.result
+
+    @staticmethod
+    def get_date(
+            parent: Optional[tkinter.Misc] = None,
+            title: str = " ",
+            first_weekday: int = 6,
+            start_date: Optional[date] = None,
+            bootstyle: str = "primary",
+            *,
+            show_outside_days: bool = True,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ) -> Optional[date]:
+        """Show a calendar and return the selected ``date``.
+
+        2.0 change: returns ``None`` when the picker is cancelled (closed
+        without choosing a day). Previously it always returned a ``date`` --
+        falling back to ``start_date``/today -- so cancellation was
+        indistinguishable from a real selection.
+
+        Set ``show_outside_days=False`` to blank the leading/trailing days that
+        belong to the adjacent months (only the current month's days are shown).
+
+        The pre-2.0 ``firstweekday``/``startdate`` spellings are accepted
+        through 2.x with a ``DeprecationWarning`` (removed in 3.0).
+        """
+        aliases = normalize_datepicker_kwargs(kwargs)
+        first_weekday = aliases.get("first_weekday", first_weekday)
+        start_date = aliases.get("start_date", start_date)
+        if kwargs:
+            raise TypeError(
+                f"get_date() got unexpected keyword arguments: "
+                f"{', '.join(sorted(kwargs))}"
+            )
+        chooser = DatePickerDialog(
+            parent=parent,
+            title=title,
+            first_weekday=first_weekday,
+            start_date=start_date,
+            bootstyle=bootstyle,
+            show_outside_days=show_outside_days,
+            autoshow=False,
+        )
+        chooser.show(position)
+        return chooser.result
+
+    @staticmethod
+    def get_string(
+            prompt: str = "",
+            title: str = " ",
+            initialvalue: Optional[str] = None,
+            parent: Optional[tkinter.Misc] = None,
+            *,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ) -> Optional[str]:
+        """Prompt for a string. Returns the text, or ``None`` if cancelled.
+
+        Note: submitting an empty field returns ``""`` (distinct from the
+        ``None`` returned on cancel).
+        """
+        initialvalue = initialvalue or ""
+        dialog = QueryDialog(prompt, title, initialvalue, parent=parent, **kwargs)
+        dialog.show(position)
+        return dialog.result
+
+    @staticmethod
+    def get_item(
+            prompt: str = "",
+            title: str = " ",
+            initialvalue: Optional[str] = None,
+            items: Optional[List[str]] = None,
+            parent: Optional[tkinter.Misc] = None,
+            *,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ) -> Optional[str]:
+        """Prompt for one item from a list. Returns it, or ``None`` if cancelled."""
+        initialvalue = initialvalue or ""
+        dialog = QueryDialog(prompt, title, initialvalue, items=items, parent=parent, **kwargs)
+        dialog.show(position)
+        return dialog.result
+
+    @staticmethod
+    def get_integer(
+            prompt: str = "",
+            title: str = " ",
+            initialvalue: Optional[int] = None,
+            minvalue: Optional[int] = None,
+            maxvalue: Optional[int] = None,
+            parent: Optional[tkinter.Misc] = None,
+            *,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ) -> Optional[int]:
+        """Prompt for an integer. Returns it, or ``None`` if cancelled."""
+        initialvalue = initialvalue or ""
+        datatype = kwargs.pop("datatype", int)
+        dialog = QueryDialog(
+            prompt,
+            title,
+            initialvalue,
+            minvalue,
+            maxvalue,
+            datatype=datatype,
+            parent=parent,
+            **kwargs,
+        )
+        dialog.show(position)
+        return dialog.result
+
+    @staticmethod
+    def get_float(
+            prompt: str = "",
+            title: str = " ",
+            initialvalue: Optional[float] = None,
+            minvalue: Optional[float] = None,
+            maxvalue: Optional[float] = None,
+            parent: Optional[tkinter.Misc] = None,
+            *,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ) -> Optional[float]:
+        """Prompt for a float. Returns it, or ``None`` if cancelled."""
+        initialvalue = initialvalue or ""
+        datatype = kwargs.pop("datatype", float)
+        dialog = QueryDialog(
+            prompt,
+            title,
+            initialvalue,
+            minvalue,
+            maxvalue,
+            datatype=datatype,
+            parent=parent,
+            **kwargs,
+        )
+        dialog.show(position)
+        return dialog.result
+
+    @staticmethod
+    def get_font(
+            parent: Optional[tkinter.Misc] = None,
+            *,
+            position: Optional[Tuple[int, int]] = None,
+            **kwargs: Any,
+    ):
+        """Show a font picker. Returns a ``Font``, or ``None`` if cancelled."""
+        dialog = FontDialog(parent=parent, **kwargs)
+        dialog.show(position)
+        return dialog.result
+
+    # File dialogs. These fetch a file path through the same `Querybox.get_*`
+    # facade as every other value, normalizing a cancel to `None`. Two dialogs
+    # back them: the *native* OS chooser (`tkinter.filedialog`) and a *themed*
+    # in-library one (`.filedialog.FileDialog`) that follows the active theme.
+    # The `native` keyword selects between them; `native=None` (the default) is
+    # platform-aware — the native chooser on Windows/macOS (where the OS draws a
+    # great one), the themed dialog on X11, where Tk's fallback draws an
+    # unstyleable white panel that ignores the theme.
+
+    @staticmethod
+    def _use_native_filedialog(
+        native: Optional[bool], widget: Optional[tkinter.Misc] = None
+    ) -> bool:
+        """Resolve the `native` selector to a native-vs-themed decision.
+
+        An explicit `native=True`/`False` always wins. `native=None` defaults to
+        the native chooser everywhere except X11 (Linux/Unix), whose Tk fallback
+        is the one that ignores the theme. The windowing system is read from
+        `widget` (or the default root); with no interpreter to query, native is
+        the safe default.
+        """
+        if native is not None:
+            return native
+        if widget is None:
+            try:
+                widget = tkinter._get_default_root()
+            except Exception:
+                widget = getattr(tkinter, "_default_root", None)
+        if widget is None:
+            return True
+        try:
+            return windowing_system(widget) != "x11"
+        except tkinter.TclError:
+            return True
+
+    @staticmethod
+    def _themed_filedialog(
+        parent: Optional[tkinter.Misc], *, mode: str, multiple: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        """Show the in-library themed chooser and return its result."""
+        from .filedialog import FileDialog
+
+        return FileDialog(
+            parent,
+            title=kwargs.get("title"),
+            mode=mode,
+            multiple=multiple,
+            filetypes=kwargs.get("filetypes"),
+            initialdir=kwargs.get("initialdir"),
+            initialfile=kwargs.get("initialfile"),
+            defaultextension=kwargs.get("defaultextension", ""),
+        ).show()
+
+    @staticmethod
+    def get_open_filename(
+        parent: Optional[tkinter.Misc] = None, *,
+        native: Optional[bool] = None, **kwargs: Any,
+    ) -> Optional[str]:
+        """Show an *open file* dialog. Returns the chosen path, or ``None`` if
+        cancelled.
+
+        Forward the standard options (``title``, ``filetypes``, ``initialdir``,
+        ``initialfile``, ...) as keyword arguments. The ``native=None`` default
+        uses the native OS chooser on Windows/macOS and the themed in-library
+        dialog on X11; pass ``native=False`` to force the themed dialog anywhere
+        (``native=True`` forces the OS chooser).
+        """
+        if Querybox._use_native_filedialog(native, parent):
+            if parent is not None:
+                kwargs["parent"] = parent
+            return filedialog.askopenfilename(**kwargs) or None
+        return Querybox._themed_filedialog(parent, mode="open", **kwargs)
+
+    @staticmethod
+    def get_open_filenames(
+        parent: Optional[tkinter.Misc] = None, *,
+        native: Optional[bool] = None, **kwargs: Any,
+    ) -> Optional[Tuple[str, ...]]:
+        """Show an *open multiple files* dialog. Returns a tuple of paths, or
+        ``None`` if cancelled.
+
+        ``native=None`` (default) uses the OS chooser on Windows/macOS and the
+        themed dialog on X11; ``native=False`` forces the themed dialog.
+        """
+        if Querybox._use_native_filedialog(native, parent):
+            if parent is not None:
+                kwargs["parent"] = parent
+            paths = filedialog.askopenfilenames(**kwargs)
+            return tuple(paths) if paths else None
+        return Querybox._themed_filedialog(parent, mode="open", multiple=True, **kwargs)
+
+    @staticmethod
+    def get_save_filename(
+        parent: Optional[tkinter.Misc] = None, *,
+        native: Optional[bool] = None, **kwargs: Any,
+    ) -> Optional[str]:
+        """Show a *save as* dialog. Returns the chosen path, or ``None`` if
+        cancelled.
+
+        Forward the standard options (``title``, ``filetypes``,
+        ``defaultextension``, ``initialfile``, ...) as keyword arguments.
+        ``native=None`` (default) uses the OS chooser on Windows/macOS and the
+        themed dialog on X11; ``native=False`` forces the themed dialog.
+        """
+        if Querybox._use_native_filedialog(native, parent):
+            if parent is not None:
+                kwargs["parent"] = parent
+            return filedialog.asksaveasfilename(**kwargs) or None
+        return Querybox._themed_filedialog(parent, mode="save", **kwargs)
+
+    @staticmethod
+    def get_directory(
+        parent: Optional[tkinter.Misc] = None, *,
+        native: Optional[bool] = None, **kwargs: Any,
+    ) -> Optional[str]:
+        """Show a *choose directory* dialog. Returns the chosen path, or ``None``
+        if cancelled.
+
+        ``native=None`` (default) uses the OS chooser on Windows/macOS and the
+        themed dialog on X11; ``native=False`` forces the themed dialog.
+        """
+        if not Querybox._use_native_filedialog(native, parent):
+            return Querybox._themed_filedialog(parent, mode="directory", **kwargs)
+        if parent is not None:
+            kwargs["parent"] = parent
+        return filedialog.askdirectory(**kwargs) or None

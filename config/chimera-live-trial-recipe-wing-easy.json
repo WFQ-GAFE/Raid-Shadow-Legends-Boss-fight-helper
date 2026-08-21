@@ -1,0 +1,75 @@
+{
+  "name": "gafee-chimera-trial-recipe-wing-easy",
+  "mode": "execute",
+  "scope": {"battleKind": "AllianceChimera"},
+  "team": {"heroIds": [39104, 21597, 34700, 21826, 26679]},
+  "objectives": {
+    "mandatoryTrialIds": [8000501],
+    "minimumDamage": 0,
+    "minimumCompetitionPoints": 0,
+    "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+    "maxRegroupRetries": 2,
+    "onAllMetAtResult": "hold_for_user"
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 1500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "rules": [
+    {
+      "name": "当前可推进试炼：使用结构化配方",
+      "when": {"activeTrialsAny": [8000501]},
+      "action": {
+        "type": "executeTrialRecipe",
+        "trialIds": [8000501],
+        "probeUnknownSkills": false,
+        "probeTransforms": false,
+        "prepareWithinBossTurns": 5
+      }
+    },
+    {
+      "name": "试炼等待提供者：技能3攻击",
+      "when": {"eligibleTrialsAny": [8000501]},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "boss"}}
+    },
+    {
+      "name": "试炼等待提供者：技能2攻击",
+      "when": {"eligibleTrialsAny": [8000501]},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "试炼等待提供者：技能1攻击",
+      "when": {"eligibleTrialsAny": [8000501]},
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    },
+    {
+      "name": "通用推进：技能3攻击",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "boss"}}
+    },
+    {
+      "name": "通用推进：技能3保护自己",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "self"}}
+    },
+    {
+      "name": "通用推进：技能2攻击",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "通用推进：技能2保护自己",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "self"}}
+    },
+    {
+      "name": "通用推进：技能1攻击",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    }
+  ]
+}

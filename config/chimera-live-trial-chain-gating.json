@@ -1,0 +1,91 @@
+{
+  "name": "gafee-chimera-trial-chain-gating-live-test",
+  "mode": "execute",
+  "scope": {
+    "battleKind": "AllianceChimera"
+  },
+  "team": {
+    "heroIds": [39104, 21597, 34700, 21826, 26679]
+  },
+  "objectives": {
+    "mandatoryTrialIds": [8000501, 8000504, 8000507],
+    "minimumDamage": 0,
+    "minimumCompetitionPoints": 0,
+    "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+    "maxRegroupRetries": 2,
+    "onAllMetAtResult": "hold_for_user"
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 1500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "rules": [
+    {
+      "name": "试炼链：当前形态目标可推进时切换神话形态",
+      "when": {
+        "eligibleTrialsAny": [8000501, 8000504, 8000507],
+        "transformationReady": true
+      },
+      "action": {"type": "transform"}
+    },
+    {
+      "name": "试炼链：当前目标可推进，技能3攻击Boss",
+      "when": {"eligibleTrialsAny": [8000501, 8000504, 8000507]},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "boss"}}
+    },
+    {
+      "name": "试炼链：当前目标可推进，技能3保护低血量队友",
+      "when": {"eligibleTrialsAny": [8000501, 8000504, 8000507]},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "试炼链：当前目标可推进，技能2攻击Boss",
+      "when": {"eligibleTrialsAny": [8000501, 8000504, 8000507]},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "试炼链：当前目标可推进，技能2保护低血量队友",
+      "when": {"eligibleTrialsAny": [8000501, 8000504, 8000507]},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "试炼链：当前目标可推进，技能1攻击Boss",
+      "when": {"eligibleTrialsAny": [8000501, 8000504, 8000507]},
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    },
+    {
+      "name": "等待对应形态：切换神话形态",
+      "when": {"transformationReady": true},
+      "action": {"type": "transform"}
+    },
+    {
+      "name": "等待对应形态：技能3攻击Boss",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "boss"}}
+    },
+    {
+      "name": "等待对应形态：技能3保护低血量队友",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "等待对应形态：技能2攻击Boss",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "等待对应形态：技能2保护低血量队友",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "等待对应形态：技能1攻击Boss",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    }
+  ]
+}

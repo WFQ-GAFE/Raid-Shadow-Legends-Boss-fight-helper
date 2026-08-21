@@ -1,0 +1,17 @@
+build/
+out/
+cache/
+config/*.user.json
+*.dll
+*.exe
+*.pdb
+*.obj
+*.log
+*.out
+*.err
+*.tmp
+*.user
+.vs/
+__pycache__/
+ui/node_modules/
+ui/*.tsbuildinfo

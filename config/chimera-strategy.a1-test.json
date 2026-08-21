@@ -1,0 +1,31 @@
+{
+  "name": "chimera-five-hero-a1-bounded-test",
+  "mode": "execute",
+  "scope": {
+    "battleKind": "AllianceChimera"
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 1500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "rules": [
+    {
+      "name": "五人队测试-技能1攻击奇美拉",
+      "when": {
+        "form": ["Ultimate", "Ram", "Lion", "Snake"],
+        "activeHeroTypeId": [8896, 4716, 10436, 9906, 8256]
+      },
+      "action": {
+        "type": "cast",
+        "skillSlot": 1,
+        "target": {
+          "type": "boss"
+        }
+      }
+    }
+  ]
+}

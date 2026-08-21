@@ -1,0 +1,1567 @@
+{
+  "version": 2,
+  "updatedAt": "2026-08-21T21:14:06.597219+00:00",
+  "skills": {
+    "47101": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 490,
+        "effectKindId": 3015,
+        "effectKind": "Fear",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 491,
+        "effectKindId": 3015,
+        "effectKind": "Fear",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "47102": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 151,
+        "effectKindId": 3102,
+        "effectKind": "StatusReduceDefence",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 350,
+        "effectKindId": 3010,
+        "effectKind": "IncreaseDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 4
+      }
+    ],
+    "47103": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 500,
+        "effectKindId": 3016,
+        "effectKind": "IncreasePoisoning",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 110,
+        "effectKindId": 3008,
+        "effectKind": "BlockBuffs",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 290,
+        "effectKindId": 3006,
+        "effectKind": "BlockActiveSkills",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "82501": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 4
+      }
+    ],
+    "82503": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 261,
+        "effectKindId": 2107,
+        "effectKind": "StatusIncreaseCriticalDamage",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 261,
+        "effectKindId": 2107,
+        "effectKind": "StatusIncreaseCriticalDamage",
+        "lifetime": 3,
+        "turnsLeft": 4
+      }
+    ],
+    "88901": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 40,
+        "effectKindId": 3002,
+        "effectKind": "Provoke",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "88902": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "88903": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 840,
+        "effectKindId": 2029,
+        "effectKind": "Negator",
+        "lifetime": 0,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 141,
+        "effectKindId": 2102,
+        "effectKind": "StatusIncreaseDefence",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 141,
+        "effectKindId": 2102,
+        "effectKind": "StatusIncreaseDefence",
+        "lifetime": 3,
+        "turnsLeft": 15
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 15
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 840,
+        "effectKindId": 2029,
+        "effectKind": "Negator",
+        "lifetime": -1,
+        "turnsLeft": -1
+      }
+    ],
+    "88904": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 50,
+        "effectKindId": 2005,
+        "effectKind": "StatusCounterattack",
+        "lifetime": 2,
+        "turnsLeft": 5
+      }
+    ],
+    "95101": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 410,
+        "effectKindId": 2010,
+        "effectKind": "ReflectDamage",
+        "lifetime": 1,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 350,
+        "effectKindId": 3010,
+        "effectKind": "IncreaseDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 470,
+        "effectKindId": 3014,
+        "effectKind": "AoEContinuousDamage",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 151,
+        "effectKindId": 3102,
+        "effectKind": "StatusReduceDefence",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 110,
+        "effectKindId": 3008,
+        "effectKind": "BlockBuffs",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 3,
+        "turnsLeft": 4
+      }
+    ],
+    "95102": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 440,
+        "effectKindId": 3012,
+        "effectKind": "Mark",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 350,
+        "effectKindId": 3010,
+        "effectKind": "IncreaseDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "99002": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 40,
+        "effectKindId": 3002,
+        "effectKind": "Provoke",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "99003": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 2,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 2,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 310,
+        "effectKindId": 2007,
+        "effectKind": "ShareDamage",
+        "lifetime": 2,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 2,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 2,
+        "turnsLeft": 3
+      }
+    ],
+    "99502": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 3,
+        "turnsLeft": 15
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 3,
+        "turnsLeft": 6
+      }
+    ],
+    "99503": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 91,
+        "effectKindId": 2003,
+        "effectKind": "ContinuousHeal",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 14
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 91,
+        "effectKindId": 2003,
+        "effectKind": "ContinuousHeal",
+        "lifetime": 3,
+        "turnsLeft": 5
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 6
+      }
+    ],
+    "100008": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 370,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 15
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 370,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 5
+      }
+    ],
+    "100056": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 100,
+        "effectKindId": 2002,
+        "effectKind": "BlockDebuff",
+        "lifetime": 2,
+        "turnsLeft": 3
+      }
+    ],
+    "100502": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 3,
+        "turnsLeft": 14
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 3,
+        "turnsLeft": 7
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 151,
+        "effectKindId": 3102,
+        "effectKind": "StatusReduceDefence",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 110,
+        "effectKindId": 3008,
+        "effectKind": "BlockBuffs",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "100503": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 991,
+        "effectKindId": 2033,
+        "effectKind": "Brutality",
+        "lifetime": 3,
+        "turnsLeft": 14
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 261,
+        "effectKindId": 2107,
+        "effectKind": "StatusIncreaseCriticalDamage",
+        "lifetime": 3,
+        "turnsLeft": 12
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 991,
+        "effectKindId": 2033,
+        "effectKind": "Brutality",
+        "lifetime": 3,
+        "turnsLeft": 8
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 261,
+        "effectKindId": 2107,
+        "effectKind": "StatusIncreaseCriticalDamage",
+        "lifetime": 3,
+        "turnsLeft": 7
+      }
+    ],
+    "104101": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "104103": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 880,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 14
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 3,
+        "turnsLeft": 15
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 880,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 3,
+        "turnsLeft": 7
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 3,
+        "turnsLeft": 8
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 780,
+        "effectKindId": 2027,
+        "effectKind": "Taunt",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "104104": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 470,
+        "effectKindId": 3014,
+        "effectKind": "AoEContinuousDamage",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "104301": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 870,
+        "effectKindId": 2030,
+        "effectKind": "Inspiration",
+        "lifetime": 3,
+        "turnsLeft": 4
+      }
+    ],
+    "104302": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 711,
+        "effectKindId": 2108,
+        "effectKind": "StatusIncreaseResistance",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 711,
+        "effectKindId": 2108,
+        "effectKind": "StatusIncreaseResistance",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 4
+      }
+    ],
+    "104303": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 481,
+        "effectKindId": 2013,
+        "effectKind": "Invisible",
+        "lifetime": 3,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 320,
+        "effectKindId": 2008,
+        "effectKind": "Unkillable",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "260006": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 680,
+        "effectKindId": 9020,
+        "effectKind": "HungerCounter",
+        "lifetime": -1,
+        "turnsLeft": -1
+      }
+    ],
+    "260007": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 690,
+        "effectKindId": 9024,
+        "effectKind": "Devoured",
+        "lifetime": -1,
+        "turnsLeft": -1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 700,
+        "effectKindId": 9025,
+        "effectKind": "Digestion",
+        "lifetime": 5,
+        "turnsLeft": 5
+      }
+    ],
+    "260010": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 431,
+        "effectKindId": 3010,
+        "effectKind": "IncreaseDamageTaken",
+        "lifetime": -1,
+        "turnsLeft": -1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 670,
+        "effectKindId": 2024,
+        "effectKind": "NewbieDefence",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "260401": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 70,
+        "effectKindId": 3005,
+        "effectKind": "BlockHeal",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "260403": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 600,
+        "effectKindId": 2021,
+        "effectKind": "Cocoon",
+        "lifetime": 4,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 10,
+        "effectKindId": 3004,
+        "effectKind": "Stun",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "260801": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 490,
+        "effectKindId": 3015,
+        "effectKind": "Fear",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "260803": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 491,
+        "effectKindId": 3015,
+        "effectKind": "Fear",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "260804": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 481,
+        "effectKindId": 2013,
+        "effectKind": "Invisible",
+        "lifetime": 2,
+        "turnsLeft": 14
+      }
+    ],
+    "261201": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 460,
+        "effectKindId": 3013,
+        "effectKind": "LifeDrainOnDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 80,
+        "effectKindId": 3007,
+        "effectKind": "ContinuousDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "261202": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 80,
+        "effectKindId": 3007,
+        "effectKind": "ContinuousDamage",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "261203": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 610,
+        "effectKindId": 2020,
+        "effectKind": "PoisonCloud",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "261601": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 350,
+        "effectKindId": 3010,
+        "effectKind": "IncreaseDamageTaken",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "261602": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 310,
+        "effectKindId": 2007,
+        "effectKind": "ShareDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 411,
+        "effectKindId": 2010,
+        "effectKind": "ReflectDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 40,
+        "effectKindId": 3002,
+        "effectKind": "Provoke",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "261603": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 640,
+        "effectKindId": 3020,
+        "effectKind": "MirrorDamage",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "261605": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 2,
+        "turnsLeft": 8
+      }
+    ],
+    "262001": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 100,
+        "effectKindId": 2002,
+        "effectKind": "BlockDebuff",
+        "lifetime": 4,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 370,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 8,
+        "turnsLeft": 8
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 8,
+        "turnsLeft": 8
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 880,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 4,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 991,
+        "effectKindId": 2033,
+        "effectKind": "Brutality",
+        "lifetime": 6,
+        "turnsLeft": 6
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 261,
+        "effectKindId": 2107,
+        "effectKind": "StatusIncreaseCriticalDamage",
+        "lifetime": 6,
+        "turnsLeft": 6
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 141,
+        "effectKindId": 2102,
+        "effectKind": "StatusIncreaseDefence",
+        "lifetime": 8,
+        "turnsLeft": 8
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 7,
+        "turnsLeft": 7
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 8,
+        "turnsLeft": 8
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 7,
+        "turnsLeft": 7
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 840,
+        "effectKindId": 2029,
+        "effectKind": "Negator",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 50,
+        "effectKindId": 2005,
+        "effectKind": "StatusCounterattack",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 780,
+        "effectKindId": 2027,
+        "effectKind": "Taunt",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 91,
+        "effectKindId": 2003,
+        "effectKind": "ContinuousHeal",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 4,
+        "turnsLeft": 4
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 870,
+        "effectKindId": 2030,
+        "effectKind": "Inspiration",
+        "lifetime": 4,
+        "turnsLeft": 4
+      }
+    ],
+    "262002": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 100,
+        "effectKindId": 2002,
+        "effectKind": "BlockDebuff",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 880,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 991,
+        "effectKindId": 2033,
+        "effectKind": "Brutality",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 261,
+        "effectKindId": 2107,
+        "effectKind": "StatusIncreaseCriticalDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 141,
+        "effectKindId": 2102,
+        "effectKind": "StatusIncreaseDefence",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 280,
+        "effectKindId": 2004,
+        "effectKind": "Shield",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 511,
+        "effectKindId": 2014,
+        "effectKind": "ReduceDamageTaken",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 870,
+        "effectKindId": 2030,
+        "effectKind": "Inspiration",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "262401": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "262402": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 40,
+        "effectKindId": 3002,
+        "effectKind": "Provoke",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 121,
+        "effectKindId": 2101,
+        "effectKind": "StatusIncreaseAttack",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "262404": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 460,
+        "effectKindId": 3013,
+        "effectKind": "LifeDrainOnDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "262405": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 660,
+        "effectKindId": 12003,
+        "effectKind": "HydraHitCounter",
+        "lifetime": -1,
+        "turnsLeft": -1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 650,
+        "effectKindId": 2105,
+        "effectKind": "StatusChangeDamageMultiplier",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 410,
+        "effectKindId": 2010,
+        "effectKind": "ReflectDamage",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 100,
+        "effectKindId": 2002,
+        "effectKind": "BlockDebuff",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "500234": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 100,
+        "effectKindId": 2002,
+        "effectKind": "BlockDebuff",
+        "lifetime": 1,
+        "turnsLeft": 4
+      }
+    ],
+    "600070": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 760,
+        "effectKindId": 2026,
+        "effectKind": "LightOrbs",
+        "lifetime": -1,
+        "turnsLeft": -1
+      }
+    ],
+    "600190": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 740,
+        "effectKindId": 3021,
+        "effectKind": "FireMark",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "882503": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 2,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 350,
+        "effectKindId": 3010,
+        "effectKind": "IncreaseDamageTaken",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "1266901": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 171,
+        "effectKindId": 3103,
+        "effectKind": "StatusReduceSpeed",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 40,
+        "effectKindId": 3002,
+        "effectKind": "Provoke",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "1266902": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 161,
+        "effectKindId": 2103,
+        "effectKind": "StatusIncreaseSpeed",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "2266901": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 10,
+        "effectKindId": 3004,
+        "effectKind": "Stun",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "2266902": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 271,
+        "effectKindId": 3106,
+        "effectKind": "StatusReduceCriticalDamage",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 251,
+        "effectKindId": 3104,
+        "effectKind": "StatusReduceCriticalChance",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 171,
+        "effectKindId": 3103,
+        "effectKind": "StatusReduceSpeed",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 10,
+        "effectKindId": 3004,
+        "effectKind": "Stun",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "2266903": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 171,
+        "effectKindId": 3103,
+        "effectKind": "StatusReduceSpeed",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 721,
+        "effectKindId": 3107,
+        "effectKind": "StatusReduceResistance",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 151,
+        "effectKindId": 3102,
+        "effectKind": "StatusReduceDefence",
+        "lifetime": 2,
+        "turnsLeft": 2
+      }
+    ],
+    "2266905": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 910,
+        "effectKindId": 14001,
+        "effectKind": "DuelTargetMark",
+        "lifetime": -1,
+        "turnsLeft": -1
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 920,
+        "effectKindId": 14002,
+        "effectKind": "DuelProducerMark",
+        "lifetime": -1,
+        "turnsLeft": -1
+      }
+    ],
+    "2266906": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 500,
+        "effectKindId": 3016,
+        "effectKind": "IncreasePoisoning",
+        "lifetime": 3,
+        "turnsLeft": 3
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 110,
+        "effectKindId": 3008,
+        "effectKind": "BlockBuffs",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 491,
+        "effectKindId": 3015,
+        "effectKind": "Fear",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 490,
+        "effectKindId": 3015,
+        "effectKind": "Fear",
+        "lifetime": 1,
+        "turnsLeft": 1
+      }
+    ],
+    "3000020": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 870,
+        "effectKindId": 2030,
+        "effectKind": "Inspiration",
+        "lifetime": 1,
+        "turnsLeft": 6
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 870,
+        "effectKindId": 2030,
+        "effectKind": "Inspiration",
+        "lifetime": 1,
+        "turnsLeft": 2
+      }
+    ],
+    "3266905": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 860,
+        "effectKindId": 3028,
+        "effectKind": "HuntersMark",
+        "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "4266905": [
+      {
+        "targetScope": "ally",
+        "effectTypeId": 940,
+        "effectKindId": 3030,
+        "effectKind": "Necrosis",
+        "lifetime": -1,
+        "turnsLeft": -1
+      },
+      {
+        "targetScope": "ally",
+        "effectTypeId": 930,
+        "effectKindId": 3029,
+        "effectKind": "NecrosisSource",
+        "lifetime": -1,
+        "turnsLeft": -1
+      }
+    ]
+  },
+  "performance": {
+    "47101": {
+      "samples": 61,
+      "emaDamage": 12575.168,
+      "maxDamage": 83746.0,
+      "trials": {
+        "8000501": {
+          "samples": 5,
+          "emaDamage": 36416.344,
+          "maxDamage": 83745.7
+        }
+      }
+    },
+    "47102": {
+      "samples": 20,
+      "emaDamage": 11423.11,
+      "maxDamage": 42740.0
+    },
+    "47103": {
+      "samples": 20,
+      "emaDamage": 18083.245,
+      "maxDamage": 111858.0
+    },
+    "82501": {
+      "samples": 30,
+      "emaDamage": 102999.837,
+      "maxDamage": 354380.0
+    },
+    "82502": {
+      "samples": 12,
+      "emaDamage": 37437.858,
+      "maxDamage": 469051.0
+    },
+    "82503": {
+      "samples": 7,
+      "emaDamage": 92894.739,
+      "maxDamage": 156720.0
+    },
+    "82504": {
+      "samples": 3,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "88901": {
+      "samples": 419,
+      "emaDamage": 0.002,
+      "maxDamage": 83838.0,
+      "trials": {
+        "8000501": {
+          "samples": 1,
+          "emaDamage": 3786.81,
+          "maxDamage": 3786.81
+        }
+      }
+    },
+    "88902": {
+      "samples": 439,
+      "emaDamage": 0.002,
+      "maxDamage": 49970.0,
+      "trials": {
+        "8000501": {
+          "samples": 1,
+          "emaDamage": 11265.71,
+          "maxDamage": 11265.71
+        }
+      }
+    },
+    "88903": {
+      "samples": 82,
+      "emaDamage": 0.002,
+      "maxDamage": 10496.0
+    },
+    "95101": {
+      "samples": 229,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "95102": {
+      "samples": 276,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "95103": {
+      "samples": 284,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "99001": {
+      "samples": 291,
+      "emaDamage": 0.002,
+      "maxDamage": 429259.0
+    },
+    "99002": {
+      "samples": 303,
+      "emaDamage": 0.002,
+      "maxDamage": 1768620.0
+    },
+    "99003": {
+      "samples": 1,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "99501": {
+      "samples": 378,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "99502": {
+      "samples": 206,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "99503": {
+      "samples": 199,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "100501": {
+      "samples": 192,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "100502": {
+      "samples": 263,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "100503": {
+      "samples": 190,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "104101": {
+      "samples": 162,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "104102": {
+      "samples": 200,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "104103": {
+      "samples": 302,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "104301": {
+      "samples": 39,
+      "emaDamage": 9597.946,
+      "maxDamage": 52366.0,
+      "trials": {
+        "8000501": {
+          "samples": 4,
+          "emaDamage": 1525.542,
+          "maxDamage": 1952.07
+        }
+      }
+    },
+    "104302": {
+      "samples": 34,
+      "emaDamage": 6379.605,
+      "maxDamage": 66350.0
+    },
+    "104303": {
+      "samples": 31,
+      "emaDamage": 2812.911,
+      "maxDamage": 27560.0
+    },
+    "882501": {
+      "samples": 1,
+      "emaDamage": 3950.0,
+      "maxDamage": 3950.0
+    },
+    "882502": {
+      "samples": 2,
+      "emaDamage": 17535.0,
+      "maxDamage": 18670.0
+    },
+    "882503": {
+      "samples": 3,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    }
+  }
+}

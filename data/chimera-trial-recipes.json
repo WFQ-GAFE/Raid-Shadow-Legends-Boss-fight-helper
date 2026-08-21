@@ -1,0 +1,358 @@
+{
+  "version": 1,
+  "source": "RAID 11.70.0 StaticAllianceData trial descriptions",
+  "recipes": [
+    {
+      "trialId": 8000501,
+      "name": "Ram/翅膀/简单：恐惧下技能伤害",
+      "form": "Ram",
+      "part": "Wing",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 490}, {"effectTypeId": 491}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["skillDamage"]
+    },
+    {
+      "trialId": 8000502,
+      "name": "Ram/翅膀/普通：五回合特殊伤害",
+      "form": "Ram",
+      "part": "Wing",
+      "difficulty": "Normal",
+      "automation": "assisted",
+      "actionGoal": "periodicDamage",
+      "requirements": [],
+      "requiredMechanics": ["enemyMaxHpDamage", "poison", "hpBurn", "smite", "allFiveBossTurns"]
+    },
+    {
+      "trialId": 8000503,
+      "name": "Ram/翅膀/苦难：耗尽对决条",
+      "form": "Ram",
+      "part": "Wing",
+      "difficulty": "Hard",
+      "automation": "manual",
+      "actionGoal": "manual",
+      "requirements": [],
+      "requiredMechanics": ["duelBarDepletion"]
+    },
+    {
+      "trialId": 8000504,
+      "name": "Ram/尾巴/简单：增加精准下六种减益",
+      "form": "Ram",
+      "part": "Tail",
+      "difficulty": "Easy",
+      "automation": "assisted",
+      "actionGoal": "applyDistinctEffects",
+      "requirements": [
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 220}, {"effectTypeId": 221}], "keepTurnsAtLeast": 1}
+      ],
+      "minimumBossEffects": 6,
+      "requiredMechanics": ["sixDistinctDebuffs"]
+    },
+    {
+      "trialId": 8000505,
+      "name": "Ram/尾巴/普通：虚弱与暴击增益下伤害",
+      "form": "Ram",
+      "part": "Tail",
+      "difficulty": "Normal",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 350}, {"effectTypeId": 351}], "keepTurnsAtLeast": 1},
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 240}, {"effectTypeId": 241}, {"effectTypeId": 260}, {"effectTypeId": 261}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["skillDamage"]
+    },
+    {
+      "trialId": 8000506,
+      "name": "Ram/尾巴/苦难：虚弱和降低防御下单次技能伤害",
+      "form": "Ram",
+      "part": "Tail",
+      "difficulty": "Hard",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 350}, {"effectTypeId": 351}], "keepTurnsAtLeast": 1},
+        {"scope": "boss", "anyOf": [{"effectTypeId": 150}, {"effectTypeId": 151}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["singleSkillDamage", "excludeCounterattack", "excludeEnemyMaxHpDamage"]
+    },
+    {
+      "trialId": 8000507,
+      "name": "Ram/爪子/简单：降低防御和完美隐身下伤害",
+      "form": "Ram",
+      "part": "Paw",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 150}, {"effectTypeId": 151}], "keepTurnsAtLeast": 1},
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 480}, {"effectTypeId": 481}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["damageAcrossBossTurns"]
+    },
+    {
+      "trialId": 8000508,
+      "name": "Ram/爪子/普通：六种减益与六种增益",
+      "form": "Ram",
+      "part": "Paw",
+      "difficulty": "Normal",
+      "automation": "assisted",
+      "actionGoal": "applyDistinctEffects",
+      "requirements": [],
+      "minimumBossEffects": 6,
+      "minimumActiveHeroEffects": 6,
+      "requiredMechanics": ["sixDistinctDebuffs", "sixDistinctBuffs", "threeBossTurns"]
+    },
+    {
+      "trialId": 8000509,
+      "name": "Ram/爪子/苦难：阻挡六个眩晕",
+      "form": "Ram",
+      "part": "Paw",
+      "difficulty": "Hard",
+      "automation": "assisted",
+      "actionGoal": "resistDebuffs",
+      "requirements": [
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 100}, {"effectTypeId": 840}, {"effectTypeId": 620}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["blockSixStuns", "allFiveBossTurns"]
+    },
+    {
+      "trialId": 8000510,
+      "name": "Lion/翅膀/简单：五种减益与增加防御下伤害",
+      "form": "Lion",
+      "part": "Wing",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 140}, {"effectTypeId": 141}], "keepTurnsAtLeast": 1}
+      ],
+      "minimumBossEffects": 5,
+      "requiredMechanics": ["singleSkillDamage", "excludeCounterattack"]
+    },
+    {
+      "trialId": 8000511,
+      "name": "Lion/翅膀/普通：护盾吸收伤害",
+      "form": "Lion",
+      "part": "Wing",
+      "difficulty": "Normal",
+      "automation": "automatic",
+      "actionGoal": "absorbDamage",
+      "requirements": [
+        {"scope": "activeHero", "effect": {"effectTypeId": 280}, "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["shieldAbsorption"]
+    },
+    {
+      "trialId": 8000512,
+      "name": "Lion/翅膀/苦难：阻挡伤害或不死",
+      "form": "Lion",
+      "part": "Wing",
+      "difficulty": "Hard",
+      "automation": "automatic",
+      "actionGoal": "absorbDamage",
+      "requirements": [
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 60}, {"effectTypeId": 320}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["blockedDamage"]
+    },
+    {
+      "trialId": 8000513,
+      "name": "Lion/尾巴/简单：五种增益下伤害",
+      "form": "Lion",
+      "part": "Tail",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [],
+      "minimumActiveHeroEffects": 5,
+      "requiredMechanics": ["damageAcrossBossTurns", "excludeEnemyMaxHpDamage"]
+    },
+    {
+      "trialId": 8000514,
+      "name": "Lion/尾巴/普通：降低速度和防御下技能伤害",
+      "form": "Lion",
+      "part": "Tail",
+      "difficulty": "Normal",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 170}, {"effectTypeId": 171}], "keepTurnsAtLeast": 1},
+        {"scope": "boss", "anyOf": [{"effectTypeId": 150}, {"effectTypeId": 151}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["skillDamage"]
+    },
+    {
+      "trialId": 8000515,
+      "name": "Lion/尾巴/苦难：反击和组队攻击",
+      "form": "Lion",
+      "part": "Tail",
+      "difficulty": "Hard",
+      "automation": "manual",
+      "actionGoal": "manual",
+      "requirements": [],
+      "requiredMechanics": ["counterattackDamage", "allyAttackDamage"]
+    },
+    {
+      "trialId": 8000516,
+      "name": "Lion/爪子/简单：血液榨取下伤害",
+      "form": "Lion",
+      "part": "Paw",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "effect": {"effectTypeId": 460}, "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["damage"]
+    },
+    {
+      "trialId": 8000517,
+      "name": "Lion/爪子/普通：十个减益且含降低抗性",
+      "form": "Lion",
+      "part": "Paw",
+      "difficulty": "Normal",
+      "automation": "assisted",
+      "actionGoal": "applyDistinctEffects",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 720}, {"effectTypeId": 721}], "keepTurnsAtLeast": 1}
+      ],
+      "minimumBossEffects": 10,
+      "requiredMechanics": ["tenDebuffApplications", "threeBossTurns"]
+    },
+    {
+      "trialId": 8000518,
+      "name": "Lion/爪子/苦难：反弹或苦痛连接伤害",
+      "form": "Lion",
+      "part": "Paw",
+      "difficulty": "Hard",
+      "automation": "manual",
+      "actionGoal": "manual",
+      "requirements": [],
+      "requiredMechanics": ["reflectDamage", "painLink", "passiveReflect"]
+    },
+    {
+      "trialId": 8000519,
+      "name": "Snake/翅膀/简单：阻挡主动技能下伤害",
+      "form": "Snake",
+      "part": "Wing",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "effect": {"effectTypeId": 290}, "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["skillDamage"]
+    },
+    {
+      "trialId": 8000520,
+      "name": "Snake/翅膀/普通：阻挡增益和燃烧且Boss无增益",
+      "form": "Snake",
+      "part": "Wing",
+      "difficulty": "Normal",
+      "automation": "assisted",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "effect": {"effectTypeId": 110}, "keepTurnsAtLeast": 1},
+        {"scope": "boss", "effect": {"effectTypeId": 470}, "keepTurnsAtLeast": 1}
+      ],
+      "maximumBossBuffs": 0,
+      "requiredMechanics": ["damageAcrossTwoBossTurns", "bossHasNoBuffs"]
+    },
+    {
+      "trialId": 8000521,
+      "name": "Snake/翅膀/苦难：九个减益且无阻挡主动技能",
+      "form": "Snake",
+      "part": "Wing",
+      "difficulty": "Hard",
+      "automation": "assisted",
+      "actionGoal": "applyDistinctEffects",
+      "requirements": [],
+      "minimumBossEffects": 9,
+      "forbiddenBossEffectTypeIds": [290],
+      "requiredMechanics": ["damage"]
+    },
+    {
+      "trialId": 8000522,
+      "name": "Snake/尾巴/简单：中毒敏感下中毒伤害",
+      "form": "Snake",
+      "part": "Tail",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "periodicDamage",
+      "requirements": [
+        {"scope": "boss", "effect": {"effectTypeId": 500}, "keepTurnsAtLeast": 1},
+        {"scope": "boss", "anyOf": [{"effectTypeId": 80}, {"effectTypeId": 81}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["poisonTickDamage"]
+    },
+    {
+      "trialId": 8000523,
+      "name": "Snake/尾巴/普通：全队存活三回合",
+      "form": "Snake",
+      "part": "Tail",
+      "difficulty": "Normal",
+      "automation": "automatic",
+      "actionGoal": "survive",
+      "requirements": [],
+      "minimumLivingAllies": 5,
+      "requiredMechanics": ["allFiveAlive", "threeBossTurns"]
+    },
+    {
+      "trialId": 8000524,
+      "name": "Snake/尾巴/苦难：多目标复活",
+      "form": "Snake",
+      "part": "Tail",
+      "difficulty": "Hard",
+      "automation": "manual",
+      "actionGoal": "manual",
+      "requirements": [],
+      "requiredMechanics": ["multiTargetRevive"]
+    },
+    {
+      "trialId": 8000525,
+      "name": "Snake/爪子/简单：降低攻击和增加速度下伤害",
+      "form": "Snake",
+      "part": "Paw",
+      "difficulty": "Easy",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 130}, {"effectTypeId": 131}], "keepTurnsAtLeast": 1},
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 160}, {"effectTypeId": 161}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["damageAcrossBossTurns"]
+    },
+    {
+      "trialId": 8000526,
+      "name": "Snake/爪子/普通：增加攻击和阻挡减益下伤害",
+      "form": "Snake",
+      "part": "Paw",
+      "difficulty": "Normal",
+      "automation": "automatic",
+      "actionGoal": "damageBoss",
+      "requirements": [
+        {"scope": "activeHero", "effect": {"effectTypeId": 100}, "keepTurnsAtLeast": 1},
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 120}, {"effectTypeId": 121}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["singleSkillDamage", "excludeCounterattack"]
+    },
+    {
+      "trialId": 8000527,
+      "name": "Snake/爪子/苦难：降低精准和增加抗性下抵抗",
+      "form": "Snake",
+      "part": "Paw",
+      "difficulty": "Hard",
+      "automation": "assisted",
+      "actionGoal": "resistDebuffs",
+      "requirements": [
+        {"scope": "boss", "anyOf": [{"effectTypeId": 230}, {"effectTypeId": 231}], "keepTurnsAtLeast": 1},
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 710}, {"effectTypeId": 711}], "keepTurnsAtLeast": 1}
+      ],
+      "requiredMechanics": ["resistEighteenDebuffs"]
+    }
+  ]
+}

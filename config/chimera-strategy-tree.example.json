@@ -1,0 +1,122 @@
+{
+  "name": "chimera-strategy-tree-v2",
+  "mode": "observe",
+  "scope": {
+    "battleKind": "AllianceChimera",
+    "difficulties": [
+      "Easy",
+      "Normal",
+      "Hard",
+      "Brutal",
+      "Nightmare",
+      "UltraNightmare"
+    ]
+  },
+  "objectives": {
+    "mandatoryTrialIds": [],
+    "minimumDamage": 0,
+    "minimumCompetitionPoints": 0,
+    "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+    "maxRegroupRetries": 10,
+    "onAllMetAtResult": "hold_for_user"
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "strategyTree": {
+    "type": "priority",
+    "name": "奇美拉总策略",
+    "children": [
+      {
+        "type": "rule",
+        "name": "效果栏接近上限时避免继续堆叠",
+        "when": {
+          "bossEffectSlotsAtLeast": 9
+        },
+        "action": {
+          "type": "cast",
+          "skillSlot": 1,
+          "target": {
+            "type": "boss"
+          }
+        }
+      },
+      {
+        "type": "rule",
+        "name": "下一形态前为缺少防御提升的队友做准备",
+        "when": {
+          "nextForm": "Lion",
+          "turnsUntilFormChangeAtMost": 1,
+          "anyAllyMissingEffect": {
+            "kind": "IncreaseDefense",
+            "turnsAtLeast": 2
+          },
+          "allAlliesEffectSlotsAtMost": 9
+        },
+        "action": {
+          "type": "cast",
+          "skillSlot": 2,
+          "target": {
+            "type": "lowestHpAlly"
+          }
+        }
+      },
+      {
+        "type": "branch",
+        "name": "按当前形态分流",
+        "when": {
+          "form": "Ram"
+        },
+        "then": {
+          "type": "priority",
+          "children": [
+            {
+              "type": "rule",
+              "name": "公羊形态且恐惧仍有两回合时攻击",
+              "when": {
+                "bossHasEffect": {
+                  "kind": "Fear",
+                  "turnsAtLeast": 2
+                }
+              },
+              "action": {
+                "type": "cast",
+                "skillSlot": 1,
+                "target": {
+                  "type": "boss"
+                }
+              }
+            }
+          ]
+        },
+        "else": {
+          "type": "pause"
+        }
+      },
+      {
+        "type": "rule",
+        "name": "安全兜底：技能1攻击奇美拉",
+        "when": {
+          "form": [
+            "Ultimate",
+            "Ram",
+            "Lion",
+            "Snake"
+          ]
+        },
+        "action": {
+          "type": "cast",
+          "skillSlot": 1,
+          "target": {
+            "type": "boss"
+          }
+        }
+      }
+    ]
+  }
+}

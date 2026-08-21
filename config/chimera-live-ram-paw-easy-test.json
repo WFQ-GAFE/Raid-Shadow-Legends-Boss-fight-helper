@@ -1,0 +1,104 @@
+{
+  "name": "gafee-chimera-ram-paw-easy-live-test",
+  "mode": "execute",
+  "scope": {"battleKind": "AllianceChimera"},
+  "team": {"heroIds": [39104, 21597, 34700, 21826, 26679]},
+  "objectives": {
+    "mandatoryTrialIds": [8000507],
+    "minimumDamage": 0,
+    "minimumCompetitionPoints": 0,
+    "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+    "maxRegroupRetries": 2,
+    "onAllMetAtResult": "hold_for_user"
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 1500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "rules": [
+    {
+      "name": "Ram-Paw-Easy：莉迪亚补降低防御",
+      "when": {
+        "eligibleTrialsAny": [8000507],
+        "activeHeroTypeId": 4716,
+        "bossMissingEffect": {"kind": "StatusReduceDefence", "turnsAtLeast": 2}
+      },
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：玛瓦拉补完美隐身",
+      "when": {
+        "eligibleTrialsAny": [8000507],
+        "activeHeroTypeId": 10436,
+        "anyAllyMissingEffect": {"kind": "Invisible", "turnsAtLeast": 2}
+      },
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：条件已具备后技能3攻击Boss",
+      "when": {
+        "eligibleTrialsAny": [8000507],
+        "bossHasEffect": {"kind": "StatusReduceDefence", "turnsAtLeast": 1},
+        "anyAllyHasEffect": {"kind": "Invisible", "turnsAtLeast": 1}
+      },
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "boss"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：条件已具备后技能2攻击Boss",
+      "when": {
+        "eligibleTrialsAny": [8000507],
+        "bossHasEffect": {"kind": "StatusReduceDefence", "turnsAtLeast": 1},
+        "anyAllyHasEffect": {"kind": "Invisible", "turnsAtLeast": 1}
+      },
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：条件已具备后技能1攻击Boss",
+      "when": {
+        "eligibleTrialsAny": [8000507],
+        "bossHasEffect": {"kind": "StatusReduceDefence", "turnsAtLeast": 1},
+        "anyAllyHasEffect": {"kind": "Invisible", "turnsAtLeast": 1}
+      },
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：准备条件期间技能3保护队友",
+      "when": {"eligibleTrialsAny": [8000507]},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：准备条件期间技能2攻击Boss",
+      "when": {"eligibleTrialsAny": [8000507]},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "Ram-Paw-Easy：准备条件期间技能1攻击Boss",
+      "when": {"eligibleTrialsAny": [8000507]},
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    },
+    {
+      "name": "非Ram或试炼已结束：技能3攻击Boss",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "boss"}}
+    },
+    {
+      "name": "非Ram或试炼已结束：技能3保护队友",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 3, "target": {"type": "lowestHpAlly"}}
+    },
+    {
+      "name": "非Ram或试炼已结束：技能2攻击Boss",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 2, "target": {"type": "boss"}}
+    },
+    {
+      "name": "非Ram或试炼已结束：技能1攻击Boss",
+      "when": {},
+      "action": {"type": "cast", "skillSlot": 1, "target": {"type": "boss"}}
+    }
+  ]
+}

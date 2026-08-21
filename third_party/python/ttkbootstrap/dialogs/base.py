@@ -1,0 +1,230 @@
+"""Core dialog base class for ttkbootstrap dialogs.
+
+This module provides the minimal base `Dialog` class used by other
+dialog implementations in this package.
+"""
+
+import tkinter
+from tkinter import BaseWidget
+from typing import Any, Optional, Tuple
+
+import ttkbootstrap as ttk
+from ttkbootstrap.internal.positioning import (
+    center_on_parent,
+    center_on_screen,
+    ensure_on_screen,
+)
+from ttkbootstrap.utils import windowing_system
+
+
+class Dialog(BaseWidget):
+    """A simple dialog base class."""
+
+    def __init__(self, parent: Optional[tkinter.Misc] = None, title: str = "", alert: bool = False) -> None:
+        """
+        Parameters:
+
+            parent (Widget):
+                Makes the window the logical parent of the dialog.
+                The dialog is displayed on top of its parent window.
+
+            title (str):
+                The string displayed as the title of the dialog.
+                This option is ignored on Mac OS X, where platform
+                guidelines forbid the use of a title on this kind of
+                dialog.
+
+            alert (bool):
+                Ring the display's bell when the dialog is shown.
+        """
+        BaseWidget._setup(self, parent, {})
+        self._winsys = windowing_system(self.master)
+        self._parent = parent
+        self._toplevel = None
+        self._title = title or " "
+        self._result = None
+        self._alert = alert
+        self._initial_focus = None
+
+    def _footprint(self) -> Tuple[int, int]:
+        """The size the dialog occupies once mapped.
+
+        A dialog is still withdrawn when it is positioned, so it has no realized
+        size and its *requested* size ignores the `minsize` floor `build` pins --
+        measuring that instead centers and clamps a smaller window than the one
+        the user sees.
+        """
+        toplevel = self._toplevel
+        min_width, min_height = toplevel.wm_minsize()
+        return (
+            max(toplevel.winfo_reqwidth(), min_width),
+            max(toplevel.winfo_reqheight(), min_height),
+        )
+
+    def _center(self) -> Tuple[int, int]:
+        """Coordinates that center the dialog over its parent (or the screen)."""
+        parent = self._parent if self._parent is not None else self.master
+        if parent is not None:
+            return center_on_parent(self._toplevel, parent, size=self._footprint())
+        return center_on_screen(self._toplevel, size=self._footprint())
+
+    def _locate(self) -> None:
+        """Center the dialog on its parent, clamped onto that monitor.
+
+        The coordinates are applied explicitly. Leaving a transient dialog to the
+        window manager works on Windows/macOS but not on X11, where an unplaced
+        window lands at the virtual-desktop origin -- between monitors on a
+        multi-head setup.
+        """
+        toplevel = self._toplevel
+        toplevel.update_idletasks()
+        x, y = self._center()
+        try:
+            x, y = ensure_on_screen(toplevel, x, y, size=self._footprint())
+        except Exception:
+            pass
+        toplevel.geometry(f"+{int(x)}+{int(y)}")
+
+    def show(self, position: Optional[Tuple[int, int]] = None, wait_for_result: bool = True) -> None:
+        """Show the popup dialog.
+
+        Parameters:
+
+            position (tuple[int, int], optional):
+                The x and y coordinates used to position the dialog. If not
+                given, the dialog is centered on the parent window.
+
+            wait_for_result (bool):
+                Grab input focus and block until the dialog is closed.
+        """
+        self.update_idletasks()
+        self._result = None
+        self.build()
+
+        if position is None:
+            self._locate()
+        else:
+            try:
+                x, y = position
+                # Clamp so an explicit position near a screen edge doesn't push
+                # the dialog partly (or fully) off-screen.
+                x, y = ensure_on_screen(self._toplevel, x, y, size=self._footprint())
+                self._toplevel.geometry(f'+{x}+{y}')
+            except Exception:
+                self._locate()
+
+        self._toplevel.deiconify()
+        if self._alert:
+            self._toplevel.bell()
+
+        if self._initial_focus:
+            self._initial_focus.focus_force()
+
+        if wait_for_result:
+            self._toplevel.grab_set()
+            self._toplevel.wait_window()
+
+    def create_body(self, master: tkinter.Misc) -> None:
+        """Create the dialog body.
+
+        This method should be overridden and is called by the `build`
+        method. Set the `self._initial_focus` for the widget that
+        should receive the initial focus.
+
+        Parameters:
+
+            master (Widget):
+                The parent widget.
+        """
+        raise NotImplementedError
+
+    def create_buttonbox(self, master: tkinter.Misc) -> None:
+        """Create the dialog button box.
+
+        This method should be overridden and is called by the `build`
+        method. Set the `self._initial_focus` for the button that
+        should receive the initial focus.
+
+        Parameters:
+
+            master (Widget):
+                The parent widget.
+        """
+        raise NotImplementedError
+
+    def build(self) -> None:
+        """Build the dialog from settings"""
+
+        # setup toplevel based on widowing system
+        if self._winsys == "win32":
+            self._toplevel = ttk.Toplevel(
+                transient=self.master,
+                title=self._title,
+                resizable=(False, False),
+                minsize=(250, 15),
+                iconify=True,
+            )
+        else:
+            self._toplevel = ttk.Toplevel(
+                transient=self.master,
+                title=self._title,
+                resizable=(False, False),
+                minsize=(250, 15),
+                window_type="dialog",
+                iconify=True,
+            )
+
+        self._toplevel.withdraw()  # reset the iconify state
+
+        # bind <Escape> event to window close
+        self._toplevel.bind("<Escape>", lambda _: self.close())
+
+        # create widgets
+        self.create_body(self._toplevel)
+        self.create_buttonbox(self._toplevel)
+
+        # update the window before showing
+        self._toplevel.update_idletasks()
+
+        # Explicitly set geometry to ensure proper sizing on all platforms
+        width = self._toplevel.winfo_reqwidth()
+        height = self._toplevel.winfo_reqheight()
+        if width > 0 and height > 0:
+            self._toplevel.geometry(f"{width}x{height}")        
+
+    def close(self) -> None:
+        """Close (destroy) the dialog window.
+
+        The public way to dismiss a dialog. Safe to call more than once and
+        before `show()` (a no-op if the window was never built or is already
+        gone). Subclasses that draw their own close button should route its
+        `command` here rather than reaching into `self._toplevel`.
+        """
+        toplevel = self._toplevel
+        if toplevel is None:
+            return
+        try:
+            if toplevel.winfo_exists():
+                toplevel.destroy()
+        except tkinter.TclError:
+            # The interpreter was already torn down (winfo_exists raises once
+            # the application is destroyed); nothing left to close.
+            pass
+
+    @property
+    def result(self) -> Any:
+        """Returns the result of the dialog.
+
+        Safe to read whether the toplevel is already destroyed (e.g.
+        ``QueryDialog`` destroys it synchronously on submit) or only queued for
+        destruction (``MessageDialog`` uses ``after_idle``); the grab is released
+        only if the window still exists.
+        """
+        toplevel = self._toplevel
+        if toplevel is not None:
+            try:
+                if toplevel.winfo_exists():
+                    toplevel.grab_release()
+            except tkinter.TclError:
+                pass
+        return self._result

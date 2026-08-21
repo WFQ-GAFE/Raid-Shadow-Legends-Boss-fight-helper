@@ -1,0 +1,67 @@
+{
+  "name": "gafee-chimera-effect-mythical-transform-live-test",
+  "mode": "execute",
+  "scope": {
+    "battleKind": "AllianceChimera"
+  },
+  "objectives": {
+    "mandatoryTrialIds": [],
+    "minimumDamage": 0,
+    "minimumCompetitionPoints": 0,
+    "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+    "maxRegroupRetries": 0,
+    "onAllMetAtResult": "hold_for_user"
+  },
+  "safety": {
+    "requireManualCommandWindow": true,
+    "requireAcceptableTargetSet": true,
+    "requireFreshSnapshotMs": 1500,
+    "maxCommandsPerTurn": 1,
+    "onUnknownState": "pause",
+    "onNoMatchingRule": "pause"
+  },
+  "strategyTree": {
+    "type": "branch",
+    "when": {
+      "form": "Ultimate",
+      "activeHeroTypeId": 8256,
+      "activeHeroFormIndex": 0,
+      "activeHeroIsMetamorph": true,
+      "activeHeroIsTransformed": false,
+      "transformationReady": true,
+      "chimeraTurnCount": 0,
+      "bossHasEffect": {
+        "kind": "StatusReduceDefence",
+        "turnsAtLeast": 3
+      },
+      "activeHeroHasEffect": {
+        "kind": "StatusIncreaseDefence",
+        "turnsAtLeast": 2
+      }
+    },
+    "then": {
+      "type": "rule",
+      "name": "实机效果链：御影夫人切换形态",
+      "when": {
+        "bossHasEffect": {
+          "kind": "IncreaseDamageTaken",
+          "turnsAtLeast": 2
+        },
+        "bossEffectSlotsAtLeast": 2,
+        "bossEffectSlotsAtMost": 2,
+        "activeHeroEffectSlotsAtMost": 5,
+        "allAlliesEffectSlotsAtMost": 6,
+        "incompleteTrialsAll": [8000501],
+        "trialProgressBelow": {
+          "8000501": 0.01
+        }
+      },
+      "action": {
+        "type": "transform"
+      }
+    },
+    "else": {
+      "type": "pause"
+    }
+  }
+}

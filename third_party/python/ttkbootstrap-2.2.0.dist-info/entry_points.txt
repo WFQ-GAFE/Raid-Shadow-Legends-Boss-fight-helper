@@ -1,0 +1,3 @@
+[console_scripts]
+ttkb = ttkbootstrap.cli:main
+ttkbootstrap = ttkbootstrap.cli:main
