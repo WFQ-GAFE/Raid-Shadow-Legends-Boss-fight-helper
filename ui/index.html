@@ -5,9 +5,82 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#09121f" />
     <title>Alliance Boss Strategy Studio</title>
+    <style>
+      html, body, #root { width: 100%; height: 100%; margin: 0; }
+      body { background: #07101b; overflow: hidden; }
+      #startup-shell {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        color: #e9f5ff;
+        background: #07101b;
+        font-family: Inter, "Segoe UI", Arial, sans-serif;
+      }
+      #startup-shell .startup-mark {
+        display: grid;
+        place-items: center;
+        width: 54px;
+        height: 54px;
+        border: 1px solid #235b63;
+        border-radius: 16px;
+        color: #59d4c9;
+        background: #0d2630;
+        font-size: 28px;
+      }
+      #startup-shell h1 { margin: 18px 0 6px; font-size: 19px; font-weight: 700; }
+      #startup-shell p { margin: 0; color: #8ca5b8; font-size: 12px; }
+      #startup-shell .startup-spinner {
+        width: 28px;
+        height: 28px;
+        margin-top: 22px;
+        border: 2px solid #183746;
+        border-top-color: #59d4c9;
+        border-radius: 50%;
+        animation: startup-spin .8s linear infinite;
+      }
+      #startup-shell.startup-failed .startup-spinner { display: none; }
+      #startup-shell button {
+        display: none;
+        margin-top: 22px;
+        padding: 9px 18px;
+        border: 1px solid #4fbdb5;
+        border-radius: 9px;
+        color: #07101b;
+        background: #59d4c9;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      #startup-shell.startup-failed button { display: block; }
+      @keyframes startup-spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
   <body>
+    <div id="startup-shell" role="status" aria-live="polite">
+      <div class="startup-mark" aria-hidden="true">⚔</div>
+      <h1>Initializing Alliance Boss Strategy Studio</h1>
+      <p>正在初始化联盟 Boss 策略中心…</p>
+      <span class="startup-spinner" aria-hidden="true"></span>
+      <button type="button" onclick="location.reload()">Reload / 重新载入</button>
+    </div>
     <div id="root"></div>
+    <script>
+      window.setTimeout(function () {
+        if (document.documentElement.dataset.appMounted === 'true') return
+        var shell = document.getElementById('startup-shell')
+        if (!shell) return
+        shell.classList.add('startup-failed')
+        var title = shell.querySelector('h1')
+        var detail = shell.querySelector('p')
+        if (title) title.textContent = 'The interface did not finish loading'
+        if (detail) detail.textContent = '界面未完成载入，可以重新载入页面。'
+      }, 15000)
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

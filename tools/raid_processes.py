@@ -63,6 +63,28 @@ user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
 
 
+def is_supported_raid_executable(value: str | Path) -> bool:
+    """Accept Plarium's RAID executable on any drive or user-specific root.
+
+    The old implementation compared the process directory with one developer
+    machine's absolute path.  Keeping the executable and installation-layout
+    checks preserves the narrow injection boundary while allowing normal
+    Plarium installations on another Windows PC.
+    """
+    try:
+        path = Path(value).resolve()
+    except (OSError, TypeError, ValueError):
+        return False
+    parents = path.parents
+    return bool(
+        path.name.casefold() == "raid.exe"
+        and len(parents) >= 3
+        and parents[0].name.casefold() == "build"
+        and parents[1].name.casefold() == "raid-shadow-legends"
+        and parents[2].name.casefold() == "standaloneapps"
+    )
+
+
 def process_path(pid: int) -> str | None:
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:

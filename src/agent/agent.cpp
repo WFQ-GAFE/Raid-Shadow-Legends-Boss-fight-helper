@@ -18,7 +18,9 @@ namespace {
 
 constexpr UINT_PTR kDecisionCaptureTimerId = 0x5243;
 constexpr UINT_PTR kSelectionCaptureTimerId = 0x5244;
+constexpr UINT_PTR kAccountRefreshTimerId = 0x5245;
 constexpr UINT kSelectionCaptureIntervalMs = 500;
+constexpr UINT kAccountRefreshIntervalMs = 1000;
 
 struct ClassLocation {
     Il2CppClass* klass{};
@@ -42,6 +44,8 @@ using InstancePointerReturnPointerMethod =
 using InstanceIntGetter = std::int32_t(__fastcall*)(void*, const MethodInfo*);
 using InstanceBoolGetter = bool(__fastcall*)(void*, const MethodInfo*);
 using InstanceInt64Getter = std::int64_t(__fastcall*)(void*, const MethodInfo*);
+using InstanceInt64IntVoidMethod = void(__fastcall*)(
+    void*, std::int64_t, std::int32_t, const MethodInfo*);
 
 constexpr std::uint32_t kCommandMagic = 0x5243484D;  // RCHM
 constexpr std::uint32_t kCommandVersion = 4;
@@ -49,7 +53,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 3;
-constexpr std::uint64_t kAgentBuildId = 2026082201ULL;
+constexpr std::uint64_t kAgentBuildId = 2026082207ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -232,6 +236,139 @@ std::atomic<std::int64_t> g_last_chimera_competition_points{};
 SRWLOCK g_active_skill_lock = SRWLOCK_INIT;
 std::atomic<std::uint64_t> g_state_sequence{};
 
+struct HydraDamageObservation {
+    void* hero{};
+    std::int32_t actor_id{INT_MIN};
+    std::int64_t raw_damage{};
+};
+
+struct HydraUiDamageObservation {
+    std::int32_t head_id{INT_MIN};
+    std::int64_t damage{};
+};
+
+std::array<HydraDamageObservation, 96> g_hydra_damage_observations{};
+std::int64_t g_hydra_accumulated_damage_raw{};
+std::array<HydraUiDamageObservation, 512> g_hydra_ui_damage_observations{};
+std::int64_t g_hydra_ui_total_damage{};
+bool g_hydra_ui_damage_valid{};
+void* g_hydra_damage_battle_context{};
+SRWLOCK g_hydra_damage_lock = SRWLOCK_INIT;
+
+void reset_hydra_damage_tracker(void* battle_context = nullptr) {
+    AcquireSRWLockExclusive(&g_hydra_damage_lock);
+    g_hydra_damage_observations.fill({});
+    g_hydra_accumulated_damage_raw = 0;
+    g_hydra_ui_damage_observations.fill({});
+    g_hydra_ui_total_damage = 0;
+    g_hydra_ui_damage_valid = false;
+    g_hydra_damage_battle_context = battle_context;
+    ReleaseSRWLockExclusive(&g_hydra_damage_lock);
+}
+
+void observe_hydra_ui_damage(std::int32_t head_id, std::int64_t damage) {
+    if (head_id < 0 || damage < 0) {
+        return;
+    }
+    AcquireSRWLockExclusive(&g_hydra_damage_lock);
+    HydraUiDamageObservation* observation = nullptr;
+    HydraUiDamageObservation* empty = nullptr;
+    for (HydraUiDamageObservation& candidate :
+         g_hydra_ui_damage_observations) {
+        if (candidate.head_id == INT_MIN && !empty) {
+            empty = &candidate;
+        }
+        if (candidate.head_id == head_id) {
+            observation = &candidate;
+            break;
+        }
+    }
+    if (!observation) {
+        observation = empty;
+        if (observation) {
+            observation->head_id = head_id;
+        }
+    }
+    if (observation) {
+        if (damage > observation->damage) {
+            const std::int64_t delta = damage - observation->damage;
+            if (g_hydra_ui_total_damage <= LLONG_MAX - delta) {
+                g_hydra_ui_total_damage += delta;
+            }
+            observation->damage = damage;
+        }
+        g_hydra_ui_damage_valid = true;
+    }
+    ReleaseSRWLockExclusive(&g_hydra_damage_lock);
+}
+
+bool read_hydra_ui_damage(std::int64_t* total, std::size_t* head_count) {
+    if (!total || !head_count) {
+        return false;
+    }
+    AcquireSRWLockShared(&g_hydra_damage_lock);
+    const bool valid = g_hydra_ui_damage_valid;
+    *total = g_hydra_ui_total_damage;
+    *head_count = 0;
+    if (valid) {
+        for (const HydraUiDamageObservation& observation :
+             g_hydra_ui_damage_observations) {
+            if (observation.head_id != INT_MIN) {
+                ++*head_count;
+            }
+        }
+    }
+    ReleaseSRWLockShared(&g_hydra_damage_lock);
+    return valid;
+}
+
+std::int64_t observe_hydra_damage(void* battle_context,
+                                  std::int32_t actor_id, void* hero,
+                                  std::int64_t raw_damage) {
+    if (!battle_context || !hero || actor_id < 0 || raw_damage < 0) {
+        return -1;
+    }
+    AcquireSRWLockExclusive(&g_hydra_damage_lock);
+    if (g_hydra_damage_battle_context != battle_context) {
+        g_hydra_damage_observations.fill({});
+        g_hydra_accumulated_damage_raw = 0;
+        g_hydra_damage_battle_context = battle_context;
+    }
+
+    HydraDamageObservation* observation = nullptr;
+    HydraDamageObservation* empty = nullptr;
+    for (HydraDamageObservation& candidate : g_hydra_damage_observations) {
+        if (!candidate.hero && !empty) {
+            empty = &candidate;
+        }
+        if (candidate.hero == hero && candidate.actor_id == actor_id) {
+            observation = &candidate;
+            break;
+        }
+    }
+    if (!observation) {
+        observation = empty;
+        if (observation) {
+            observation->hero = hero;
+            observation->actor_id = actor_id;
+            observation->raw_damage = 0;
+        }
+    }
+    if (observation) {
+        const std::int64_t delta = raw_damage >= observation->raw_damage
+            ? raw_damage - observation->raw_damage
+            : raw_damage;
+        if (delta > 0 &&
+            g_hydra_accumulated_damage_raw <= LLONG_MAX - delta) {
+            g_hydra_accumulated_damage_raw += delta;
+        }
+        observation->raw_damage = raw_damage;
+    }
+    const std::int64_t total = g_hydra_accumulated_damage_raw;
+    ReleaseSRWLockExclusive(&g_hydra_damage_lock);
+    return total;
+}
+
 HWND g_game_window{};
 WNDPROC g_original_window_proc{};
 UINT g_command_message{};
@@ -253,11 +390,14 @@ std::atomic<std::uint64_t> g_takeover_sequence{};
 SRWLOCK g_takeover_lock = SRWLOCK_INIT;
 std::atomic<LONG> g_internal_action_depth{};
 std::atomic<void*> g_app_model_instance{};
+const MethodInfo* g_app_model_instance_method{};
 const MethodInfo* g_app_model_read_user_method{};
 const MethodInfo* g_user_read_guard_dispose_method{};
 
 bool validate_takeover_account();
 bool object_has_class_name(void* object, const char* expected);
+void* refresh_app_model_instance();
+void log_account_identity(void* app_model_instance);
 
 constexpr LONG kScreenUnknown = 0;
 constexpr LONG kScreenTeamSelection = 1;
@@ -293,6 +433,8 @@ InstancePointerVoidMethod g_original_hydra_selection_refresh{};
 InstanceVoidMethod g_original_hydra_selection_start_battle_click{};
 InstanceInt64Getter g_original_result_total_damage{};
 InstanceInt64Getter g_original_hydra_result_total_damage{};
+InstanceInt64IntVoidMethod g_original_hydra_damage_counter_change{};
+std::atomic<bool> g_hydra_damage_counter_hook_installed{};
 const MethodInfo* g_selection_filled_method{};
 const MethodInfo* g_selection_heroes_method{};
 const MethodInfo* g_selection_hero_method{};
@@ -313,7 +455,7 @@ const MethodInfo* g_hydra_selection_start_battle_click_method{};
 const MethodInfo* g_execute_cancel_chimera_method{};
 const MethodInfo* g_cancel_chimera_method{};
 const MethodInfo* g_hydra_total_damage_method{};
-const MethodInfo* g_hydra_result_restart_method{};
+const MethodInfo* g_hydra_result_restart_pressed_method{};
 
 struct ExecutedTurnToken {
     std::uint64_t mode{};
@@ -489,9 +631,7 @@ void publish_takeover_state_locked(const char* reason,
             output << selection.hero_type_ids[index];
         }
         output << "],\"canStart\":"
-               << (selection.valid && selection.filled &&
-                           selection.hero_count ==
-                               (selection.hydra ? 6U : 5U) &&
+               << (selection.valid &&
                            g_selection_context.load(std::memory_order_acquire) &&
                            !selection.quick_battle
                        ? "true"
@@ -1393,6 +1533,16 @@ bool safe_runtime_invoke_object(const MethodInfo* method, void* instance,
         *result = nullptr;
         return false;
     }
+}
+
+void* refresh_app_model_instance() {
+    void* latest = nullptr;
+    if (safe_runtime_invoke_object(g_app_model_instance_method, nullptr,
+                                   &latest) && latest) {
+        g_app_model_instance.store(latest, std::memory_order_release);
+        return latest;
+    }
+    return g_app_model_instance.load(std::memory_order_acquire);
 }
 
 bool safe_runtime_invoke_one_bool_object(const MethodInfo* method,
@@ -2583,12 +2733,13 @@ const MethodInfo* find_hydra_total_damage_method(Il2CppClass* klass) {
         }
         char* parameter_type =
             g_api.type_get_name(g_api.method_get_param(method, 0));
-        const bool accepts_snapshot = parameter_type &&
-            std::strstr(parameter_type, "BattleStateSnapshot") != nullptr;
+        const bool accepts_battle_hero = parameter_type &&
+            std::strcmp(parameter_type,
+                        "SharedModel.Battle.Core.Hero.BattleHero") == 0;
         if (parameter_type) {
             g_api.free(parameter_type);
         }
-        if (accepts_snapshot) {
+        if (accepts_battle_hero) {
             return method;
         }
     }
@@ -2762,8 +2913,7 @@ AllianceBossIdentity identify_alliance_boss(
     AcquireSRWLockShared(&g_ui_state_lock);
     started = g_last_started_selection;
     ReleaseSRWLockShared(&g_ui_state_lock);
-    identity.started_selection_valid = started.valid && started.filled &&
-        started.hero_count == (started.hydra ? 6U : 5U);
+    identity.started_selection_valid = started.valid;
     identity.active_hero_matches_team = identity.started_selection_valid &&
         active_hero_valid &&
         selection_contains_runtime_hero_type(started, active_hero_type_id);
@@ -3365,16 +3515,16 @@ void drain_pending_lifecycle_command() {
                 kTakeoverBossModeHydra ||
             !object_has_class_name(
                 context, "BattleFinishAllianceHydraDialogContext") ||
-            !g_hydra_result_restart_method) {
+            !g_hydra_result_restart_pressed_method) {
             publish_lifecycle_ack(request, "rejected",
                                   "hydra_result_context_changed");
             return;
         }
-        diagnostic("lifecycle_hydra_result_restart nonce=" +
+        diagnostic("lifecycle_hydra_result_regroup_pressed nonce=" +
                    std::to_string(request.nonce));
         g_internal_action_depth.fetch_add(1, std::memory_order_acq_rel);
         const bool invoked = safe_runtime_invoke_void(
-            g_hydra_result_restart_method, context);
+            g_hydra_result_restart_pressed_method, context);
         g_internal_action_depth.fetch_sub(1, std::memory_order_acq_rel);
         if (!invoked) {
             publish_lifecycle_ack(request, "exception",
@@ -3554,7 +3704,7 @@ void drain_pending_lifecycle_command() {
         publish_lifecycle_ack(request, "submitted", "heroes_selected");
         return;
     }
-    if (selection.valid && selection.auto_battle) {
+    if (selection.auto_battle) {
         g_internal_action_depth.fetch_add(1, std::memory_order_acq_rel);
         const bool disabled = disable_selection_auto_battle(context);
         g_internal_action_depth.fetch_sub(1, std::memory_order_acq_rel);
@@ -3581,9 +3731,7 @@ void drain_pending_lifecycle_command() {
     const MethodInfo* start_battle_click_method = selection.hydra
         ? g_hydra_selection_start_battle_click_method
         : g_selection_start_battle_click_method;
-    if (!selection.valid || !selection.filled ||
-        selection.hero_count != (selection.hydra ? 6U : 5U) ||
-        selection.auto_battle || selection.quick_battle ||
+    if (!selection.valid || selection.auto_battle || selection.quick_battle ||
         !start_battle_click_method) {
         publish_lifecycle_ack(request, "rejected",
                               "team_selection_guard_failed");
@@ -3639,6 +3787,10 @@ LRESULT CALLBACK agent_window_proc(HWND window, UINT message, WPARAM wparam,
         }
         return 0;
     }
+    if (message == WM_TIMER && wparam == kAccountRefreshTimerId) {
+        log_account_identity(refresh_app_model_instance());
+        return 0;
+    }
     return CallWindowProcW(g_original_window_proc, window, message, wparam, lparam);
 }
 
@@ -3678,6 +3830,11 @@ bool install_window_dispatch() {
     g_game_window = window;
     g_original_window_proc = reinterpret_cast<WNDPROC>(previous);
     g_window_dispatch_installed.store(true, std::memory_order_release);
+    if (!SetTimer(g_game_window, kAccountRefreshTimerId,
+                  kAccountRefreshIntervalMs, nullptr)) {
+        diagnostic("account_refresh_timer_failed error=" +
+                   std::to_string(GetLastError()));
+    }
     diagnostic("window_dispatch_installed window=" +
                std::to_string(reinterpret_cast<std::uintptr_t>(window)) +
                " thread=" + std::to_string(g_window_thread_id));
@@ -3690,6 +3847,7 @@ bool remove_window_dispatch() {
     if (g_game_window) {
         KillTimer(g_game_window, kDecisionCaptureTimerId);
         KillTimer(g_game_window, kSelectionCaptureTimerId);
+        KillTimer(g_game_window, kAccountRefreshTimerId);
     }
     if (!g_window_dispatch_installed.exchange(false,
                                                std::memory_order_acq_rel)) {
@@ -3724,6 +3882,7 @@ void capture_battle_context(void* context) {
         g_last_chimera_damage.store(0, std::memory_order_release);
         g_last_chimera_competition_points.store(0,
                                                 std::memory_order_release);
+        reset_hydra_damage_tracker(context);
     }
     void* mode = nullptr;
     void* processor = nullptr;
@@ -4731,6 +4890,8 @@ struct ChimeraBattleMetrics {
     bool valid{};
     double damage{};
     std::int64_t competition_points{};
+    const char* source{"unavailable"};
+    std::size_t sample_count{};
 };
 
 ChimeraBattleMetrics read_chimera_battle_metrics(void* mode) {
@@ -4758,6 +4919,8 @@ ChimeraBattleMetrics read_chimera_battle_metrics(void* mode) {
         constexpr double kFixedOne = 4294967296.0;
         metrics.damage = static_cast<double>(total_damage_raw) / kFixedOne;
         metrics.valid = multiplier_statistics.valid;
+        metrics.source = "chimera_statistics";
+        metrics.sample_count = multiplier_statistics.count;
     }
     void* points = nullptr;
     if (safe_read_field(state, "ChimeraCompetitionPoints", nullptr, points) &&
@@ -4778,51 +4941,75 @@ ChimeraBattleMetrics read_chimera_battle_metrics(void* mode) {
 
 ChimeraBattleMetrics read_hydra_battle_metrics(void* mode) {
     ChimeraBattleMetrics metrics{};
-    void* context = nullptr;
-    void* state = nullptr;
-    Il2CppClass* state_class = nullptr;
-    if (!battle_model_objects(mode, &context, &state) ||
-        !safe_read(state, 0, state_class) || !state_class) {
+    std::int64_t ui_total_damage = 0;
+    std::size_t ui_head_count = 0;
+    if (read_hydra_ui_damage(&ui_total_damage, &ui_head_count)) {
+        metrics.damage = static_cast<double>(ui_total_damage);
+        metrics.valid = true;
+        metrics.source = "hydra_ui_counter";
+        metrics.sample_count = ui_head_count;
         return metrics;
     }
-    std::int64_t damage_raw = 0;
-    bool damage_read = false;
 
-    // HydraTotalTakenDamage is an extension over BattleStateSnapshot in the
-    // current game build, not an instance property on BattleState.  Take a
-    // calculation-only snapshot so head replacement and exposed necks are
-    // accounted for by the game's own accumulated statistics.
-    const MethodInfo* take_snapshot = g_api.class_get_method_from_name(
-        state_class, "TakeSnapshot", 1);
-    void* snapshot = nullptr;
-    if (g_hydra_total_damage_method &&
-        safe_runtime_invoke_one_bool_object(take_snapshot, state, true,
-                                            &snapshot)) {
-        damage_read = runtime_get_fixed_raw_one_object(
-            g_hydra_total_damage_method, snapshot, &damage_raw);
+    void* context = nullptr;
+    void* state = nullptr;
+    if (!battle_model_objects(mode, &context, &state)) {
+        return metrics;
     }
 
-    // Retain compatibility with builds that expose the total directly.
-    if (!damage_read) {
-        const MethodInfo* damage_getter = g_api.class_get_method_from_name(
-            state_class, "get_HydraTotalTakenDamage", 0);
-        damage_read = runtime_get_fixed_raw(damage_getter, state, &damage_raw);
+    // In RAID 11.70 / Unity 6000.3, HydraTotalTakenDamage is overloaded for
+    // BattleHero and BattleHeroSnapshot.  The BattleStateSnapshot overload
+    // assumed by the earlier implementation does not exist.  Read the four
+    // current model heroes, then retain each object's monotonic contribution
+    // so a replacement head starts a new contribution instead of erasing the
+    // damage dealt to the previous object.
+    void* bosses_dictionary = nullptr;
+    if (!safe_read(mode, 128, bosses_dictionary)) {
+        return metrics;
     }
-    if (!damage_read) {
-        const MethodInfo* damage_method = g_api.class_get_method_from_name(
-            state_class, "HydraTotalTakenDamage", 0);
-        damage_read = runtime_get_fixed_raw(damage_method, state, &damage_raw);
-    }
-    if (!damage_read) {
-        damage_read = safe_read_field(
-            state, "HydraTotalTakenDamage",
-            "<HydraTotalTakenDamage>k__BackingField", damage_raw);
+    const IntObjectDictionaryItems bosses =
+        read_int_object_dictionary(bosses_dictionary);
+    if (!bosses.valid) {
+        return metrics;
     }
 
-    if (damage_read && damage_raw >= 0) {
+    std::int64_t accumulated_raw = -1;
+    bool used_extension = false;
+    bool used_field_fallback = false;
+    for (std::size_t index = 0; index < bosses.count; ++index) {
+        const std::int32_t actor_id = bosses.keys[index];
+        void* hero = find_battle_hero(mode, actor_id);
+        if (!hero) {
+            continue;
+        }
+        std::int64_t head_damage_raw = 0;
+        bool damage_read = runtime_get_fixed_raw_one_object(
+            g_hydra_total_damage_method, hero, &head_damage_raw);
+        used_extension = used_extension || damage_read;
+        if (!damage_read) {
+            damage_read = safe_read_field(
+                hero, "DamageTaken", nullptr, head_damage_raw);
+            used_field_fallback = used_field_fallback || damage_read;
+        }
+        if (!damage_read || head_damage_raw < 0) {
+            continue;
+        }
+        const std::int64_t observed = observe_hydra_damage(
+            context, actor_id, hero, head_damage_raw);
+        if (observed >= 0) {
+            accumulated_raw = observed;
+            ++metrics.sample_count;
+        }
+    }
+
+    if (metrics.sample_count > 0 && accumulated_raw >= 0) {
         constexpr double kFixedOne = 4294967296.0;
-        metrics.damage = static_cast<double>(damage_raw) / kFixedOne;
+        metrics.damage = static_cast<double>(accumulated_raw) / kFixedOne;
         metrics.valid = true;
+        metrics.source = used_extension
+            ? "hydra_total_taken_damage"
+            : (used_field_fallback ? "hydra_damage_taken_field"
+                                   : "unavailable");
     }
     return metrics;
 }
@@ -5069,6 +5256,8 @@ void capture_battle_state(void* mode, void* skill_data,
            << ",\"metricsAvailable\":"
            << (metrics.valid ? "true" : "false")
            << ",\"currentDamage\":" << metrics.damage
+           << ",\"metricsSource\":\"" << metrics.source << "\""
+           << ",\"metricsSampleCount\":" << metrics.sample_count
            << ",\"currentCompetitionPoints\":"
            << metrics.competition_points << "}"
            << ",\"activeHeroId\":" << active_actor_id
@@ -5347,6 +5536,8 @@ void capture_decision_state(void* generator) {
            << ",\"metricsAvailable\":"
            << (metrics.valid ? "true" : "false")
            << ",\"currentDamage\":" << metrics.damage
+           << ",\"metricsSource\":\"" << metrics.source << "\""
+           << ",\"metricsSampleCount\":" << metrics.sample_count
            << ",\"currentCompetitionPoints\":"
            << metrics.competition_points << "}"
            << ",\"activeHeroId\":" << runtime.active_hero_id
@@ -5484,7 +5675,7 @@ void capture_selection_state(void* self, const char* reason,
         g_selection_user.store(selection_user, std::memory_order_release);
     } else if (safe_runtime_invoke_nullable_int_none(
                    g_app_model_read_user_method,
-                   g_app_model_instance.load(std::memory_order_acquire),
+                   refresh_app_model_instance(),
                    &acquired_selection_user)) {
         // UserReadGuard is valid only for its acquisition scope.  HeroPicked
         // does not provide a guard and does not necessarily trigger Refresh,
@@ -5572,12 +5763,14 @@ void capture_selection_state(void* self, const char* reason,
                      stage_read && auto_read && quick_read;
     if (snapshot.valid) {
         for (std::size_t index = 0; index < snapshot.hero_count; ++index) {
-            if (snapshot.hero_ids[index] <= 0 ||
-                snapshot.hero_type_ids[index] <= 0) {
+            const bool has_hero = snapshot.hero_ids[index] > 0;
+            const bool has_type = snapshot.hero_type_ids[index] > 0;
+            if (has_hero != has_type) {
                 snapshot.valid = false;
             }
             for (std::size_t previous = 0; previous < index; ++previous) {
-                if (snapshot.hero_ids[index] == snapshot.hero_ids[previous]) {
+                if (has_hero &&
+                    snapshot.hero_ids[index] == snapshot.hero_ids[previous]) {
                     snapshot.valid = false;
                 }
             }
@@ -5673,6 +5866,7 @@ void __fastcall hook_selection_on_enabled(void* self,
     g_selection_user.store(nullptr, std::memory_order_release);
     g_last_chimera_damage.store(0, std::memory_order_release);
     g_last_chimera_competition_points.store(0, std::memory_order_release);
+    reset_hydra_damage_tracker();
     refresh_chimera_rotation_catalog(false);
     capture_selection_state(self, "team_selection_enabled");
     if (g_game_window) {
@@ -5725,6 +5919,7 @@ void __fastcall hook_hydra_selection_on_enabled(void* self,
     g_selection_user.store(nullptr, std::memory_order_release);
     g_last_chimera_damage.store(0, std::memory_order_release);
     g_last_chimera_competition_points.store(0, std::memory_order_release);
+    reset_hydra_damage_tracker();
     capture_selection_state(self, "hydra_team_selection_enabled");
     if (g_game_window) {
         SetTimer(g_game_window, kSelectionCaptureTimerId,
@@ -5783,6 +5978,16 @@ std::int64_t __fastcall hook_hydra_result_total_damage(
         g_original_hydra_result_total_damage(self, method);
     capture_result_state(self, damage);
     return damage;
+}
+
+void __fastcall hook_hydra_damage_counter_change(
+    void* self, std::int64_t value, std::int32_t head_id,
+    const MethodInfo* method) {
+    g_original_hydra_damage_counter_change(self, value, head_id, method);
+    // HydraDamageCounter keeps Dictionary<int, long>[headId] at the greatest
+    // value observed for that head and displays the sum. Mirror that exact
+    // signal instead of tying battle damage to replaceable BattleHero objects.
+    observe_hydra_ui_damage(head_id, value);
 }
 
 void __fastcall hook_on_enabled(void* self, const MethodInfo* method) {
@@ -6191,12 +6396,14 @@ bool install_hydra_selection_hooks(
     const MethodLocation& on_disabled,
     const MethodLocation& refresh,
     const MethodLocation& start_battle_click,
-    const MethodLocation& result_total_damage) {
+    const MethodLocation& result_total_damage,
+    const MethodLocation& damage_counter_change) {
     void* enabled_pointer = native_method_pointer(on_enabled);
     void* disabled_pointer = native_method_pointer(on_disabled);
     void* refresh_pointer = native_method_pointer(refresh);
     void* start_pointer = native_method_pointer(start_battle_click);
     void* result_pointer = native_method_pointer(result_total_damage);
+    void* damage_counter_pointer = native_method_pointer(damage_counter_change);
     if (!enabled_pointer || !disabled_pointer || !refresh_pointer) {
         diagnostic("hydra_selection_hook_target_missing");
         return false;
@@ -6207,7 +6414,7 @@ bool install_hydra_selection_hooks(
         void** original;
         const char* name;
     };
-    const std::array<HookEntry, 5> hooks{{
+    const std::array<HookEntry, 6> hooks{{
         {enabled_pointer,
          reinterpret_cast<void*>(&hook_hydra_selection_on_enabled),
          reinterpret_cast<void**>(&g_original_hydra_selection_on_enabled),
@@ -6229,6 +6436,10 @@ bool install_hydra_selection_hooks(
          reinterpret_cast<void*>(&hook_hydra_result_total_damage),
          reinterpret_cast<void**>(&g_original_hydra_result_total_damage),
          "result"},
+        {damage_counter_pointer,
+         reinterpret_cast<void*>(&hook_hydra_damage_counter_change),
+         reinterpret_cast<void**>(&g_original_hydra_damage_counter_change),
+         "damage_counter"},
     }};
     for (const HookEntry& hook : hooks) {
         if (!hook.target) {
@@ -6250,6 +6461,10 @@ bool install_hydra_selection_hooks(
                        hook.name + " status=" +
                        std::to_string(enable_status));
             return false;
+        }
+        if (hook.target == damage_counter_pointer) {
+            g_hydra_damage_counter_hook_installed.store(
+                true, std::memory_order_release);
         }
     }
     diagnostic("hydra_selection_hooks_installed");
@@ -6615,6 +6830,10 @@ void append_account_model_snapshot(std::ostringstream& output,
 }
 
 void log_account_identity(void* app_model_instance) {
+    void* latest_app_model = refresh_app_model_instance();
+    if (latest_app_model) {
+        app_model_instance = latest_app_model;
+    }
     const AccountIdentity identity = read_account_identity(app_model_instance);
     std::ostringstream output;
     output << "{\"type\":\"account_state\",\"pid\":"
@@ -6636,8 +6855,7 @@ void log_account_identity(void* app_model_instance) {
 bool validate_takeover_account() {
     const std::uint64_t expected_user_id =
         g_takeover_user_id.load(std::memory_order_acquire);
-    void* app_model_instance =
-        g_app_model_instance.load(std::memory_order_acquire);
+    void* app_model_instance = refresh_app_model_instance();
     const AccountIdentity current = read_account_identity(app_model_instance);
     if (!expected_user_id || current.user_id <= 0 ||
         static_cast<std::uint64_t>(current.user_id) != expected_user_id) {
@@ -7225,6 +7443,8 @@ DWORD WINAPI probe_thread(void*) {
         find_class_anywhere(api, "ChimeraQuickBattleCheckboxContext");
     const ClassLocation hydra_quick_battle_checkbox =
         find_class_anywhere(api, "HydraQuickBattleCheckboxContext");
+    const ClassLocation hydra_damage_counter = find_class_in_namespace(
+        api, "ECS.View.BattleView", "HydraDamageCounter");
     const ClassLocation bool_property =
         find_class_anywhere(api, "BoolProperty");
     const ClassLocation battle_finish_alliance_chimera =
@@ -7380,6 +7600,7 @@ DWORD WINAPI probe_thread(void*) {
         find_method_by_name(api, app_model.klass, "ReadUser");
     const MethodLocation user_read_guard_dispose_method =
         find_method_by_name(api, user_read_guard.klass, "Dispose");
+    g_app_model_instance_method = app_model_instance_method.method;
     void* app_model_instance = nullptr;
     void* static_data_instance = nullptr;
     if (safe_runtime_invoke_object(app_model_instance_method.method, nullptr,
@@ -7499,6 +7720,8 @@ DWORD WINAPI probe_thread(void*) {
         api, heroes_selection_hydra.klass, "Hero");
     const MethodLocation hydra_quick_battle_active = find_method_by_name(
         api, hydra_quick_battle_checkbox.klass, "get_Active");
+    const MethodLocation hydra_damage_counter_change = find_method_by_name(
+        api, hydra_damage_counter.klass, "ChangeValueForHead");
     const MethodLocation battle_finish_on_enabled = find_method_by_name(
         api, battle_finish_alliance_chimera.klass, "OnEnabled");
     const MethodLocation battle_finish_save_result = find_method_by_name(
@@ -7509,8 +7732,8 @@ DWORD WINAPI probe_thread(void*) {
         api, battle_finish_alliance_chimera.klass, "TotalDamageDealt");
     const MethodLocation hydra_finish_total_damage = find_method_by_name(
         api, battle_finish_alliance_hydra.klass, "TotalDamageDealt");
-    const MethodLocation hydra_finish_restart = find_method_by_name(
-        api, battle_finish_alliance_hydra.klass, "RestartBattle");
+    const MethodLocation hydra_finish_restart_pressed = find_method_by_name(
+        api, battle_finish_alliance_hydra.klass, "OnRestartPressed");
     const MethodLocation battle_finish_completed_challenges =
         find_method_by_name(api, battle_finish_alliance_chimera.klass,
                             "CompletedChallenges");
@@ -7544,7 +7767,8 @@ DWORD WINAPI probe_thread(void*) {
     g_cancel_chimera_method = cancel_chimera.method;
     g_hydra_total_damage_method =
         find_hydra_total_damage_method(hydra_extensions.klass);
-    g_hydra_result_restart_method = hydra_finish_restart.method;
+    g_hydra_result_restart_pressed_method =
+        hydra_finish_restart_pressed.method;
     const bool hooks_installed =
         install_capture_hooks(on_enabled, on_disabled, request_command,
                               select_skill, select_target, mode_select_skill,
@@ -7561,7 +7785,7 @@ DWORD WINAPI probe_thread(void*) {
         install_hydra_selection_hooks(
             hydra_selection_on_enabled, hydra_selection_on_disabled,
             hydra_selection_refresh, hydra_selection_start_battle_click,
-            hydra_finish_total_damage);
+            hydra_finish_total_damage, hydra_damage_counter_change);
     g_get_area_type = reinterpret_cast<InstanceIntGetter>(native_method_pointer(area_type));
     g_get_region_type =
         reinterpret_cast<InstanceIntGetter>(native_method_pointer(region_type));
@@ -7583,10 +7807,13 @@ DWORD WINAPI probe_thread(void*) {
     append_bool(output, "captureHooksInstalled", hooks_installed);
     append_bool(output, "hydraSelectionHooksInstalled",
                 hydra_selection_hooks_installed);
+    append_bool(output, "hydraDamageCounterHookInstalled",
+                g_hydra_damage_counter_hook_installed.load(
+                    std::memory_order_acquire));
     append_bool(output, "hydraDamageMetric",
                 g_hydra_total_damage_method != nullptr);
-    append_bool(output, "hydraResultRestart",
-                g_hydra_result_restart_method != nullptr);
+    append_bool(output, "hydraResultRegroupButton",
+                g_hydra_result_restart_pressed_method != nullptr);
     append_bool(output, "windowDispatcherInstalled", window_dispatch_installed);
     output << "\"resolvedClasses\":{";
     append_class_location(output, "BattleProcessor", battle_processor);
@@ -7649,6 +7876,8 @@ DWORD WINAPI probe_thread(void*) {
                           chimera_quick_battle_checkbox);
     append_class_location(output, "HydraQuickBattleCheckboxContext",
                           hydra_quick_battle_checkbox);
+    append_class_location(output, "HydraDamageCounter",
+                          hydra_damage_counter);
     append_class_location(output, "BoolProperty", bool_property);
     append_class_location(output, "BattleFinishAllianceChimeraDialogContext",
                           battle_finish_alliance_chimera);
@@ -7776,6 +8005,12 @@ DWORD WINAPI probe_thread(void*) {
                            battle_finish_save_result);
     append_method_location(output, "BattleFinishAllianceChimera.QuickRestartBattle",
                            battle_finish_quick_restart, false);
+    output << ',';
+    append_method_location(output, "BattleFinishAllianceHydra.OnRestartPressed",
+                           hydra_finish_restart_pressed, false);
+    output << ',';
+    append_method_location(output, "HydraDamageCounter.ChangeValueForHead",
+                           hydra_damage_counter_change, false);
     output << "},\"memberInventory\":{\"ClientCommandGenerator\":";
     append_class_members(output, api, command_generator);
     output << ",\"ChimeraChallengeContext\":";
@@ -8094,7 +8329,8 @@ RaidChimeraAgentQueueLifecycleCommand(LPVOID parameter) {
          request.action != kLifecycleFreeRegroup &&
          request.action != kLifecyclePrepareFreeRegroup &&
          request.action != kLifecycleRefreshTeamSelection &&
-         request.action != kLifecycleSelectHeroes) ||
+         request.action != kLifecycleSelectHeroes &&
+         request.action != kLifecycleRestartHydraResult) ||
          !request.context ||
          !request.nonce) {
         return 2;
@@ -8261,6 +8497,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI RaidChimeraAgentShutdown(LPVOID) {
     g_battle_processor.store(nullptr, std::memory_order_release);
     g_selection_context.store(nullptr, std::memory_order_release);
     g_selection_user.store(nullptr, std::memory_order_release);
+    g_app_model_instance.store(nullptr, std::memory_order_release);
+    g_app_model_instance_method = nullptr;
     g_app_model_read_user_method = nullptr;
     g_user_read_guard_dispose_method = nullptr;
     g_result_context.store(nullptr, std::memory_order_release);

@@ -1,0 +1,2 @@
+ui/dist/** linguist-generated=true
+ui/dist/assets/*.js whitespace=-trailing-space

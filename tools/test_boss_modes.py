@@ -268,6 +268,13 @@ def main() -> None:
     assert decision is not None and decision.target_id == 23
     state["heroes"][1]["skills"][0]["cooldown"] = 1
     assert evaluate(cooldown_rule, state) is None
+    # The editor stores the stable portrait identity while battle forms/ranks
+    # may expose another runtime TypeId for the same champion.
+    state["heroes"][1].update(
+        {"typeId": 206, "avatar": "HeroAvatars/200"}
+    )
+    state["heroes"][1]["skills"][0]["cooldown"] = 2
+    assert evaluate(cooldown_rule, state) is not None
 
     hydra_ipc = HydraSelectionIpc()
     output = io.StringIO()
@@ -291,7 +298,7 @@ def main() -> None:
             boss_mode="hydra",
         )
     assert queued.call_args.kwargs["context"] == 1234
-    assert "6名英雄开始首场六头蛇战斗" in output.getvalue()
+    assert "6 名英雄开始首场六头蛇战斗" in output.getvalue()
     print("boss-mode-tests-ok")
 
 

@@ -13,8 +13,8 @@ import {
   Copy,
   Crosshair,
   Database,
+  Download,
   Edit3,
-  Gauge,
   Gem,
   Languages,
   Layers3,
@@ -27,6 +27,7 @@ import {
   Sparkles,
   Swords,
   Trash2,
+  Upload,
   Users,
   Waves,
   X,
@@ -164,14 +165,12 @@ function splitIdentifier(value: string) {
 }
 
 const ENGLISH_HYDRA_HEAD_NAMES: Record<string, string> = {
-  Stone: 'Stone Head',
   Support: 'Head of Decay',
   Ghost: 'Head of Torment',
   Poison: 'Head of Blight',
   Tank: 'Head of Suffering',
   Thief: 'Head of Mischief',
   Berserk: 'Head of Wrath',
-  Electric: 'Electric Head',
 }
 
 function hydraHeadDisplayName(head?: HydraHead): string {
@@ -229,6 +228,14 @@ type StrategyBundle = {
   message?: string
 }
 
+type StrategyExportDocument = {
+  format: 'raid-boss-strategy'
+  version: number
+  exportedAt: string
+  bossMode: BossMode
+  strategy: Strategy
+}
+
 type LiveState = {
   bossMode?: BossMode
   screen?: string
@@ -239,12 +246,12 @@ type LiveState = {
   bossHpPct?: number
   waitingForCommand?: boolean
   chimeraTurn?: number
+  chimeraDifficultyId?: number
   hydraTurn?: number
   headCount?: number
   heads?: HydraHead[]
   playerTurn?: number
   damage?: number
-  points?: number
   teamHeroIds?: number[]
   teamHeroInstanceIds?: number[]
   completedTrialIds?: number[]
@@ -275,6 +282,7 @@ type Bootstrap = {
   hydraHeads: HydraHead[]
   difficulties: Difficulty[]
   effects: EffectOption[]
+  language?: UiLanguage
   selectedPid?: number
   state?: LiveState
   controller: ControllerState
@@ -394,6 +402,15 @@ function cleanText(value?: string) {
   return (value ?? '').replace(/<[^>]+>/g, '')
 }
 
+function configuredTrialDifficulty(strategy: Strategy): number | undefined {
+  const trialId = strategy.objectives?.mandatoryTrialIds?.find(
+    (value) => Number.isInteger(value) && value > 8_000_000,
+  )
+  if (typeof trialId !== 'number') return undefined
+  const difficultyId = Math.floor((trialId - 8_000_000) / 100)
+  return difficultyId >= 1 && difficultyId <= 6 ? difficultyId : undefined
+}
+
 function formatNumber(value?: number) {
   return new Intl.NumberFormat('zh-CN').format(value ?? 0)
 }
@@ -468,9 +485,17 @@ function heroMatchesIds(hero: Hero, ids: number[]) {
 }
 
 function heroByRuntimeId(heroes: Hero[], typeId?: number) {
-  return typeof typeId === 'number'
-    ? heroes.find((hero) => heroRuntimeIds(hero).includes(typeId))
-    : undefined
+  if (typeof typeId !== 'number') return undefined
+  const exact = heroes.find((hero) => heroRuntimeIds(hero).includes(typeId))
+  if (exact) return exact
+
+  // Team selection reports the rank-specific HeroTypeId (base id + 1..6).
+  // A hero can be selected before that alias has been written to the catalog,
+  // so fall back to its stable base id instead of leaving the old card visible.
+  const rankSuffix = typeId % 10
+  if (rankSuffix < 1 || rankSuffix > 6) return undefined
+  const baseTypeId = typeId - rankSuffix
+  return heroes.find((hero) => hero.typeId === baseTypeId || heroRuntimeIds(hero).includes(baseTypeId))
 }
 
 function defaultHeroPriorityIds(hero?: Hero) {
@@ -489,7 +514,13 @@ function actionLabel(rule: Rule, heroes: Hero[]) {
   const action = rule.action ?? {}
   if (action.type === 'defaultSkillPriority') {
     const count = Array.isArray(action.prioritySkills) ? action.prioritySkills.length : 0
-    return `默认技能顺序 · ${count} 个可用技能`
+    const firstTurn = action.firstTurnSkill && typeof action.firstTurnSkill === 'object' && !Array.isArray(action.firstTurnSkill)
+      ? action.firstTurnSkill as JsonObject
+      : undefined
+    const firstTurnSkillId = typeof firstTurn?.skillTypeId === 'number' ? firstTurn.skillTypeId : undefined
+    const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
+    const opener = hero?.skills.find((skill) => skill.typeId === firstTurnSkillId)
+    return `默认技能顺序 · ${count} 个可用技能${opener ? ` · 首回合 ${opener.name || `技能 ${opener.slot}`}` : ''}`
   }
   if (action.type === 'executeTrialRecipe') return '按当前试炼自动决策'
   if (action.type === 'maintainEffects') return '自动维持增益 / 减益'
@@ -507,13 +538,16 @@ function actionLabel(rule: Rule, heroes: Hero[]) {
 function targetLabel(rule: Rule, heroes: Hero[], hydraHeads: HydraHead[] = []): string {
   const action = rule.action ?? {}
   if (action.type === 'defaultSkillPriority') {
-    const firstEntry = Array.isArray(action.prioritySkills)
-      ? action.prioritySkills.find((entry) => entry && typeof entry === 'object' && !Array.isArray(entry)) as JsonObject | undefined
-      : undefined
-    const preferred = firstEntry?.target
-    const preferredObject = typeof preferred === 'string' ? { type: preferred } : (preferred as JsonObject | undefined)
-    if (!preferredObject?.type || preferredObject.type === 'auto') return '按技能合法目标自动选择'
-    return `优先${targetLabel({ action: { type: 'cast', target: preferredObject } }, heroes, hydraHeads)}，无效时自动选择`
+    const entries = Array.isArray(action.prioritySkills)
+      ? action.prioritySkills.filter((entry): entry is JsonObject => Boolean(entry && typeof entry === 'object' && !Array.isArray(entry)))
+      : []
+    const customTargets = entries.filter((entry) => {
+      const target = typeof entry.target === 'string' ? { type: entry.target } : entry.target as JsonObject | undefined
+      return target?.type && target.type !== 'auto' && !entry.isTransform
+    }).length
+    return customTargets
+      ? `每个技能独立目标 · ${customTargets} 个已设置`
+      : '各技能自动选择合法目标'
   }
   if (action.type === 'transform') return '自己'
   const raw = action.target
@@ -888,6 +922,9 @@ function RuleEditor({
   const [skillTypeId, setSkillTypeId] = useState<number | undefined>()
   const [prioritySkillIds, setPrioritySkillIds] = useState<number[]>([])
   const [blockedSkillIds, setBlockedSkillIds] = useState<number[]>([])
+  const [firstTurnSkillId, setFirstTurnSkillId] = useState<number | undefined>()
+  const [defaultSkillTargets, setDefaultSkillTargets] = useState<Record<number, JsonObject>>({})
+  const [defaultHydraTargetSkillId, setDefaultHydraTargetSkillId] = useState<number | undefined>()
   const [target, setTarget] = useState('boss')
   const [targetPosition, setTargetPosition] = useState(1)
   const [headPriorityIds, setHeadPriorityIds] = useState<number[]>([])
@@ -927,7 +964,32 @@ function RuleEditor({
     const savedPriority = savedPriorityEntries.flatMap((entry) => typeof entry.skillTypeId === 'number' ? [entry.skillTypeId] : [])
     setPrioritySkillIds([...savedPriority, ...catalogPriority.filter((id) => !savedPriority.includes(id))])
     setBlockedSkillIds(asNumberArray(action.blockedSkillTypeIds))
-    const rawTarget = action.target ?? (defaultRule ? savedPriorityEntries.find((entry) => entry.target)?.target : undefined)
+    const savedFirstTurn = action.firstTurnSkill && typeof action.firstTurnSkill === 'object' && !Array.isArray(action.firstTurnSkill)
+      ? action.firstTurnSkill as JsonObject
+      : undefined
+    setFirstTurnSkillId(typeof savedFirstTurn?.skillTypeId === 'number' ? savedFirstTurn.skillTypeId : undefined)
+    const savedDefaultTargets: Record<number, JsonObject> = {}
+    for (const entry of savedPriorityEntries) {
+      if (typeof entry.skillTypeId !== 'number') continue
+      const rawSavedTarget = entry.target ?? (defaultRule ? action.target : undefined)
+      const rawEntryTarget = typeof rawSavedTarget === 'string' ? { type: rawSavedTarget } : rawSavedTarget
+      if (!rawEntryTarget || typeof rawEntryTarget !== 'object' || Array.isArray(rawEntryTarget)) continue
+      const targetObject = rawEntryTarget as JsonObject
+      savedDefaultTargets[entry.skillTypeId] = {
+        ...targetObject,
+        type: targetObject.type === 'hydraHeadSlot' ? 'hydraHeadPriority' : (targetObject.type ?? 'auto'),
+        ...(Array.isArray(targetObject.headTypeIds) ? { headTypeIds: [...targetObject.headTypeIds] } : {}),
+      }
+    }
+    if (typeof savedFirstTurn?.skillTypeId === 'number') {
+      const rawFirstTarget = typeof savedFirstTurn.target === 'string' ? { type: savedFirstTurn.target } : savedFirstTurn.target
+      if (rawFirstTarget && typeof rawFirstTarget === 'object' && !Array.isArray(rawFirstTarget)) {
+        savedDefaultTargets[savedFirstTurn.skillTypeId] = { ...(rawFirstTarget as JsonObject) }
+      }
+    }
+    setDefaultSkillTargets(savedDefaultTargets)
+    setDefaultHydraTargetSkillId(savedPriority.find((id) => savedDefaultTargets[id]?.type === 'hydraHeadPriority'))
+    const rawTarget = defaultRule ? undefined : action.target
     const targetObject = typeof rawTarget === 'string' ? { type: rawTarget } : ((rawTarget ?? {}) as JsonObject)
     const savedTargetType = typeof targetObject.type === 'string' ? targetObject.type : undefined
     setTarget(savedTargetType === 'hydraHeadSlot' ? 'hydraHeadPriority' : (savedTargetType ?? (defaultRule ? 'auto' : (bossMode === 'hydra' ? 'hydraHeadPriority' : 'boss'))))
@@ -1079,6 +1141,43 @@ function RuleEditor({
       ? asNumberArray(action.skillTypeId)
       : []
   }))
+  const defaultHydraTargetSkill = hero?.skills.find((skill) => skill.typeId === defaultHydraTargetSkillId)
+  const defaultHydraHeadPriorityIds = asNumberArray(
+    defaultHydraTargetSkillId === undefined ? undefined : defaultSkillTargets[defaultHydraTargetSkillId]?.headTypeIds,
+  )
+
+  function setDefaultSkillTargetType(skillId: number, type: string) {
+    setDefaultSkillTargets((current) => {
+      const previous = current[skillId] ?? { type: 'auto' }
+      const next = type === 'allyPosition'
+        ? { type, position: typeof previous.position === 'number' ? previous.position : 1 }
+        : type === 'hydraHeadPriority'
+          ? { type, headTypeIds: asNumberArray(previous.headTypeIds), fallback: 'lowestHp' }
+          : { type }
+      return { ...current, [skillId]: next }
+    })
+    if (type === 'hydraHeadPriority') setDefaultHydraTargetSkillId(skillId)
+  }
+
+  function setDefaultSkillTargetPosition(skillId: number, position: number) {
+    setDefaultSkillTargets((current) => ({ ...current, [skillId]: { type: 'allyPosition', position } }))
+  }
+
+  function updateDefaultHydraHeadPriority(updater: (current: number[]) => number[]) {
+    if (defaultHydraTargetSkillId === undefined) return
+    setDefaultSkillTargets((current) => {
+      const target = current[defaultHydraTargetSkillId] ?? { type: 'hydraHeadPriority' }
+      return {
+        ...current,
+        [defaultHydraTargetSkillId]: {
+          ...target,
+          type: 'hydraHeadPriority',
+          headTypeIds: updater(asNumberArray(target.headTypeIds)),
+          fallback: 'lowestHp',
+        },
+      }
+    })
+  }
 
   function commit() {
     try {
@@ -1187,14 +1286,30 @@ function RuleEditor({
         : target === 'hydraHeadPriority'
           ? { type: target, headTypeIds: headPriorityIds, fallback: 'lowestHp' }
           : { type: target }
+      const firstTurnSkill = hero?.skills.find((item) => item.typeId === firstTurnSkillId)
+      const firstTurnEntry: JsonObject | undefined = firstTurnSkill?.typeId
+        ? {
+            skillTypeId: firstTurnSkill.typeId,
+            skillSlot: firstTurnSkill.slot,
+            formIndex: firstTurnSkill.formIndex ?? 0,
+            isTransform: Boolean(firstTurnSkill.isTransform),
+            target: firstTurnSkill.isTransform
+              ? { type: 'self' }
+              : (defaultSkillTargets[firstTurnSkill.typeId] ?? { type: 'auto' }),
+          }
+        : undefined
       const baseAction: JsonObject = ruleKind === 'default'
         ? {
             type: 'defaultSkillPriority',
+            ...(firstTurnEntry ? { firstTurnSkill: firstTurnEntry } : {}),
             prioritySkills: prioritySkillIds
               .filter((id) => !blockedSkillIds.includes(id))
               .flatMap((id) => {
                 const skill = hero?.skills.find((item) => item.typeId === id)
-                 return skill ? [{ skillTypeId: id, skillSlot: skill.slot, formIndex: skill.formIndex ?? 0, isTransform: Boolean(skill.isTransform), target: selectedTarget }] : []
+                const skillTarget = skill?.isTransform
+                  ? { type: 'self' }
+                  : (defaultSkillTargets[id] ?? { type: 'auto' })
+                return skill ? [{ skillTypeId: id, skillSlot: skill.slot, formIndex: skill.formIndex ?? 0, isTransform: Boolean(skill.isTransform), target: skillTarget }] : []
               }),
             blockedSkillTypeIds: blockedSkillIds,
             reserveStrictRuleSkills: true,
@@ -1222,6 +1337,10 @@ function RuleEditor({
       const action: JsonObject = initial?.action?.type === effectiveActionType
         ? { ...initial.action, ...baseAction }
         : baseAction
+      if (ruleKind === 'default') {
+        delete action.target
+        if (!firstTurnEntry) delete action.firstTurnSkill
+      }
       if (ruleKind === 'strict' && actionType === 'cast' && (allHeroes || !selectedSkill?.typeId)) {
         delete action.skillTypeId
       }
@@ -1241,7 +1360,7 @@ function RuleEditor({
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content rule-dialog">
           <div className="dialog-heading">
-            <div><Dialog.Title>{initial ? '编辑策略规则' : '添加策略规则'}</Dialog.Title><Dialog.Description>用英雄、形态、具体技能和目标描述一次行动。</Dialog.Description></div>
+            <div><Dialog.Title>{initial ? '编辑策略规则' : '添加策略规则'}</Dialog.Title><Dialog.Description className="sr-only">设置行动规则</Dialog.Description></div>
             <Dialog.Close className="icon-button" aria-label="关闭"><X size={19} /></Dialog.Close>
           </div>
           <div className="form-grid">
@@ -1253,75 +1372,78 @@ function RuleEditor({
                 {ruleKind === 'strict' && <button type="button" aria-pressed={allHeroes} className={allHeroes ? 'all-heroes active' : 'all-heroes'} onClick={() => { const next = !allHeroes; setAllHeroes(next); setActionType(next && bossMode === 'chimera' ? 'executeTrialRecipe' : 'cast') }}><Users size={15} />{allHeroes ? '取消任意英雄' : '任意行动英雄'}</button>}
               </div>
               {!allHeroes && <div className="hero-library">
-                {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); setPrioritySkillIds(defaultHeroPriorityIds(item)); setBlockedSkillIds([]); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item.isMetamorph ? '神话 · 双形态' : `${item.skills.length} 个主动技能`}</small></span></button>)}
+                {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); setPrioritySkillIds(defaultHeroPriorityIds(item)); setBlockedSkillIds([]); setFirstTurnSkillId(undefined); setDefaultSkillTargets({}); setDefaultHydraTargetSkillId(undefined); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item.isMetamorph ? '神话 · 双形态' : `${item.skills.length} 个主动技能`}</small></span></button>)}
                 {!visibleHeroes.length && <span className="library-empty">没有找到英雄</span>}
               </div>}
-              <small className="library-hint">英雄库已按头像身份去重；最多显示前 48 个搜索结果，共 {heroes.length} 名。</small>
             </div>
             <div className="rule-kind span-2">
               <span className="mode-heading">规则类型</span>
-              <button type="button" className={ruleKind === 'strict' ? 'active' : ''} onClick={() => { setRuleKind('strict'); setActionType('cast') }}><ShieldCheck size={16} /><span><strong>严格执行规则</strong><small>只有全部条件满足时才释放指定技能</small></span></button>
-              <button type="button" className={ruleKind === 'default' ? 'active' : ''} onClick={() => { setRuleKind('default'); setAllHeroes(false); setActionType('defaultSkillPriority'); if (ruleKind !== 'default') setTarget('auto'); if (!prioritySkillIds.length) setPrioritySkillIds(defaultHeroPriorityIds(hero)) }}><Sparkles size={16} /><span><strong>默认技能规则</strong><small>没有严格规则可执行时，按设定顺序选择技能</small></span></button>
+              <button type="button" className={ruleKind === 'strict' ? 'active' : ''} onClick={() => { setRuleKind('strict'); setActionType('cast') }}><ShieldCheck size={16} /><span><strong>严格执行规则</strong></span></button>
+              <button type="button" className={ruleKind === 'default' ? 'active' : ''} onClick={() => { setRuleKind('default'); setAllHeroes(false); setActionType('defaultSkillPriority'); if (!prioritySkillIds.length) setPrioritySkillIds(defaultHeroPriorityIds(hero)) }}><Sparkles size={16} /><span><strong>默认技能规则</strong></span></button>
             </div>
             {bossMode === 'chimera' && <fieldset className="field span-2"><legend>奇美拉形态</legend><div className="chip-group">{ALL_FORMS.map((form) => <button type="button" key={form} className={forms.includes(form) ? 'chip active' : 'chip'} onClick={() => setForms((current) => current.includes(form) ? current.filter((item) => item !== form) : [...current, form])}>{FORM_LABEL[form]}</button>)}</div></fieldset>}
             {hero?.isMetamorph && <fieldset className="field span-2"><legend>英雄形态与技能组</legend><div className="chip-group"><button type="button" className={heroForm === 'any' ? 'chip active' : 'chip'} onClick={() => setHeroForm('any')}>同时查看两套</button><button type="button" className={heroForm === 'original' ? 'chip active' : 'chip'} onClick={() => { setHeroForm('original'); setSkillTypeId(undefined); setSlot(1) }}>原始形态</button><button type="button" className={heroForm === 'transformed' ? 'chip active' : 'chip'} onClick={() => { setHeroForm('transformed'); setSkillTypeId(undefined); setSlot(1) }}>变形形态</button></div></fieldset>}
             {ruleKind === 'default' && <fieldset className="skill-policy span-2">
-              <legend>默认技能释放顺序 <small>严格规则始终优先，且其技能会自动保留</small></legend>
-              <p>从上到下寻找第一个已就绪技能；默认禁用的技能不会由该规则释放。复活技能会先选择已经死亡且可复活的队友。</p>
+              <legend>默认技能释放顺序与目标</legend>
+              <div className="first-turn-policy">
+                <span><strong>英雄首回合技能</strong><small>优先于严格规则执行</small></span>
+                <select value={firstTurnSkillId ?? ''} onChange={(event) => setFirstTurnSkillId(event.target.value ? Number(event.target.value) : undefined)}>
+                  <option value="">不设定</option>
+                  {allHeroSkills.filter((skill): skill is Skill & { typeId: number } => typeof skill.typeId === 'number').map((skill) => <option key={`${skill.formIndex ?? 0}-${skill.typeId}`} value={skill.typeId}>{skill.name || `技能 ${skill.slot}`}{hero?.isMetamorph ? ` · ${(skill.formIndex ?? 0) === 1 ? '变形形态' : '原始形态'}` : ''}</option>)}
+                </select>
+              </div>
               <div className="skill-policy-list">{prioritySkillIds.map((id, index) => {
                 const skill = hero?.skills.find((item) => item.typeId === id)
                 if (!skill) return null
                 const blocked = blockedSkillIds.includes(id)
+                const firstTurnSelected = firstTurnSkillId === id
                 const reserved = reservedSkillIds.has(id)
                 const allowedRank = prioritySkillIds.slice(0, index + 1).filter((value) => !blockedSkillIds.includes(value)).length
+                const skillTarget = skill.isTransform ? { type: 'self' } : (defaultSkillTargets[id] ?? { type: 'auto' })
+                const skillTargetType = typeof skillTarget.type === 'string' ? skillTarget.type : 'auto'
                 return <div className={`skill-policy-row${blocked ? ' blocked' : ''}`} key={id}>
                   <span className="skill-rank">{blocked ? '—' : allowedRank}</span>
                   <SkillIcon hero={hero} skill={skill} slot={skill.slot} />
                   <span className="skill-policy-copy">
                     <strong>{skill.name || `技能 ${skill.slot}`}</strong>
                     <small>{hero?.isMetamorph ? `${(skill.formIndex ?? 0) === 1 ? '变形形态' : '原始形态'} · ` : ''}技能 {skill.slot}{skill.defaultCooldown ? ` · 冷却 ${skill.defaultCooldown}` : ' · 无冷却'}{skill.isTransform ? ' · 形态切换' : ''}</small>
-                    <em>{skill.isTransform ? ((skill.formIndex ?? 0) === 0 ? '切换至变形形态' : '切回原始形态') : (skill.effectSummary || cleanText(skill.description) || '暂未读取到技能说明')}</em>
                   </span>
+                  <div className="skill-policy-target">
+                    <select aria-label={`${skill.name || `技能 ${skill.slot}`} 的目标`} value={skillTargetType} disabled={(blocked && !firstTurnSelected) || Boolean(skill.isTransform)} onChange={(event) => setDefaultSkillTargetType(id, event.target.value)}>
+                      <option value="auto">自动合法目标</option>
+                      {bossMode === 'chimera'
+                        ? <option value="boss">奇美拉 Boss</option>
+                        : <><option value="hydraHeadPriority">按蛇头类型优先</option><option value="devouringHead">正在吞噬的蛇头</option><option value="exposedNeck">暴露蛇颈</option><option value="lowestHpBoss">生命最低蛇头</option></>}
+                      <option value="self">自己</option>
+                      <option value="lowestHpAlly">生命最低队友</option>
+                      <option value="allyPosition">准备队伍指定位置</option>
+                    </select>
+                    {skillTargetType === 'allyPosition' && <select aria-label={`${skill.name || `技能 ${skill.slot}`} 的队伍目标`} value={typeof skillTarget.position === 'number' ? skillTarget.position : 1} disabled={blocked && !firstTurnSelected} onChange={(event) => setDefaultSkillTargetPosition(id, Number(event.target.value))}>{Array.from({ length: teamSize }, (_, teamIndex) => <option key={teamIndex + 1} value={teamIndex + 1}>{teamIndex + 1}. {teamHeroes[teamIndex]?.name ?? '未读取'}</option>)}</select>}
+                    {bossMode === 'hydra' && skillTargetType === 'hydraHeadPriority' && <button type="button" className={defaultHydraTargetSkillId === id ? 'active' : ''} disabled={blocked && !firstTurnSelected} onClick={() => setDefaultHydraTargetSkillId(id)}>蛇头顺序 {asNumberArray(skillTarget.headTypeIds).length || ''}</button>}
+                  </div>
                   {reserved && <em className="reserved-badge">严格规则保留</em>}
                   <div className="skill-policy-actions"><button type="button" title="提高技能优先级" disabled={index === 0} onClick={() => setPrioritySkillIds((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title="降低技能优先级" disabled={index === prioritySkillIds.length - 1} onClick={() => setPrioritySkillIds((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" className={blocked ? 'blocked-toggle active' : 'blocked-toggle'} onClick={() => setBlockedSkillIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])}>{blocked ? '恢复默认使用' : '禁止默认释放'}</button></div>
                 </div>
               })}</div>
-              <small className="policy-note">“禁止默认释放”只约束默认规则；如果你另外建立了明确的严格规则，严格规则仍可调用该技能。</small>
-            </fieldset>}
-            {ruleKind === 'default' && <fieldset className="target-picker span-2">
-              <legend>默认技能优先目标 <small>优先目标对当前技能不合法或不存在时，自动改用游戏允许的目标</small></legend>
-              <div className="condition-grid">
-                <label className="field"><span>优先方式</span><select value={target} onChange={(event) => setTarget(event.target.value)}>
-                  <option value="auto">自动合法目标</option>
-                  {bossMode === 'chimera'
-                    ? <option value="boss">奇美拉 Boss</option>
-                    : <><option value="hydraHeadPriority">按蛇头类型优先</option><option value="devouringHead">正在吞噬的蛇头</option><option value="exposedNeck">暴露蛇颈</option><option value="lowestHpBoss">生命最低蛇头</option></>}
-                  <option value="self">自己</option>
-                  <option value="lowestHpAlly">生命最低队友</option>
-                  <option value="allyPosition">准备队伍指定位置</option>
-                </select></label>
-                {target === 'allyPosition' && <label className="field"><span>队伍位置</span><select value={targetPosition} onChange={(event) => setTargetPosition(Number(event.target.value))}>{Array.from({ length: teamSize }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}. {teamHeroes[index]?.name ?? '未读取'}</option>)}</select></label>}
-              </div>
-              {bossMode === 'hydra' && target === 'hydraHeadPriority' && <div className="head-priority-builder">
-                <div className="head-priority-heading"><span><strong>蛇头类型优先级</strong><small>按顺序尝试；不在场、已死亡或当前技能不可选择时自动跳过。</small></span><em>{headPriorityIds.length ? `已排列 ${headPriorityIds.length} 种` : '未设置时自动选择'}</em></div>
-                <div className="head-type-library">{hydraHeads.map((head) => { const rank = headPriorityIds.indexOf(head.typeId); return <button type="button" key={head.typeId} className={rank >= 0 ? 'head-type-option active' : 'head-type-option'} onClick={() => { if (rank < 0) setHeadPriorityIds((current) => [...current, head.typeId]) }}><HydraHeadIcon head={head} size="md" /><span><strong>{hydraHeadDisplayName(head)}</strong><small>{rank >= 0 ? `优先级 ${rank + 1}` : '加入优先目标'}</small></span>{rank >= 0 && <em>{rank + 1}</em>}</button> })}</div>
-                {headPriorityIds.length > 0 && <div className="head-priority-list">{headPriorityIds.map((typeId, index) => { const head = hydraHeads.find((item) => item.typeId === typeId); return <div className="head-priority-row" key={typeId}><span className="skill-rank">{index + 1}</span><HydraHeadIcon head={head ?? { typeId, name: `蛇头 ${typeId}` }} size="sm" /><span><strong>{head ? hydraHeadDisplayName(head) : `蛇头 ${typeId}`}</strong><small>目标无效时继续尝试下一项</small></span><div><button type="button" title="提高优先级" disabled={index === 0} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title="降低优先级" disabled={index === headPriorityIds.length - 1} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" title="移除" onClick={() => setHeadPriorityIds((current) => current.filter((value) => value !== typeId))}><Trash2 size={15} /></button></div></div> })}</div>}
+              {bossMode === 'hydra' && defaultHydraTargetSkillId !== undefined && defaultSkillTargets[defaultHydraTargetSkillId]?.type === 'hydraHeadPriority' && <div className="head-priority-builder default-skill-head-priority">
+                <div className="head-priority-heading"><strong>{defaultHydraTargetSkill?.name || '技能'} · 蛇头优先级</strong><em>{defaultHydraHeadPriorityIds.length ? `${defaultHydraHeadPriorityIds.length} 种` : '自动兜底'}</em></div>
+                <div className="head-type-library">{hydraHeads.map((head) => { const rank = defaultHydraHeadPriorityIds.indexOf(head.typeId); return <button type="button" key={head.typeId} className={rank >= 0 ? 'head-type-option active' : 'head-type-option'} onClick={() => { if (rank < 0) updateDefaultHydraHeadPriority((current) => [...current, head.typeId]) }}><HydraHeadIcon head={head} size="md" /><span><strong>{hydraHeadDisplayName(head)}</strong>{rank >= 0 && <small>优先级 {rank + 1}</small>}</span>{rank >= 0 && <em>{rank + 1}</em>}</button> })}</div>
+                {defaultHydraHeadPriorityIds.length > 0 && <div className="head-priority-list">{defaultHydraHeadPriorityIds.map((typeId, index) => { const head = hydraHeads.find((item) => item.typeId === typeId); return <div className="head-priority-row" key={typeId}><span className="skill-rank">{index + 1}</span><HydraHeadIcon head={head ?? { typeId, name: `蛇头 ${typeId}` }} size="sm" /><span><strong>{head ? hydraHeadDisplayName(head) : `蛇头 ${typeId}`}</strong></span><div><button type="button" title="提高优先级" disabled={index === 0} onClick={() => updateDefaultHydraHeadPriority((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title="降低优先级" disabled={index === defaultHydraHeadPriorityIds.length - 1} onClick={() => updateDefaultHydraHeadPriority((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" title="移除" onClick={() => updateDefaultHydraHeadPriority((current) => current.filter((value) => value !== typeId))}><Trash2 size={15} /></button></div></div> })}</div>}
               </div>}
-              <small className="policy-note">复活技能属于特殊情况：只要死亡队友是合法目标，就始终先复活；没有死亡队友时再按这里的优先方式处理。</small>
             </fieldset>}
             {ruleKind === 'strict' && <>
             <div className="action-mode span-2">
-              <button type="button" className={actionType === 'cast' || actionType === 'transform' ? 'active' : ''} onClick={() => { setAllHeroes(false); setActionType(selectedSkill?.isTransform ? 'transform' : 'cast') }}><Zap size={16} /><span><strong>指定技能</strong><small>从英雄的实际技能图标选择</small></span></button>
-              {bossMode === 'chimera' && <button type="button" className={actionType === 'executeTrialRecipe' ? 'active' : ''} onClick={() => setActionType('executeTrialRecipe')}><Sparkles size={16} /><span><strong>试炼自动决策</strong><small>按当前可完成试炼选择行动</small></span></button>}
-              {initial?.action?.type === 'maintainEffects' && <button type="button" className={actionType === 'maintainEffects' ? 'active' : ''} onClick={() => setActionType('maintainEffects')}><ShieldCheck size={16} /><span><strong>维持效果</strong><small>兼容已有高级规则</small></span></button>}
+              <button type="button" className={actionType === 'cast' || actionType === 'transform' ? 'active' : ''} onClick={() => { setAllHeroes(false); setActionType(selectedSkill?.isTransform ? 'transform' : 'cast') }}><Zap size={16} /><span><strong>指定技能</strong></span></button>
+              {bossMode === 'chimera' && <button type="button" className={actionType === 'executeTrialRecipe' ? 'active' : ''} onClick={() => setActionType('executeTrialRecipe')}><Sparkles size={16} /><span><strong>试炼自动决策</strong></span></button>}
+              {initial?.action?.type === 'maintainEffects' && <button type="button" className={actionType === 'maintainEffects' ? 'active' : ''} onClick={() => setActionType('maintainEffects')}><ShieldCheck size={16} /><span><strong>维持效果</strong></span></button>}
             </div>
             {(actionType === 'cast' || actionType === 'transform') && <>
               <fieldset className="skill-picker span-2">
-                <legend>选择实际技能 <small>变形也占用技能、受冷却限制</small></legend>
-                <div className="skill-library">{skills.map((skill) => <button type="button" key={`${skill.formIndex ?? 0}-${skill.slot}-${skill.typeId ?? ''}`} className={selectedSkill?.typeId === skill.typeId ? `skill-option active${skill.isTransform ? ' transform' : ''}` : `skill-option${skill.isTransform ? ' transform' : ''}`} onClick={() => { setSkillTypeId(skill.typeId); setSlot(skill.slot); setActionType(skill.isTransform ? 'transform' : 'cast') }}><SkillIcon hero={hero} skill={skill} slot={skill.slot} /><span><strong>{skill.name || `技能 ${skill.slot}`}</strong><small>{hero?.isMetamorph ? `${(skill.formIndex ?? 0) === 1 ? '变形形态' : '原始形态'} · ` : ''}技能 {skill.slot}{skill.defaultCooldown ? ` · 冷却 ${skill.defaultCooldown}` : ' · 无冷却'}</small><em>{skill.isTransform ? ((skill.formIndex ?? 0) === 0 ? '切换至变形形态' : '切回原始形态') : (skill.effectSummary || cleanText(skill.description).slice(0, 56) || '等待读取效果')}</em></span></button>)}</div>
+                <legend>选择实际技能</legend>
+                <div className="skill-library">{skills.map((skill) => <button type="button" key={`${skill.formIndex ?? 0}-${skill.slot}-${skill.typeId ?? ''}`} className={selectedSkill?.typeId === skill.typeId ? `skill-option active${skill.isTransform ? ' transform' : ''}` : `skill-option${skill.isTransform ? ' transform' : ''}`} onClick={() => { setSkillTypeId(skill.typeId); setSlot(skill.slot); setActionType(skill.isTransform ? 'transform' : 'cast') }}><SkillIcon hero={hero} skill={skill} slot={skill.slot} /><span><strong>{skill.name || `技能 ${skill.slot}`}</strong><small>{hero?.isMetamorph ? `${(skill.formIndex ?? 0) === 1 ? '变形形态' : '原始形态'} · ` : ''}技能 {skill.slot}{skill.defaultCooldown ? ` · 冷却 ${skill.defaultCooldown}` : ' · 无冷却'}</small></span></button>)}</div>
               </fieldset>
               {actionType === 'cast' && <fieldset className="target-picker span-2">
-                <legend>技能释放目标 <small>{bossMode === 'hydra' ? '蛇头按固定类型身份判断，不使用会变化的场上位置' : `队伍位置来自当前准备界面的 ${teamSize} 个槽位`}</small></legend>
+                <legend>技能释放目标</legend>
                 <div className="target-quick">
                   {bossMode === 'chimera'
                     ? <button type="button" className={target === 'boss' ? 'active' : ''} onClick={() => setTarget('boss')}><Crosshair size={16} />奇美拉 Boss</button>
@@ -1329,15 +1451,14 @@ function RuleEditor({
                   <button type="button" className={target === 'self' ? 'active' : ''} onClick={() => setTarget('self')}><HeroAvatar hero={hero} size="sm" />自己</button><button type="button" className={target === 'lowestHpAlly' ? 'active' : ''} onClick={() => setTarget('lowestHpAlly')}><Activity size={16} />生命最低队友</button>
                 </div>
                 {bossMode === 'hydra' && target === 'hydraHeadPriority' && <div className="head-priority-builder">
-                  <div className="head-priority-heading"><span><strong>完整蛇头类型库 · {hydraHeads.length} 种</strong><small>来自游戏静态目录，不受本轮四个在场蛇头限制；点击加入优先级。</small></span><em>{headPriorityIds.length ? `已排列 ${headPriorityIds.length} 种` : '尚未指定，直接使用安全兜底'}</em></div>
+                  <div className="head-priority-heading"><strong>蛇头优先级</strong><em>{headPriorityIds.length ? `${headPriorityIds.length} 种` : '自动兜底'}</em></div>
                   <div className="head-type-library">{hydraHeads.map((head) => { const rank = headPriorityIds.indexOf(head.typeId); return <button type="button" key={head.typeId} className={rank >= 0 ? 'head-type-option active' : 'head-type-option'} onClick={() => { setTarget('hydraHeadPriority'); if (rank < 0) setHeadPriorityIds((current) => [...current, head.typeId]) }}><HydraHeadIcon head={head} size="md" /><span><strong>{hydraHeadDisplayName(head)}</strong><small>{rank >= 0 ? `优先级 ${rank + 1}` : '加入优先目标'}</small></span>{rank >= 0 && <em>{rank + 1}</em>}</button> })}</div>
-                  {headPriorityIds.length > 0 && <div className="head-priority-list">{headPriorityIds.map((typeId, index) => { const head = hydraHeads.find((item) => item.typeId === typeId); return <div className="head-priority-row" key={typeId}><span className="skill-rank">{index + 1}</span><HydraHeadIcon head={head ?? { typeId, name: `蛇头 ${typeId}` }} size="sm" /><span><strong>{head ? hydraHeadDisplayName(head) : `蛇头 ${typeId}`}</strong><small>不存在、已死亡或不是合法目标时自动跳过</small></span><div><button type="button" title="提高优先级" disabled={index === 0} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title="降低优先级" disabled={index === headPriorityIds.length - 1} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" title="移除" onClick={() => setHeadPriorityIds((current) => current.filter((value) => value !== typeId))}><Trash2 size={15} /></button></div></div> })}</div>}
-                  <div className="head-priority-fallback"><ShieldCheck size={17} /><span><strong>宽松安全兜底</strong><small>优先类型都不在场时，选择当前技能可攻击且生命最低的蛇头；绝不会按数组顺序或场上位置猜目标。</small></span></div>
+                  {headPriorityIds.length > 0 && <div className="head-priority-list">{headPriorityIds.map((typeId, index) => { const head = hydraHeads.find((item) => item.typeId === typeId); return <div className="head-priority-row" key={typeId}><span className="skill-rank">{index + 1}</span><HydraHeadIcon head={head ?? { typeId, name: `蛇头 ${typeId}` }} size="sm" /><span><strong>{head ? hydraHeadDisplayName(head) : `蛇头 ${typeId}`}</strong></span><div><button type="button" title="提高优先级" disabled={index === 0} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title="降低优先级" disabled={index === headPriorityIds.length - 1} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" title="移除" onClick={() => setHeadPriorityIds((current) => current.filter((value) => value !== typeId))}><Trash2 size={15} /></button></div></div> })}</div>}
                 </div>}
-                <div className="ally-target-heading"><Users size={15} /><span><strong>队友目标</strong><small>以下位置只属于准备队伍，不是蛇头站位。</small></span></div>
-                <div className={`position-targets position-targets-${teamSize}`}>{Array.from({ length: teamSize }, (_, index) => { const member = teamHeroes[index]; const position = index + 1; return <button type="button" key={position} className={target === 'allyPosition' && targetPosition === position ? 'position-target active' : 'position-target'} onClick={() => { setTarget('allyPosition'); setTargetPosition(position) }}><span className="position-number">{position}</span><HeroAvatar hero={member} size="md" /><span><strong>{member?.name ?? '未读取'}</strong><small>{position} 号位</small></span></button> })}</div>
+                <div className="ally-target-heading"><Users size={15} /><span><strong>队友目标</strong></span></div>
+                <div className={`position-targets position-targets-${teamSize}`}>{Array.from({ length: teamSize }, (_, index) => { const member = teamHeroes[index]; const position = index + 1; return <button type="button" key={position} className={target === 'allyPosition' && targetPosition === position ? 'position-target active' : 'position-target'} onClick={() => { setTarget('allyPosition'); setTargetPosition(position) }}><span className="position-number">{position}</span><HeroAvatar hero={member} size="md" /><span><strong>{member?.name ?? '未读取'}</strong></span></button> })}</div>
               </fieldset>}
-              <div className="skill-detail span-2"><SkillIcon hero={hero} skill={selectedSkill} slot={slot} /><span><strong>{selectedSkill?.name || `技能 ${slot}`}{selectedSkill?.isTransform ? ' · 形态切换技能' : ''}</strong><em>{cleanText(selectedSkill?.description) || '完整技能说明会在游戏读取后自动缓存'}</em><small>{selectedSkill?.isTransform ? `当前形态技能冷却：${selectedSkill.defaultCooldown ?? '待读取'} 回合；只有就绪时才会执行` : (selectedSkill?.effectSummary || '尚未学习到该技能的效果记录')}</small></span></div>
+              <div className="skill-detail span-2"><SkillIcon hero={hero} skill={selectedSkill} slot={slot} /><span><strong>{selectedSkill?.name || `技能 ${slot}`}{selectedSkill?.isTransform ? ' · 形态切换技能' : ''}</strong><em>{cleanText(selectedSkill?.description) || selectedSkill?.effectSummary || '暂未读取到技能说明'}</em></span></div>
             </>}
             <fieldset className="condition-builder span-2">
               <legend>常用触发条件</legend>
@@ -1349,9 +1470,11 @@ function RuleEditor({
                 <label className="field"><span>当前伤害 ≥（M）</span><input type="text" inputMode="decimal" value={damageMin} onFocus={selectNumericInput} onChange={(event) => /^\d*(?:\.\d*)?$/.test(event.target.value) && setDamageMin(event.target.value)} placeholder="例如 150" /></label>
               </div>
             </fieldset>
-            <fieldset className="cooldown-condition-builder span-2">
-              <legend>技能冷却条件 <small>读取准备队伍中具体英雄的技能剩余冷却回合</small></legend>
-              <div className="effect-condition-heading"><span><strong>{skillCooldownConditions.length ? `已添加 ${skillCooldownConditions.length} 条` : '按需添加'}</strong><small>{skillCooldownConditionsMode === 'any' ? '任意一条冷却条件满足即可。' : '所有冷却条件都必须同时满足。'}</small></span><div className="condition-heading-actions"><label className="condition-logic-select"><span>组合</span><select value={skillCooldownConditionsMode} onChange={(event) => setSkillCooldownConditionsMode(event.target.value === 'any' ? 'any' : 'all')}><option value="all">全部满足（并且）</option><option value="any">任意满足（或者）</option></select></label><button type="button" className="button ghost" onClick={() => { const heroTypeId = team.slice(0, teamSize).find((value) => value > 0) ?? 0; const conditionHero = heroByRuntimeId(heroes, heroTypeId); const conditionSkill = conditionHero?.skills.find((skill) => typeof skill.typeId === 'number'); setSkillCooldownConditions((current) => [...current, createSkillCooldownCondition({ heroTypeId: heroTypeId ? String(heroTypeId) : '', skillTypeId: conditionSkill?.typeId ? String(conditionSkill.typeId) : '' })]) }}><Plus size={15} />添加冷却条件</button></div></div>
+            <fieldset className="effect-condition-builder span-2">
+              <legend>效果与技能冷却条件</legend>
+              <div className="condition-subsection cooldown-condition-subsection">
+              <div className="condition-subsection-title">技能冷却</div>
+              <div className="effect-condition-heading"><span><strong>{skillCooldownConditions.length ? `已添加 ${skillCooldownConditions.length} 条` : '按需添加'}</strong></span><div className="condition-heading-actions"><label className="condition-logic-select"><span>组合</span><select value={skillCooldownConditionsMode} onChange={(event) => setSkillCooldownConditionsMode(event.target.value === 'any' ? 'any' : 'all')}><option value="all">全部满足（并且）</option><option value="any">任意满足（或者）</option></select></label><button type="button" className="button ghost" onClick={() => { const heroTypeId = team.slice(0, teamSize).find((value) => value > 0) ?? 0; const conditionHero = heroByRuntimeId(heroes, heroTypeId); const conditionSkill = conditionHero?.skills.find((skill) => typeof skill.typeId === 'number'); setSkillCooldownConditions((current) => [...current, createSkillCooldownCondition({ heroTypeId: heroTypeId ? String(heroTypeId) : '', skillTypeId: conditionSkill?.typeId ? String(conditionSkill.typeId) : '' })]) }}><Plus size={15} />添加冷却条件</button></div></div>
               {skillCooldownConditions.length ? <div className="cooldown-condition-list">{skillCooldownConditions.map((condition, index) => {
                 const selectedHeroTypeId = Number(condition.heroTypeId)
                 const selectedHero = heroByRuntimeId(heroes, selectedHeroTypeId)
@@ -1367,11 +1490,11 @@ function RuleEditor({
                   <label className="effect-turn-field"><span>冷却 ≤</span><input type="text" inputMode="numeric" value={condition.turnsAtMost} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtMost: event.target.value })} placeholder="不限" /></label>
                   <button type="button" className="effect-condition-delete" aria-label={`删除技能冷却条件 ${index + 1}`} onClick={() => setSkillCooldownConditions((current) => current.filter((item) => item.id !== condition.id))}><Trash2 size={15} /></button>
                 </div>
-              })}</div> : <div className="effect-condition-empty"><Activity size={22} /><span><strong>没有技能冷却限制</strong><small>当前规则不会读取其他英雄的技能冷却；需要联动时添加一条即可。</small></span></div>}
-            </fieldset>
-            <fieldset className="effect-condition-builder span-2">
-              <legend>效果条件 <small>目标、已有或缺少、剩余回合统一在一条条件中设置</small></legend>
-              <div className="effect-condition-heading"><span><strong>{effectConditions.length ? `已添加 ${effectConditions.length} 条` : '按需添加'}</strong><small>{effectConditionsMode === 'any' ? '下面任意一条效果条件满足即可。' : '下面所有效果条件都必须同时满足。'}</small></span><div className="condition-heading-actions"><label className="condition-logic-select"><span>组合</span><select value={effectConditionsMode} onChange={(event) => setEffectConditionsMode(event.target.value === 'any' ? 'any' : 'all')}><option value="all">全部满足（并且）</option><option value="any">任意满足（或者）</option></select></label><button type="button" className="button ghost" onClick={() => setEffectConditions((current) => [...current, createEffectCondition({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })])}><Plus size={15} />添加效果条件</button></div></div>
+              })}</div> : <div className="effect-condition-empty"><Activity size={22} /><span><strong>没有技能冷却限制</strong></span></div>}
+              </div>
+              <div className="condition-subsection effect-condition-subsection">
+              <div className="condition-subsection-title">效果条件</div>
+              <div className="effect-condition-heading"><span><strong>{effectConditions.length ? `已添加 ${effectConditions.length} 条` : '按需添加'}</strong></span><div className="condition-heading-actions"><label className="condition-logic-select"><span>组合</span><select value={effectConditionsMode} onChange={(event) => setEffectConditionsMode(event.target.value === 'any' ? 'any' : 'all')}><option value="all">全部满足（并且）</option><option value="any">任意满足（或者）</option></select></label><button type="button" className="button ghost" onClick={() => setEffectConditions((current) => [...current, createEffectCondition({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })])}><Plus size={15} />添加效果条件</button></div></div>
               {effectConditions.length ? <div className="effect-condition-list">
                 {effectConditions.map((condition, index) => {
                   const selectedHeroTypeId = Number(condition.heroTypeId)
@@ -1382,7 +1505,7 @@ function RuleEditor({
                     <span className="effect-condition-index">{String(index + 1).padStart(2, '0')}</span>
                     <div className="effect-condition-target">
                       {condition.target === 'ally' ? <HeroAvatar hero={selectedTeamHero} size="sm" /> : <span className="effect-target-boss"><Crosshair size={16} /></span>}
-                      <span><select aria-label={`效果条件 ${index + 1} 的目标`} value={condition.target === 'ally' ? `ally:${condition.heroTypeId}` : condition.target} onChange={(event) => { const [targetType, rawHeroTypeId = ''] = event.target.value.split(':'); const bossTarget = targetType === 'bossAll' || targetType === 'bossAny' || targetType === 'bossPriority' ? targetType : 'boss'; updateCondition({ target: targetType === 'ally' ? 'ally' : bossTarget, heroTypeId: targetType === 'ally' ? rawHeroTypeId : '' }) }}>{bossMode === 'hydra' ? <><option value="bossPriority">规则优先目标蛇头</option><option value="bossAny">任一在场蛇头</option><option value="bossAll">全部在场蛇头</option></> : <option value="boss">奇美拉 Boss</option>}{savedHeroOutsideTeam && <option value={`ally:${condition.heroTypeId}`}>已保存英雄 {condition.heroTypeId}</option>}{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={`ally:${typeId}`}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select><small>{condition.target === 'ally' ? selectedTeamHero?.name ?? '准备队伍英雄' : condition.target === 'bossAll' ? '四个当前蛇头必须全部满足' : condition.target === 'bossAny' ? '任意一个当前蛇头满足即可' : bossMode === 'hydra' ? '按本规则技能目标优先级选中的蛇头' : '当前 Boss'}</small></span>
+                      <span><select aria-label={`效果条件 ${index + 1} 的目标`} value={condition.target === 'ally' ? `ally:${condition.heroTypeId}` : condition.target} onChange={(event) => { const [targetType, rawHeroTypeId = ''] = event.target.value.split(':'); const bossTarget = targetType === 'bossAll' || targetType === 'bossAny' || targetType === 'bossPriority' ? targetType : 'boss'; updateCondition({ target: targetType === 'ally' ? 'ally' : bossTarget, heroTypeId: targetType === 'ally' ? rawHeroTypeId : '' }) }}>{bossMode === 'hydra' ? <><option value="bossPriority">规则优先目标蛇头</option><option value="bossAny">任一在场蛇头</option><option value="bossAll">全部在场蛇头</option></> : <option value="boss">奇美拉 Boss</option>}{savedHeroOutsideTeam && <option value={`ally:${condition.heroTypeId}`}>已保存英雄 {condition.heroTypeId}</option>}{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={`ally:${typeId}`}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select></span>
                     </div>
                     <div className="effect-presence-toggle" role="group" aria-label={`效果条件 ${index + 1} 的状态`}><button type="button" className={condition.presence === 'has' ? 'active' : ''} onClick={() => updateCondition({ presence: 'has' })}>必须已有</button><button type="button" className={condition.presence === 'missing' ? 'active missing' : ''} onClick={() => updateCondition({ presence: 'missing', turnsAtLeast: '', turnsAtMost: '' })}>必须缺少</button></div>
                     <EffectPicker effects={effects} value={condition.token} onValue={(token) => updateCondition({ token })} />
@@ -1391,13 +1514,14 @@ function RuleEditor({
                     <button type="button" className="effect-condition-delete" aria-label={`删除效果条件 ${index + 1}`} onClick={() => setEffectConditions((current) => current.filter((item) => item.id !== condition.id))}><Trash2 size={15} /></button>
                   </div>
                 })}
-              </div> : <div className="effect-condition-empty"><ShieldCheck size={22} /><span><strong>没有效果限制</strong><small>当前规则不会检查任何增益或减益；需要时添加一条即可。</small></span></div>}
+              </div> : <div className="effect-condition-empty"><ShieldCheck size={22} /><span><strong>没有效果限制</strong></span></div>}
+              </div>
             </fieldset>
-            <details className="advanced-conditions span-2"><summary>完整条件数据 <small>试炼进度、队友状态与效果剩余回合等高级条件</small></summary><label className="field"><textarea rows={7} value={advanced} onChange={(event) => setAdvanced(event.target.value)} spellCheck={false} /></label></details>
+            <details className="advanced-conditions span-2"><summary>完整条件数据</summary><label className="field"><textarea rows={7} value={advanced} onChange={(event) => setAdvanced(event.target.value)} spellCheck={false} /></label></details>
             </>}
           </div>
           {error && <div className="inline-error">{error}</div>}
-          <div className="dialog-footer"><span>{ruleKind === 'default' ? '默认规则只在没有严格规则可执行时接管。' : '英雄与行动条件必须满足；各条件组按所选“并且/或者”计算。'}</span><div><Dialog.Close className="button ghost">取消</Dialog.Close><button className="button primary" onClick={commit}>保存规则</button></div></div>
+          <div className="dialog-footer actions-only"><div><Dialog.Close className="button ghost">取消</Dialog.Close><button className="button primary" onClick={commit}>保存规则</button></div></div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -1425,6 +1549,7 @@ function App() {
   const [logsExpanded, setLogsExpanded] = useState(false)
   const compactLogRef = useRef<HTMLPreElement | null>(null)
   const expandedLogRef = useRef<HTMLPreElement | null>(null)
+  const strategyImportRef = useRef<HTMLInputElement | null>(null)
   const [trialOpen, setTrialOpen] = useState(false)
   const [ruleOpen, setRuleOpen] = useState(false)
   const [editIndex, setEditIndex] = useState<number | null>(null)
@@ -1440,6 +1565,10 @@ function App() {
   function changeLanguage(next: UiLanguage) {
     saveLanguage(next)
     setLanguage(next)
+    void api<{ language: UiLanguage }>('/api/preferences', {
+      method: 'POST',
+      body: JSON.stringify({ language: next }),
+    }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
   }
 
   useEffect(() => {
@@ -1469,6 +1598,7 @@ function App() {
       if (pid) params.set('pid', String(pid))
       const next = await api<Bootstrap>(`/api/bootstrap?${params}`)
       setData(next)
+      if (next.language === 'en' || next.language === 'zh-CN') setLanguage(next.language)
       setBossMode(next.bossMode)
       setConfig(next.config)
       setActiveStrategyId(next.activeStrategyId ?? 'default')
@@ -1477,8 +1607,8 @@ function App() {
       setLive(next.state ?? {})
       const resolvedPid = pid ?? next.selectedPid ?? next.processes[0]?.pid
       setSelectedPid(resolvedPid)
-      const inferredDifficulty = Number(String(next.config.objectives?.mandatoryTrialIds?.[0] ?? '8000501').slice(4, 6))
-      if (inferredDifficulty >= 1 && inferredDifficulty <= 6) setTrialSearchDifficulty(inferredDifficulty)
+      const inferredDifficulty = next.state?.chimeraDifficultyId ?? configuredTrialDifficulty(next.config)
+      if (inferredDifficulty) setTrialSearchDifficulty(inferredDifficulty)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -1509,6 +1639,13 @@ function App() {
     return () => window.clearInterval(timer)
   }, [selectedPid, loading, bossMode])
 
+  useEffect(() => {
+    const difficultyId = live.chimeraDifficultyId
+    if (bossMode === 'chimera' && difficultyId && difficultyId >= 1 && difficultyId <= 6) {
+      setTrialSearchDifficulty(difficultyId)
+    }
+  }, [bossMode, live.chimeraDifficultyId])
+
   const heroes = data?.heroes ?? []
   const hydraHeads = data?.hydraHeads ?? []
   const effects = data?.effects ?? []
@@ -1525,9 +1662,10 @@ function App() {
   const selectedStrategyName = selectedStrategyProfile?.name === '默认策略'
     ? (language === 'en' ? 'Default Strategy' : '默认策略')
     : selectedStrategyProfile?.name || config.name || (language === 'en' ? 'Default Strategy' : '默认策略')
-  const savedStrategyTeam = selectedStrategyProfile?.teamHeroIds?.length
-    ? selectedStrategyProfile.teamHeroIds
-    : config.team?.heroTypeIds ?? config.team?.heroIds ?? []
+  const configuredTeam = config.team?.heroTypeIds ?? config.team?.heroIds
+  const hasSavedStrategyTeam = Array.isArray(configuredTeam)
+  const savedStrategyTeam = (selectedStrategyProfile?.teamHeroIds ?? configuredTeam ?? [])
+    .filter((typeId) => Number.isInteger(typeId) && typeId > 0)
 
   const trialCatalogById = useMemo(() => new Map(
     (data?.difficulties ?? []).flatMap((item) => item.trials).map((trial) => [trial.id, trial]),
@@ -1555,23 +1693,25 @@ function App() {
     setConfig(result.config)
     setActiveStrategyId(result.activeStrategyId)
     setStrategyProfiles(result.strategyProfiles)
-    const inferredDifficulty = Number(String(result.config.objectives?.mandatoryTrialIds?.[0] ?? '8000501').slice(4, 6))
-    if (inferredDifficulty >= 1 && inferredDifficulty <= 6) setTrialSearchDifficulty(inferredDifficulty)
+    const inferredDifficulty = configuredTrialDifficulty(result.config)
+    if (inferredDifficulty) setTrialSearchDifficulty(inferredDifficulty)
     setEditIndex(null)
     setRuleOpen(false)
   }
 
   function configForSave(capturePreparedTeam: boolean): Strategy {
     const liveTeam = live.teamHeroIds ?? []
-    if (!capturePreparedTeam || liveTeam.length !== teamSize || new Set(liveTeam).size !== teamSize || liveTeam.some((value) => value <= 0)) {
+    if (!capturePreparedTeam || live.screen !== 'team_selection' || liveTeam.length !== teamSize) {
       return config
     }
+    const selectedTeam = liveTeam.filter((value) => Number.isInteger(value) && value > 0)
+    if (new Set(selectedTeam).size !== selectedTeam.length) return config
     const liveInstances = live.teamHeroInstanceIds ?? []
     return {
       ...config,
       team: {
-        heroTypeIds: [...liveTeam],
-        ...(liveInstances.length === teamSize && new Set(liveInstances).size === teamSize
+        heroTypeIds: selectedTeam,
+        ...(liveInstances.length === selectedTeam.length && new Set(liveInstances).size === selectedTeam.length
           ? { heroInstanceIds: [...liveInstances] }
           : {}),
       },
@@ -1581,7 +1721,16 @@ function App() {
   async function save(showMessage = true, capturePreparedTeam = true) {
     setError('')
     try {
-      const result = await api<StrategyBundle>('/api/config', { method: 'POST', body: JSON.stringify({ bossMode, strategyId: activeStrategyId, config: configForSave(capturePreparedTeam) }) })
+      const result = await api<StrategyBundle>('/api/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          bossMode,
+          strategyId: activeStrategyId,
+          config: configForSave(capturePreparedTeam),
+          capturePreparedTeam,
+          pid: selectedPid,
+        }),
+      })
       applyStrategyBundle(result)
       if (showMessage) setNotice(result.message ?? '策略组已保存')
       return true
@@ -1613,7 +1762,11 @@ function App() {
           bossMode,
           strategyId: activeStrategyId,
           name,
-          ...(profileDialog === 'create' ? { config: configForSave(true) } : {}),
+          ...(profileDialog === 'create' ? {
+            config: configForSave(true),
+            capturePreparedTeam: true,
+            pid: selectedPid,
+          } : {}),
         }),
       })
       applyStrategyBundle(result)
@@ -1663,6 +1816,59 @@ function App() {
       setNotice(result.message ?? '策略组已删除')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setProfileBusy(false)
+    }
+  }
+
+  async function exportStrategyProfile() {
+    if (profileBusy || controller.running) return
+    setProfileBusy(true)
+    setError('')
+    try {
+      if (!(await save(false, false))) return
+      const result = await api<{ document: StrategyExportDocument }>('/api/strategy/profile', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'export', bossMode, strategyId: activeStrategyId }),
+      })
+      const safeName = selectedStrategyName.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-').replace(/[. ]+$/g, '').trim() || 'strategy'
+      const blob = new Blob([JSON.stringify(result.document, null, 2)], { type: 'application/json;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${bossMode}-${safeName}.raid-strategy.json`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setNotice('策略已导出')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setProfileBusy(false)
+    }
+  }
+
+  async function importStrategyFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.currentTarget.files?.[0]
+    event.currentTarget.value = ''
+    if (!file || profileBusy || controller.running) return
+    if (file.size > 2_000_000) {
+      setError('策略文件不能超过 2 MB')
+      return
+    }
+    setProfileBusy(true)
+    setError('')
+    try {
+      const document = JSON.parse(await file.text()) as unknown
+      const result = await api<StrategyBundle>('/api/strategy/profile', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'import', bossMode, document }),
+      })
+      applyStrategyBundle(result)
+      setNotice(result.message ?? '策略已导入为新的策略组')
+    } catch (reason) {
+      setError(reason instanceof SyntaxError ? '策略文件不是有效的 JSON' : reason instanceof Error ? reason.message : String(reason))
     } finally {
       setProfileBusy(false)
     }
@@ -1769,7 +1975,7 @@ function App() {
         {(data?.modes ?? []).map((mode) => (
           <button key={mode.id} type="button" className={bossMode === mode.id ? 'active' : ''} disabled={controller.running} onClick={() => void switchBossMode(mode.id)}>
             <span className="mode-icon">{mode.id === 'chimera' ? <Swords size={21} /> : <Waves size={21} />}</span>
-            <span><strong>{mode.label}</strong><small>{mode.id === 'chimera' ? '形态轮换 · 试炼与奖励' : '四头在场 · 吞噬与斩首'}</small></span>
+            <span><strong>{mode.label}</strong></span>
             {mode.id === 'hydra' && mode.status !== 'ready' && !(bossMode === 'hydra' && live.modeReady) && <em>待实战标定</em>}
           </button>
         ))}
@@ -1781,14 +1987,13 @@ function App() {
       <main className="workspace">
         <aside className="control-column">
           <section className="card team-card">
-            <div className="section-heading"><span><Users size={18} />当前队伍</span><em>{team.length}/{teamSize}</em></div>
+            <div className="section-heading"><span><Users size={18} />当前队伍</span><em>{team.filter((typeId) => typeId > 0).length}/{teamSize}</em></div>
             <div className={`team-row team-${teamSize}`}>
               {Array.from({ length: teamSize }, (_, index) => {
                 const hero = heroByRuntimeId(heroes, team[index])
                 return <div className="team-member" key={index}><HeroAvatar hero={hero} size="lg" /><small>{hero?.name ?? '待读取'}</small></div>
               })}
             </div>
-            <div className="catalog-ready"><Database size={14} /><span>英雄库已就绪</span><strong>{heroes.length} 名英雄</strong></div>
           </section>
 
           <section className="card objectives-card">
@@ -1803,7 +2008,6 @@ function App() {
               <span><small>必做试炼</small><strong>{selectedTrials.length ? `已选择 ${selectedTrials.length} 项` : '点击选择试炼'}</strong><em>{selectedTrialDescriptions[0] || '按当前难度读取完整试炼内容'}</em></span>
               <ChevronDown size={18} />
             </button>}
-            <p className="behavior-note"><ShieldCheck size={16} />{bossMode === 'chimera' ? '必做试炼已不可能完成时免费重整；全部目标达成后停在结算页，不自动保留结果。' : '优先解救被吞噬英雄并利用暴露蛇颈；达到最低伤害后停在结算页，不自动保留结果。'}</p>
             {bossMode === 'hydra' && !live.modeReady && <p className="mode-calibration"><Waves size={16} /><span><strong>等待首次实战标定</strong>进入六头蛇准备界面或手动战斗后，工具会读取区域、四个蛇头和六人队伍；读取成功前不会执行任何操作。</span></p>}
           </section>
 
@@ -1813,7 +2017,6 @@ function App() {
               <button className="button pause" disabled={!controller.running} onClick={() => void stop()}><CirclePause size={19} />暂停</button>
               <button className="button start" disabled={controller.running || !selectedProcess?.accountName || (bossMode === 'hydra' && !live.modeReady)} onClick={() => void start()}><CirclePlay size={19} />开始执行</button>
             </div>
-            <small className="run-hint">只有这里或游戏内暂停会中断接管</small>
           </section>
         </aside>
 
@@ -1830,12 +2033,14 @@ function App() {
               </select>
             </label>
             <div className="strategy-profile-team">
-              <span><small>已保存队伍</small><strong>{savedStrategyTeam.length === teamSize ? `${savedStrategyTeam.length}/${teamSize}` : '等待保存'}</strong></span>
+              <span><small>已保存队伍</small><strong>{hasSavedStrategyTeam ? `${savedStrategyTeam.length}/${teamSize}` : '等待保存'}</strong></span>
               <div>{savedStrategyTeam.slice(0, teamSize).map((typeId, index) => <HeroAvatar key={`${typeId}-${index}`} hero={heroByRuntimeId(heroes, typeId)} size="sm" />)}</div>
-              {savedStrategyTeam.length !== teamSize && <em>点击保存时记录当前准备队伍</em>}
             </div>
             <div className="strategy-profile-actions">
-              <button className="button ghost" disabled={controller.running || profileBusy} onClick={() => openProfileNameDialog('create')}><Copy size={16} />创建副本</button>
+              <button className="button ghost profile-copy-button" title="创建副本" disabled={controller.running || profileBusy} onClick={() => openProfileNameDialog('create')}><Copy size={16} /><span>创建副本</span></button>
+              <input ref={strategyImportRef} className="sr-only" type="file" accept=".json,.raid-strategy.json,application/json" onChange={(event) => void importStrategyFile(event)} />
+              <button className="icon-button" title="导入策略" aria-label="导入策略" disabled={controller.running || profileBusy} onClick={() => strategyImportRef.current?.click()}><Upload size={16} /></button>
+              <button className="icon-button" title="导出策略" aria-label="导出策略" disabled={controller.running || profileBusy} onClick={() => void exportStrategyProfile()}><Download size={16} /></button>
               <button className="icon-button" title="重命名策略组" disabled={controller.running || profileBusy} onClick={() => openProfileNameDialog('rename')}><Edit3 size={16} /></button>
               <button className="icon-button danger" title="删除策略组" disabled={controller.running || profileBusy || strategyProfiles.length <= 1} onClick={() => void deleteStrategyProfile()}><Trash2 size={16} /></button>
             </div>
@@ -1843,7 +2048,6 @@ function App() {
 
           <div className="overview-grid">
             <Metric label="当前伤害" value={formatNumber(live.damage)} icon={<Swords size={18} />} />
-            <Metric label="当前积分" value={formatNumber(live.points)} icon={<Gauge size={18} />} />
             <Metric label="Boss 回合" value={String(bossMode === 'chimera' ? live.chimeraTurn ?? 0 : live.hydraTurn ?? 0)} icon={<Activity size={18} />} />
             <Metric label={bossMode === 'chimera' ? '已完成试炼' : '当前目标'} value={bossMode === 'chimera' ? `${completedTrials.length}` : `${live.headCount ?? 0} 个蛇头`} icon={<Check size={20} />} />
           </div>
@@ -1866,7 +2070,7 @@ function App() {
                   </article>
                 ))}
               </div>
-            ) : <div className="completed-trials-empty"><Check size={17} /><span>战斗中完成试炼后，这里会立即显示试炼内容、当前轮换奖励和奖励图标。</span></div>}
+            ) : <div className="completed-trials-empty"><Check size={17} /><span>尚未完成试炼</span></div>}
           </section> : <section className="card completed-trials-card hydra-summary">
             <div className="completed-trials-heading"><span><Waves size={20} /><strong>六头蛇战斗重点</strong></span><em>{live.modeReady ? '状态已连接' : '等待六头蛇状态'}</em></div>
             {(live.heads?.length ?? 0) > 0 ? <div className="live-hydra-heads">{live.heads?.map((liveHead, index) => {
@@ -1876,16 +2080,15 @@ function App() {
               const stateLabel = head.dead ? '已死亡' : head.isHydraNeck || head.headState === 'exposed_neck' ? '暴露蛇颈' : head.isDevouring ? '正在吞噬' : '可作为目标'
               return <article className={`live-hydra-head${head.dead ? ' dead' : ''}`} key={`${head.id ?? head.typeId}-${index}`}><HydraHeadIcon head={head} size="lg" /><span><strong>{hydraHeadDisplayName(head)}</strong><small>{stateLabel}</small></span></article>
             })}</div> : <div className="hydra-head-catalog">{hydraHeads.map((head) => <span key={head.typeId}><HydraHeadIcon head={head} size="md" /><small>{hydraHeadDisplayName(head)}</small></span>)}</div>}
-            <div className="hydra-safe-target-note"><ShieldCheck size={16} /><span><strong>按蛇头身份选择，不按站位</strong><small>每次行动都会重新识别在场蛇头；优先目标未出现、死亡或不可攻击时自动跳过并使用生命最低的合法蛇头。</small></span></div>
           </section>}
 
           <section className="card rules-card">
             <div className="rules-header">
-              <div><span className="eyebrow"><Sparkles size={14} />策略树</span><h2>行动规则</h2><p>严格规则始终先执行；全部严格规则都不可执行时，才使用英雄的默认技能顺序。</p></div>
+              <div><span className="eyebrow"><Sparkles size={14} />策略树</span><h2>行动规则</h2></div>
               <div className="toolbar"><button className="button ghost" onClick={() => void save()}><Save size={17} />保存</button><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />添加规则</button></div>
             </div>
             <div className="rules-list">
-              {!rules.length && <div className="empty-state"><Database size={34} /><strong>还没有策略规则</strong><span>添加第一条规则后才能开始执行。</span><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />添加规则</button></div>}
+              {!rules.length && <div className="empty-state"><Database size={34} /><strong>还没有策略规则</strong><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />添加规则</button></div>}
               {rules.map((rule, index) => {
                 const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
                 const action = rule.action ?? {}

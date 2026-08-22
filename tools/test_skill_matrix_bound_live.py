@@ -207,7 +207,6 @@ def main() -> int:
                     "objectives": {
                         "mandatoryTrialIds": [],
                         "minimumDamage": 0,
-                        "minimumCompetitionPoints": 0,
                     },
                     "safety": {"requireFreshSnapshotMs": 1500},
                     "rules": [

@@ -25,6 +25,11 @@ from boss_modes import (
     strategy_for_mode,
 )
 from controller_pause import ControllerPauseEvent
+from chimera_catalog_cache import (
+    is_unresolved_skill_name,
+    load_hero_catalog,
+    skill_display_name,
+)
 from inject_probe import queue_command, queue_lifecycle_command, set_takeover
 from named_mutex import NamedMutex
 
@@ -67,13 +72,23 @@ _PARENT_CLEANUP_FINISHED = threading.Event()
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-DEFAULT_ROTATION_ARCHIVE = PROJECT_ROOT / "data" / "chimera-rotation-catalogs.json"
-DEFAULT_CAPABILITY_CACHE = PROJECT_ROOT / "data" / "chimera-skill-capabilities.json"
-DEFAULT_TRIAL_RECIPES = PROJECT_ROOT / "data" / "chimera-trial-recipes.json"
+RESOURCE_ROOT = Path(os.environ.get("CHIMERA_RESOURCE_ROOT", PROJECT_ROOT)).resolve()
+DEFAULT_ROTATION_ARCHIVE = RESOURCE_ROOT / "data" / "chimera-rotation-catalogs.json"
+DEFAULT_CAPABILITY_CACHE = RESOURCE_ROOT / "data" / "chimera-skill-capabilities.json"
+DEFAULT_TRIAL_RECIPES = RESOURCE_ROOT / "data" / "chimera-trial-recipes.json"
 CURRENT_AGENT = (
-    PROJECT_ROOT / "build" / "agent-1226" / "Release" / "RaidChimeraAgent.dll"
+    PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll"
 )
 _ARCHIVED_ROTATION_OBSERVATIONS: set[tuple[Any, ...]] = set()
+_INITIAL_SKILL_NAMES = {
+    int(skill["typeId"]): str(skill.get("name") or "")
+    for hero in load_hero_catalog({}).values()
+    if isinstance(hero, dict)
+    for skill in hero.get("skills", [])
+    if isinstance(skill, dict)
+    and isinstance(skill.get("typeId"), int)
+    and not is_unresolved_skill_name(skill.get("name"))
+}
 SUPPORTED_CONDITION_KEYS = frozenset(
     {
         "form",
@@ -105,7 +120,6 @@ SUPPORTED_CONDITION_KEYS = frozenset(
         "bossHpPctBelow",
         "currentDamageAtLeast",
         "currentDamageBelow",
-        "currentCompetitionPointsAtLeast",
         "hydraHeadCountAtLeast",
         "hydraHeadCountAtMost",
         "devouringHeadsAtLeast",
@@ -305,6 +319,28 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
                 entry["isTransform"], bool
             ):
                 raise ValueError(f"{entry_path}.isTransform 必须是布尔值")
+        first_turn_skill = action.get("firstTurnSkill")
+        if first_turn_skill is not None:
+            first_turn_path = f"{path}.action.firstTurnSkill"
+            if not isinstance(first_turn_skill, dict):
+                raise ValueError(f"{first_turn_path} 必须是对象")
+            skill_type_id = first_turn_skill.get("skillTypeId")
+            if (
+                not isinstance(skill_type_id, int)
+                or isinstance(skill_type_id, bool)
+                or skill_type_id <= 0
+            ):
+                raise ValueError(f"{first_turn_path}.skillTypeId 必须是正整数")
+            if first_turn_skill.get("skillSlot") is not None and (
+                not isinstance(first_turn_skill["skillSlot"], int)
+                or isinstance(first_turn_skill["skillSlot"], bool)
+                or first_turn_skill["skillSlot"] <= 0
+            ):
+                raise ValueError(f"{first_turn_path}.skillSlot 必须是正整数")
+            if first_turn_skill.get("isTransform") is not None and not isinstance(
+                first_turn_skill["isTransform"], bool
+            ):
+                raise ValueError(f"{first_turn_path}.isTransform 必须是布尔值")
         blocked = action.get("blockedSkillTypeIds", [])
         if (
             not isinstance(blocked, list)
@@ -681,15 +717,12 @@ class ObjectiveReport:
     impossible_trial_ids: tuple[int, ...]
     current_damage: float
     minimum_damage: float
-    current_points: int
-    minimum_points: int
 
     @property
     def all_met(self) -> bool:
         return (
             not self.missing_trial_ids
             and self.current_damage >= self.minimum_damage
-            and self.current_points >= self.minimum_points
         )
 
     @property
@@ -860,8 +893,8 @@ def validate_strategy_config(
         or minimum_damage < 0
     ):
         raise ValueError("minimumDamage 必须是非负有限数值")
-    for key in ("minimumCompetitionPoints", "maxRegroupRetries"):
-        value = objectives.get(key, 10 if key == "maxRegroupRetries" else 0)
+    for key in ("maxRegroupRetries",):
+        value = objectives.get(key, 10)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{key} 必须是非负整数")
     if boss_mode == "chimera":
@@ -924,7 +957,7 @@ def validate_strategy_config(
         expected_count = 5 if boss_mode == "chimera" else 6
         if (
             not isinstance(hero_ids, list)
-            or len(hero_ids) != expected_count
+            or len(hero_ids) > expected_count
             or any(
                 not isinstance(value, int)
                 or isinstance(value, bool)
@@ -935,11 +968,11 @@ def validate_strategy_config(
         ):
             count_label = "五" if boss_mode == "chimera" else "六"
             raise ValueError(
-                f"team.heroTypeIds 必须包含{count_label}个互不重复的正整数"
+                f"team.heroTypeIds 最多包含{count_label}个互不重复的正整数"
             )
         if instance_ids is not None and (
             not isinstance(instance_ids, list)
-            or len(instance_ids) != expected_count
+            or len(instance_ids) != len(hero_ids)
             or any(
                 not isinstance(value, int)
                 or isinstance(value, bool)
@@ -948,9 +981,8 @@ def validate_strategy_config(
             )
             or len(set(instance_ids)) != len(instance_ids)
         ):
-            count_label = "五" if boss_mode == "chimera" else "六"
             raise ValueError(
-                f"team.heroInstanceIds 必须包含{count_label}个互不重复的正整数"
+                "team.heroInstanceIds 必须与已保存英雄一一对应且互不重复"
             )
 
 
@@ -1342,44 +1374,86 @@ def current_boss(state: dict[str, Any]) -> dict[str, Any] | None:
 
 def match_skill_cooldown_conditions(
     requested: Any,
-    heroes: list[dict[str, Any]],
+    state_or_heroes: dict[str, Any] | list[dict[str, Any]],
     mode: Any = "all",
 ) -> bool:
     if mode not in {"all", "any"} or not isinstance(requested, list) or not requested:
         return False
+    state = state_or_heroes if isinstance(state_or_heroes, dict) else {}
+    heroes = (
+        state_entities(state, "heroes")
+        if isinstance(state_or_heroes, dict)
+        else state_or_heroes
+    )
+
+    def stable_type_id(hero: dict[str, Any]) -> int | None:
+        source = str(hero.get("avatar") or hero.get("avatarUrl") or "")
+        tail = source.rsplit("/", 1)[-1].split("-", 1)[0]
+        return int(tail) if tail.isdigit() else None
+
+    def skill_for_hero(
+        hero: dict[str, Any], skill_type_id: Any
+    ) -> dict[str, Any] | None:
+        # The top-level list is the active hero's authoritative HUD/model
+        # snapshot. Other heroes retain their own model skill list.
+        if hero.get("id") == state.get("activeHeroId"):
+            active_skill = next(
+                (
+                    skill
+                    for skill in state.get("skills", [])
+                    if isinstance(skill, dict)
+                    and skill.get("typeId") == skill_type_id
+                ),
+                None,
+            )
+            if active_skill is not None:
+                return active_skill
+        return next(
+            (
+                skill
+                for skill in hero.get("skills", [])
+                if isinstance(skill, dict)
+                and skill.get("typeId") == skill_type_id
+            ),
+            None,
+        )
+
     results: list[bool] = []
     for condition in requested:
         if not isinstance(condition, dict):
             return False
         hero_type_id = condition.get("heroTypeId")
         skill_type_id = condition.get("skillTypeId")
+        living = [hero for hero in heroes if hero.get("dead") is not True]
         hero = next(
             (
                 candidate
-                for candidate in heroes
+                for candidate in living
                 if candidate.get("typeId") == hero_type_id
-                and candidate.get("dead") is not True
+                or stable_type_id(candidate) == hero_type_id
             ),
             None,
         )
+        # Runtime/form TypeIds may differ from the stable identity saved by the
+        # editor. An exact skill TypeId is a safe final identity link.
         if hero is None:
-            return False
-        skill = next(
-            (
-                candidate
-                for candidate in hero.get("skills", [])
-                if isinstance(candidate, dict)
-                and candidate.get("typeId") == skill_type_id
-            ),
-            None,
-        )
+            hero = next(
+                (
+                    candidate
+                    for candidate in living
+                    if skill_for_hero(candidate, skill_type_id) is not None
+                ),
+                None,
+            )
+        skill = skill_for_hero(hero, skill_type_id) if hero is not None else None
         cooldown = skill.get("cooldown") if skill else None
         if (
             not isinstance(cooldown, int)
             or isinstance(cooldown, bool)
             or cooldown < 0
         ):
-            return False
+            results.append(False)
+            continue
         lower = condition.get("turnsAtLeast")
         upper = condition.get("turnsAtMost")
         matched = True
@@ -1552,9 +1626,7 @@ def evaluate_objectives(
     )
     battle = state.get("battle", {})
     damage = battle.get("currentDamage", 0)
-    points = battle.get("currentCompetitionPoints", 0)
     minimum_damage = objectives.get("minimumDamage", 0)
-    minimum_points = objectives.get("minimumCompetitionPoints", 0)
     return ObjectiveReport(
         mandatory_trial_ids=mandatory_ids,
         completed_trial_ids=completed,
@@ -1566,8 +1638,6 @@ def evaluate_objectives(
             if isinstance(minimum_damage, (int, float))
             else 0.0
         ),
-        current_points=int(points) if isinstance(points, int) else 0,
-        minimum_points=int(minimum_points) if isinstance(minimum_points, int) else 0,
     )
 
 
@@ -1931,10 +2001,6 @@ def matches(when: dict[str, Any], state: dict[str, Any]) -> bool:
             battle.get("currentDamage"),
             lambda a, b: a < b,
         ),
-        "currentCompetitionPointsAtLeast": (
-            battle.get("currentCompetitionPoints"),
-            lambda a, b: a >= b,
-        ),
         "hydraHeadCountAtLeast": (
             sum(item.get("dead") is not True for item in bosses),
             lambda a, b: a >= b,
@@ -2097,7 +2163,7 @@ def matches(when: dict[str, Any], state: dict[str, Any]) -> bool:
 
     if "skillCooldownConditions" in when and not match_skill_cooldown_conditions(
         when["skillCooldownConditions"],
-        heroes,
+        state,
         when.get("skillCooldownConditionsMode", "all"),
     ):
         return False
@@ -2576,6 +2642,7 @@ def start_first_battle_if_ready(
     desired_hero_ids: list[int] | None = None,
     desired_hero_type_ids: list[int] | None = None,
     boss_mode: str | None = None,
+    announce_wait: bool = False,
 ) -> bool:
     lifecycle = ipc.lifecycle()
     if not lifecycle or lifecycle.get("screen") != "team_selection":
@@ -2592,6 +2659,20 @@ def start_first_battle_if_ready(
             f"当前是{'六头蛇' if selected_mode == 'hydra' else '奇美拉'}队伍界面，"
             f"与准备接管的{label}模式不一致"
         )
+    selected_count = len(
+        {
+            item
+            for item in selection.get("heroIds", [])
+            if isinstance(item, int) and not isinstance(item, bool) and item > 0
+        }
+    )
+    if selection.get("filled") is not True and announce_wait:
+        print(
+            f"当前{label}队伍已选择 {selected_count}/{team_size} 名英雄；"
+            "将按当前队伍自动开始战斗。",
+            flush=True,
+        )
+
     def complete_ids(value: Any) -> list[int]:
         if not isinstance(value, list):
             return []
@@ -2606,28 +2687,10 @@ def start_first_battle_if_ready(
     current_hero_type_ids = complete_ids(selection.get("heroTypeIds"))
     expected_hero_ids = complete_ids(desired_hero_ids)
     expected_hero_type_ids = complete_ids(desired_hero_type_ids)
-    has_saved_team = bool(expected_hero_ids or expected_hero_type_ids)
-    if has_saved_team and selection.get("filled") is not True:
-        if selection.get("heroIds") or selection.get("heroTypeIds"):
-            raise RuntimeError("当前队伍只选择了部分英雄，拒绝自动覆盖")
-        if mode == "hydra":
-            raise RuntimeError("当前六头蛇队伍未选满；请先在游戏内选满六名英雄")
-        if not expected_hero_ids:
-            raise RuntimeError("当前奇美拉队伍未选满；请先在游戏内选满策略组保存的五名英雄")
-        lifecycle = select_team_heroes(
-            ipc,
-            pid=pid,
-            agent=agent,
-            session_id=session_id,
-            hero_ids=expected_hero_ids,
-            nonce=command_nonce,
-        )
-        selection = lifecycle.get("selection") or {}
-        current_hero_ids = complete_ids(selection.get("heroIds"))
-        current_hero_type_ids = complete_ids(selection.get("heroTypeIds"))
-    if expected_hero_ids and current_hero_ids != expected_hero_ids:
+    selection_is_full = selection.get("filled") is True
+    if selection_is_full and expected_hero_ids and current_hero_ids != expected_hero_ids:
         raise RuntimeError(f"当前{team_size}人队伍与策略组保存队伍不一致（具体英雄副本）")
-    if expected_hero_type_ids and current_hero_type_ids != expected_hero_type_ids:
+    if selection_is_full and expected_hero_type_ids and current_hero_type_ids != expected_hero_type_ids:
         raise RuntimeError(f"当前{team_size}人队伍与策略组保存队伍不一致（英雄身份或顺序）")
     context = selection.get("context")
     if not isinstance(context, int) or context <= 0:
@@ -2696,16 +2759,13 @@ def start_first_battle_if_ready(
             elif current_selection.get("quickBattle") is True:
                 reason = "快速战斗仍处于开启状态"
             elif current_selection.get("filled") is not True:
-                reason = f"当前没有选满{team_size}名英雄"
+                reason = "未满队伍自动开战请求被游戏拒绝"
             elif current_selection.get("valid") is not True:
                 reason = "准备队伍仍在解析刚刚切换的英雄"
         diagnostic = ipc.diagnostic()
         detail = f"；代理诊断：{diagnostic}" if diagnostic else ""
         raise RuntimeError(f"首场自动开始未通过安全检查：{reason}{detail}")
-    print(
-        f"已用当前选定的{team_size}名英雄开始首场{label}战斗。",
-        flush=True,
-    )
+    print(f"已用当前选定的 {selected_count} 名英雄开始首场{label}战斗。", flush=True)
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         require_takeover_active(ipc, session_id)
@@ -3065,7 +3125,7 @@ def restart_hydra_from_result(
     nonce: int,
     desired_hero_ids: list[int] | None,
     desired_hero_type_ids: list[int] | None,
-) -> None:
+) -> bool:
     lifecycle = ipc.lifecycle() or {}
     result_state = lifecycle.get("result") or {}
     context = result_state.get("context") if isinstance(result_state, dict) else None
@@ -3099,11 +3159,42 @@ def restart_hydra_from_result(
         raise RuntimeError(f"六头蛇自动重整没有通过安全检查：{reason}")
 
     deadline = time.monotonic() + 30.0
+    stable_selection_key: tuple[Any, ...] | None = None
+    stable_since = 0.0
     while time.monotonic() < deadline:
         require_takeover_active(ipc, session_id)
         current = ipc.lifecycle() or {}
         screen = current.get("screen")
         if screen == "team_selection":
+            selection = current.get("selection") or {}
+            if not isinstance(selection, dict):
+                time.sleep(0.05)
+                continue
+            selection_key = (
+                selection.get("context"),
+                selection.get("areaTypeId"),
+                selection.get("stageId"),
+                selection.get("valid"),
+                tuple(selection.get("heroIds") or []),
+                tuple(selection.get("heroTypeIds") or []),
+            )
+            if selection.get("valid") is not True:
+                stable_selection_key = None
+                stable_since = 0.0
+                time.sleep(0.05)
+                continue
+            now = time.monotonic()
+            if selection_key != stable_selection_key:
+                stable_selection_key = selection_key
+                stable_since = now
+                time.sleep(0.05)
+                continue
+            # OnRestartPressed performs an asynchronous server-side regroup.
+            # Wait for the returned selection and its current (even partial)
+            # roster to remain unchanged before pressing Start.
+            if now - stable_since < 2.0:
+                time.sleep(0.05)
+                continue
             started = start_first_battle_if_ready(
                 ipc,
                 pid=pid,
@@ -3115,19 +3206,33 @@ def restart_hydra_from_result(
                 boss_mode="hydra",
             )
             if started:
-                return
+                return True
         elif screen == "battle":
             battle = current.get("battle") or {}
             if not isinstance(battle, dict) or battle.get("bossMode") != "hydra":
                 raise RuntimeError("自动重整后进入的不是六头蛇战斗，已停止接管")
             actual_instances = battle.get("heroIds")
             actual_types = battle.get("heroTypeIds")
-            if desired_hero_ids and actual_instances != desired_hero_ids:
+            actual_team_is_full = (
+                isinstance(actual_types, list)
+                and len(actual_types) == 6
+                and all(
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value > 0
+                    for value in actual_types
+                )
+                and len(set(actual_types)) == 6
+            )
+            if actual_team_is_full and desired_hero_ids and actual_instances != desired_hero_ids:
                 raise RuntimeError("自动重整后的六人队伍与策略组不一致（具体英雄副本）")
-            if desired_hero_type_ids and actual_types != desired_hero_type_ids:
+            if actual_team_is_full and desired_hero_type_ids and actual_types != desired_hero_type_ids:
                 raise RuntimeError("自动重整后的六人队伍与策略组不一致（英雄身份或顺序）")
-            return
+            return True
         time.sleep(0.05)
+    current = ipc.lifecycle() or {}
+    if current.get("screen") == "team_selection":
+        return False
     raise RuntimeError("六头蛇自动重整后 30 秒内没有进入准备界面或新战斗")
 
 
@@ -3166,7 +3271,6 @@ def result_screen_reached(
         print(
             "战斗已结束，已停留在结算画面；"
             f"伤害 {raw_damage if damage is not None else '未知'}，"
-            f"积分 {ledger.get('competitionPoints', '未知')}，"
             f"完成试炼 {ledger.get('completedChallengeCount', '未知')}。"
             "工具不会保存结果或开始下一轮。",
             flush=True,
@@ -3221,7 +3325,7 @@ def result_screen_reached(
         f"正在执行第 {used + 1} 次免费重整并重新开战。",
         flush=True,
     )
-    restart_hydra_from_result(
+    restarted = restart_hydra_from_result(
         ipc,
         pid=pid,
         agent=agent,
@@ -3231,10 +3335,14 @@ def result_screen_reached(
         desired_hero_type_ids=desired_hero_type_ids,
     )
     runtime["regroupRetries"] = used + 1
-    print(
-        "六头蛇已用策略组保存的六人队伍重新进入手动战斗。",
-        flush=True,
-    )
+    if restarted:
+        print("六头蛇已用当前队伍重新进入手动战斗。", flush=True)
+    else:
+        print(
+            "六头蛇已进入准备界面；正在等待当前队伍状态稳定，"
+            "接管保持运行。",
+            flush=True,
+        )
     return False
 
 
@@ -4035,43 +4143,93 @@ def default_skill_priority_decision(
         skill_type_id = entry.get("skillTypeId")
         if skill_type_id in blocked or skill_type_id in reserved:
             continue
-        if entry.get("isTransform"):
-            skill = select_transform_skill(state, entry)
-            target_selector: Any = {"type": "self"}
-        else:
-            skill = select_skill(entry, state)
-            target_selector = entry.get("target", {"type": "auto"})
-        if skill is None:
+        decision = default_skill_entry_decision(name, entry, state)
+        if decision is not None:
+            return decision
+    return None
+
+
+def default_skill_entry_decision(
+    name: str,
+    entry: dict[str, Any],
+    state: dict[str, Any],
+) -> Decision | None:
+    """Select one configured default skill with its own target policy."""
+    if entry.get("isTransform"):
+        skill = select_transform_skill(state, entry)
+        target_selector: Any = {"type": "self"}
+    else:
+        skill = select_skill(entry, state)
+        target_selector = entry.get("target", {"type": "auto"})
+    if skill is None:
+        return None
+    valid_target_ids = {
+        value
+        for value in skill.get("validTargetIds", [])
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    has_dead_legal_target = any(
+        hero.get("dead") is True and hero.get("id") in valid_target_ids
+        for hero in state_entities(state, "heroes")
+    )
+    target = select_target(
+        {"type": "auto"} if has_dead_legal_target else target_selector,
+        skill,
+        state,
+    )
+    selector_type = (
+        target_selector.get("type")
+        if isinstance(target_selector, dict)
+        else target_selector
+    )
+    if target is None and selector_type != "auto":
+        target = select_target({"type": "auto"}, skill, state)
+    if target is None:
+        return None
+    return Decision(
+        rule=name,
+        skill=skill,
+        target_id=target[0],
+        target_label=target[1],
+    )
+
+
+def first_turn_default_decision(
+    rules: list[Any], state: dict[str, Any]
+) -> Decision | None:
+    """Run a hero's explicit opener before strict and normal default rules."""
+    # Battle models do not use one universal origin here: some modes publish
+    # the first action window as TurnCount 0, while others have already
+    # advanced it to 1. The hero's second personal turn starts at 2.
+    hero_turn_count = state.get("activeHeroTurnCount")
+    if (
+        not isinstance(hero_turn_count, int)
+        or isinstance(hero_turn_count, bool)
+        or hero_turn_count not in {0, 1}
+    ):
+        return None
+    for rule in rules:
+        if not isinstance(rule, dict):
             continue
-        valid_target_ids = {
-            value
-            for value in skill.get("validTargetIds", [])
-            if isinstance(value, int) and not isinstance(value, bool)
-        }
-        has_dead_legal_target = any(
-            hero.get("dead") is True and hero.get("id") in valid_target_ids
-            for hero in state_entities(state, "heroes")
-        )
-        target = select_target(
-            {"type": "auto"} if has_dead_legal_target else target_selector,
-            skill,
+        action = rule.get("action")
+        if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
+            continue
+        entry = action.get("firstTurnSkill")
+        if not isinstance(entry, dict):
+            continue
+        when = rule.get("when", {})
+        if not isinstance(when, dict) or not matches(
+            {key: value for key, value in when.items() if key in DEFAULT_POLICY_SCOPE_KEYS},
+            state,
+        ):
+            continue
+        decision = default_skill_entry_decision(
+            f"{rule.get('name', '默认技能顺序')} · 首回合技能",
+            entry,
             state,
         )
-        selector_type = (
-            target_selector.get("type")
-            if isinstance(target_selector, dict)
-            else target_selector
-        )
-        if target is None and selector_type != "auto":
-            target = select_target({"type": "auto"}, skill, state)
-        if target is None:
-            continue
-        return Decision(
-            rule=name,
-            skill=skill,
-            target_id=target[0],
-            target_label=target[1],
-        )
+        if decision is not None:
+            return decision
     return None
 
 
@@ -4204,12 +4362,16 @@ def evaluate(
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory | None = None,
 ) -> Decision | None:
+    rules = config.get("rules", [])
+    if isinstance(rules, list):
+        first_turn = first_turn_default_decision(rules, state)
+        if first_turn is not None:
+            return first_turn
     tree = config.get("strategyTree")
     if isinstance(tree, dict):
         return evaluate_strategy_node(
             tree, state, capability_memory=capability_memory
         )
-    rules = config.get("rules", [])
     if not isinstance(rules, list):
         return None
     for rule in rules:
@@ -4317,16 +4479,13 @@ def process_state(
     if (
         objective_report.mandatory_trial_ids
         or objective_report.minimum_damage > 0
-        or objective_report.minimum_points > 0
     ):
         print(
             "目标进度："
             f"必要试炼 {len(objective_report.completed_trial_ids)}/"
             f"{len(objective_report.mandatory_trial_ids)}，"
             f"伤害 {objective_report.current_damage:g}/"
-            f"{objective_report.minimum_damage:g}，"
-            f"积分 {objective_report.current_points}/"
-            f"{objective_report.minimum_points}",
+            f"{objective_report.minimum_damage:g}",
             flush=True,
         )
     if objective_report.mandatory_impossible:
@@ -4407,11 +4566,17 @@ def process_state(
         return False
 
     skill = decision.skill
-    skill_label = str(skill.get("name") or f"技能 {skill.get('typeId', '?')}")
+    skill_label = skill_display_name(skill)
+    if is_unresolved_skill_name(skill.get("name")):
+        skill_label = _INITIAL_SKILL_NAMES.get(skill.get("typeId"), skill_label)
     action_summary = (
         f"准备执行：英雄“{active_hero_label}”命中规则“{decision.rule}”，"
         f"使用“{skill_label}”，目标“{decision.target_label}”；"
     )
+    if decision.rule.endswith("首回合技能"):
+        action_summary += (
+            f"英雄个人首回合（游戏计数 {state.get('activeHeroTurnCount', '?')}）；"
+        )
     if ACTIVE_BOSS_MODE == "hydra":
         hydra = state.get("hydra", {})
         hydra_turn = (
@@ -4597,7 +4762,7 @@ def main() -> int:
         help="选择共享控制器中的联盟 Boss 模式",
     )
     parser.add_argument(
-        "--agent", type=Path, default=Path("build/agent-1226/Release/RaidChimeraAgent.dll")
+        "--agent", type=Path, default=Path("build/agent-1231/Release/RaidChimeraAgent.dll")
     )
     parser.add_argument(
         "--rotation-archive",
@@ -4753,6 +4918,7 @@ def main() -> int:
                     desired_hero_ids=desired_hero_ids,
                     desired_hero_type_ids=desired_hero_type_ids,
                     boss_mode=args.boss_mode,
+                    announce_wait=True,
                 )
             if args.once:
                 state = ipc.decision()

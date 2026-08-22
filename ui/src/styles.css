@@ -3,7 +3,7 @@
   color: #e9f0f5;
   background: #07101b;
   font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  text-rendering: auto;
   --bg: #07101b;
   --surface: #0d1927;
   --surface-2: #122235;
@@ -20,6 +20,7 @@
 }
 
 * { box-sizing: border-box; }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 
@@ -300,7 +301,7 @@ select option { color: #e9f0f5; background: #102033; }
 .profile-dialog { width: min(540px, calc(100vw - 40px)); grid-template-rows: auto auto auto; }
 .profile-name-field { margin: 4px 0 8px; }
 
-.overview-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .metric { min-width: 0; gap: 10px; border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; background: rgba(13, 27, 42, .72); }
 .metric-icon { flex: 0 0 auto; width: 32px; height: 32px; display: grid; place-items: center; color: var(--gold); border-radius: 9px; background: rgba(228, 189, 105, .08); }
 .metric > span:last-child { min-width: 0; display: grid; gap: 1px; }
@@ -440,6 +441,7 @@ select option { color: #e9f0f5; background: #102033; }
 .reward-list.compact .reward-copy small { font-size: 9px; }
 .reward-empty { color: var(--muted); font-size: 10px; }
 .dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-top: 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+.dialog-footer.actions-only { justify-content: flex-end; }
 .dialog-footer > div { display: flex; gap: 8px; }
 .select-with-avatar { height: 40px; display: flex; align-items: center; gap: 7px; padding-left: 5px; border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .66); }
 .select-with-avatar select { height: 38px; padding-left: 3px; border: 0; background: transparent; box-shadow: none !important; }
@@ -476,8 +478,13 @@ select option { color: #e9f0f5; background: #102033; }
 .skill-policy legend { padding: 0 6px; color: #cbd7df; font-size: 11px; font-weight: 650; }
 .skill-policy legend small { color: var(--muted); font-size: 9px; font-weight: 400; }
 .skill-policy > p { margin: 0 0 9px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.first-turn-policy { min-height: 44px; display: grid; grid-template-columns: minmax(150px, 1fr) minmax(210px, .9fr); align-items: center; gap: 10px; margin-bottom: 9px; padding: 7px 9px; border: 1px solid rgba(247, 195, 89, .4); border-radius: 9px; background: rgba(247, 195, 89, .07); }
+.first-turn-policy > span { display: grid; gap: 2px; }
+.first-turn-policy strong { color: var(--gold); font-size: 10px; }
+.first-turn-policy small { color: var(--muted); font-size: 8px; }
+.first-turn-policy select { min-width: 0; height: 28px; padding: 0 8px; color: var(--text); border: 1px solid var(--line); border-radius: 7px; background: rgba(8, 20, 32, .8); font-size: 9px; }
 .skill-policy-list { display: grid; gap: 6px; }
-.skill-policy-row { min-width: 0; min-height: 52px; display: grid; grid-template-columns: 25px 38px minmax(150px, 1fr) auto auto; align-items: center; gap: 8px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .45); }
+.skill-policy-row { min-width: 0; min-height: 52px; display: grid; grid-template-columns: 25px 38px minmax(135px, 1fr) minmax(165px, .85fr) auto auto; align-items: center; gap: 8px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .45); }
 .skill-policy-row.blocked { opacity: .62; }
 .skill-rank { width: 21px; height: 21px; display: grid; place-items: center; color: #07121d; border-radius: 50%; background: var(--teal); font-size: 9px; font-weight: 800; }
 .skill-policy-row.blocked .skill-rank { color: var(--muted); background: #253746; }
@@ -485,6 +492,12 @@ select option { color: #e9f0f5; background: #102033; }
 .skill-policy-copy strong, .skill-policy-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .skill-policy-copy strong { color: var(--text); font-size: 10px; }
 .skill-policy-copy small { color: var(--muted); font-size: 8px; }
+.skill-policy-target { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.skill-policy-target select, .skill-policy-target button { min-width: 0; height: 28px; padding: 0 8px; color: var(--text); border: 1px solid var(--line); border-radius: 7px; background: rgba(8, 20, 32, .8); font-size: 9px; }
+.skill-policy-target button { color: var(--teal); cursor: pointer; }
+.skill-policy-target button.active { border-color: var(--line-strong); background: rgba(85, 211, 192, .09); }
+.skill-policy-target select:disabled, .skill-policy-target button:disabled { opacity: .5; cursor: default; }
+.default-skill-head-priority { margin: 9px 0 0; }
 .reserved-badge { padding: 3px 6px; color: var(--gold); border: 1px solid rgba(228, 189, 105, .3); border-radius: 999px; font-size: 8px; font-style: normal; white-space: nowrap; }
 .skill-policy-actions { display: flex; align-items: center; gap: 4px; }
 .skill-policy-actions button { height: 28px; display: inline-flex; align-items: center; justify-content: center; padding: 0 7px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; background: rgba(8, 20, 32, .75); cursor: pointer; font-size: 8px; }
@@ -557,6 +570,9 @@ select option { color: #e9f0f5; background: #102033; }
 .condition-builder legend, .cooldown-condition-builder legend, .effect-condition-builder legend { padding: 0 6px; color: #cbd7df; font-size: 11px; font-weight: 650; }
 .condition-builder legend small, .cooldown-condition-builder legend small, .effect-condition-builder legend small { color: var(--muted); font-size: 9px; font-weight: 400; }
 .condition-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.condition-subsection { min-width: 0; }
+.condition-subsection + .condition-subsection { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.condition-subsection-title { margin-bottom: 7px; color: var(--teal); font-size: 9px; font-weight: 750; letter-spacing: .04em; }
 .effect-icon { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; overflow: hidden; color: var(--teal); border-radius: 6px; background: #152a3c; }
 .effect-icon img { width: 100%; height: 100%; object-fit: cover; }
 .effect-condition-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
@@ -698,12 +714,16 @@ body { font-size: 14px; }
 .skill-policy legend, .skill-picker legend, .target-picker legend, .condition-builder legend, .cooldown-condition-builder legend, .effect-condition-builder legend { font-size: 14px; }
 .skill-policy legend small, .skill-picker legend small, .target-picker legend small, .condition-builder legend small, .cooldown-condition-builder legend small, .effect-condition-builder legend small { font-size: 11px; }
 .skill-policy > p { font-size: 12px; }
-.skill-policy-row { min-height: 82px; grid-template-columns: 30px 46px minmax(190px, 1fr) auto auto; gap: 10px; padding: 9px; }
+.first-turn-policy { min-height: 56px; padding: 9px 11px; }
+.first-turn-policy strong { font-size: 13px; }
+.first-turn-policy small { font-size: 11px; }
+.first-turn-policy select { height: 34px; font-size: 12px; }
+.skill-policy-row { min-height: 72px; grid-template-columns: 30px 46px minmax(170px, 1fr) minmax(200px, .85fr) auto auto; gap: 10px; padding: 9px; }
 .skill-rank { width: 26px; height: 26px; font-size: 11px; }
 .skill-policy-copy { gap: 3px; }
 .skill-policy-copy strong { font-size: 13px; }
 .skill-policy-copy small { font-size: 11px; }
-.skill-policy-copy em { display: -webkit-box; overflow: hidden; color: #b8c7d1; font-size: 11px; font-style: normal; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.skill-policy-target select, .skill-policy-target button { height: 34px; font-size: 12px; }
 .reserved-badge, .skill-policy-actions button, .policy-note { font-size: 11px; }
 .skill-policy-actions button { height: 34px; }
 .skill-policy-actions .blocked-toggle { min-width: 104px; }
@@ -722,6 +742,7 @@ body { font-size: 14px; }
 .skill-detail small { font-size: 11px; }
 .effect-icon { width: 34px; height: 34px; }
 .effect-condition-heading strong, .effect-condition-empty strong { font-size: 13px; }
+.condition-subsection-title { font-size: 12px; }
 .effect-condition-heading small, .effect-condition-empty small { font-size: 11px; }
 .condition-logic-select { font-size: 10px; }
 .condition-logic-select select { min-height: 42px; font-size: 11px; }
@@ -776,6 +797,8 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
   .effect-condition-delete { width: 36px; }
   .strategy-profile-card { grid-template-columns: minmax(150px, .8fr) minmax(200px, 1fr) auto; }
   .strategy-profile-team { display: none; }
+  .profile-copy-button { width: 36px; padding: 0; }
+  .profile-copy-button span { display: none; }
 }
 
 @media (max-height: 720px) {
@@ -808,6 +831,8 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
   .topbar-actions { gap: 5px; }
   .workspace { grid-template-columns: 310px minmax(0, 1fr); padding: 10px; gap: 10px; }
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .strategy-profile-card { grid-template-columns: minmax(180px, 1fr) auto; }
+  .strategy-profile-identity { display: none; }
   .rule-row { grid-template-columns: 25px 38px minmax(130px, 1fr) minmax(125px, 1fr) auto; }
   .rule-row .rule-target { display: none; }
   .hero-library, .skill-library { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -25,6 +25,35 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 
+def enable_per_monitor_dpi_awareness() -> None:
+    """Prevent Windows from bitmap-scaling the WebView on high-DPI displays."""
+    if os.name != "nt":
+        return
+    try:
+        set_context = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        set_context.argtypes = [ctypes.c_void_p]
+        set_context.restype = ctypes.c_bool
+        if set_context(ctypes.c_void_p(-4)):  # PER_MONITOR_AWARE_V2
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        set_awareness = ctypes.windll.shcore.SetProcessDpiAwareness
+        set_awareness.argtypes = [ctypes.c_int]
+        set_awareness.restype = ctypes.c_long
+        if set_awareness(2) in (0, 0x80070005):  # success or already configured
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+enable_per_monitor_dpi_awareness()
+
+
 def _runtime_project_root() -> Path:
     configured = os.environ.get("CHIMERA_PROJECT_ROOT")
     if configured:
@@ -45,7 +74,9 @@ def _runtime_project_root() -> Path:
 
 
 PROJECT_ROOT = _runtime_project_root()
+BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT)).resolve()
 os.environ.setdefault("CHIMERA_PROJECT_ROOT", str(PROJECT_ROOT))
+os.environ.setdefault("CHIMERA_RESOURCE_ROOT", str(BUNDLE_ROOT))
 TOOLS_DIR = PROJECT_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
@@ -56,6 +87,7 @@ if VENDORED_PYTHON.is_dir() and str(VENDORED_PYTHON) not in sys.path:
 from agent_ipc import AgentIpc  # noqa: E402
 from boss_modes import (  # noqa: E402
     HYDRA_HEAD_TYPE_IDS,
+    HYDRA_RESERVED_HEAD_TYPE_IDS,
     MODE_SPECS,
     STRATEGY_STORE,
     active_strategy_id,
@@ -73,27 +105,24 @@ from boss_modes import (  # noqa: E402
     update_mode_strategy,
 )
 from chimera_catalog_cache import (  # noqa: E402
-    cache_live_rewards,
+    cache_live_rotation_catalog,
     ensure_ui_catalog_cache,
+    is_unresolved_skill_name,
     load_hero_catalog,
     save_hero_catalog,
+    skill_display_name,
 )
 from chimera_controller import latest_account_state, validate_strategy_config  # noqa: E402
 from chimera_runtime import (  # noqa: E402
     AGENT,
-    CONTROLLER,
-    EXPECTED_BUILD,
-    INJECTOR,
     USER_STRATEGY,
-    account_from_probe,
     identify_account,
     lifecycle_team_ids,
     require_expected_account,
     strategy_template,
-    worker_python,
+    worker_command,
 )
 from chimera_icons import (  # noqa: E402
-    EFFECT_OPTIONS,
     cache_visual_asset,
     discover_game_hydra_heads,
     game_hero_asset,
@@ -108,11 +137,11 @@ from inject_probe import seed_battle_context, seed_selection_context  # noqa: E4
 from named_mutex import NamedMutex  # noqa: E402
 from raid_processes import (  # noqa: E402
     attach_windows,
+    is_supported_raid_executable,
     raid_processes,
 )
 
 
-BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
 BUNDLED_DIST_DIR = BUNDLE_ROOT / "ui" / "dist"
 DIST_DIR = (
     BUNDLED_DIST_DIR
@@ -120,7 +149,7 @@ DIST_DIR = (
     else PROJECT_ROOT / "ui" / "dist"
 )
 HERO_CATALOG = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
-UI_CATALOG = PROJECT_ROOT / "cache" / "chimera-ui-catalog.json"
+UI_PREFERENCES = PROJECT_ROOT / "config" / "raid-boss-ui-preferences.user.json"
 EXPECTED_RULE_KEYS = {
     "name",
     "when",
@@ -133,7 +162,7 @@ EXPECTED_RULE_KEYS = {
 
 def hero_catalog_identity(hero_id: int, hero: dict[str, Any]) -> int:
     source = str(hero.get("avatar") or hero.get("avatarUrl") or "")
-    tail = source.rsplit("/", 1)[-1]
+    tail = source.rsplit("/", 1)[-1].split("-", 1)[0]
     return int(tail) if tail.isdigit() else hero_id
 
 
@@ -240,8 +269,8 @@ def normalized_strategy(
     if not isinstance(value, dict):
         raise ValueError("策略必须是一个对象")
     rules = value.get("rules")
-    if not isinstance(rules, list) or not rules:
-        raise ValueError("至少需要一条策略规则")
+    if not isinstance(rules, list):
+        raise ValueError("策略规则必须是一个数组")
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
             raise ValueError(f"第 {index + 1} 条策略规则格式无效")
@@ -391,7 +420,7 @@ class ControllerManager:
     def _run_injector(self, arguments: list[str], timeout: int) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         result = subprocess.run(
-            [worker_python(), str(INJECTOR), "--pid", str(arguments[0]), "--agent", str(AGENT), *arguments[1:]],
+            [*worker_command("injector"), "--pid", str(arguments[0]), "--agent", str(AGENT), *arguments[1:]],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -462,8 +491,7 @@ class ControllerManager:
 
             creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             controller_arguments = [
-                    worker_python(),
-                    str(CONTROLLER),
+                    *worker_command("controller"),
                     "--parent-pid",
                     str(os.getpid()),
                     "--pid",
@@ -583,7 +611,11 @@ class ChimeraService:
             self.hero_catalog_mtime_ns = 0
         self.ui_catalog = ensure_ui_catalog_cache()
         self.effect_options = runtime_effect_options([])
-        installed_hydra_heads = dict(discover_game_hydra_heads())
+        installed_hydra_heads = {
+            type_id: kind
+            for type_id, kind in discover_game_hydra_heads()
+            if type_id not in HYDRA_RESERVED_HEAD_TYPE_IDS
+        }
         hydra_head_type_ids = sorted(
             set(HYDRA_HEAD_TYPE_IDS) | set(installed_hydra_heads)
         )
@@ -605,10 +637,9 @@ class ChimeraService:
             for type_id in hydra_head_type_ids
         }
         self.cached_rotation_keys: set[tuple[str, int]] = set()
-        # Keep the last complete, type-resolved preparation team while the
-        # game briefly reports the deselect/select transition.  A partial
-        # snapshot must never erase a slot or expose hero instance ids as
-        # catalog type ids; the next complete snapshot replaces this cache.
+        # The cache is only a fallback for snapshots that omit the slot array.
+        # Normal preparation updates preserve all slots, including empty ones,
+        # so changing a single champion is visible before the team is full.
         self.live_team_cache: dict[tuple[int, str], list[int]] = {}
         try:
             self.visual_cache_status = preload_game_visuals(self.hero_catalog)
@@ -652,6 +683,19 @@ class ChimeraService:
     def strategy_store(self) -> dict[str, Any]:
         return load_strategy_store(STRATEGY_STORE)
 
+    def ui_preferences(self) -> dict[str, str]:
+        value = read_json(UI_PREFERENCES, {})
+        language = value.get("language") if isinstance(value, dict) else None
+        return {"language": language if language in {"en", "zh-CN"} else "en"}
+
+    def save_ui_preferences(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict) or value.get("language") not in {"en", "zh-CN"}:
+            raise ValueError("不支持的界面语言")
+        preferences = {"language": str(value["language"])}
+        with self.lock:
+            atomic_write_json(UI_PREFERENCES, preferences)
+        return preferences
+
     def strategy(self, boss_mode: str = "chimera") -> dict[str, Any]:
         return strategy_for_mode(self.strategy_store(), boss_mode)
 
@@ -691,6 +735,50 @@ class ChimeraService:
             )
             atomic_write_json(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
+
+    def config_with_prepared_team(
+        self, value: Any, pid: Any, boss_mode: str
+    ) -> Any:
+        """Attach the currently visible preparation heroes to a strategy."""
+        if (
+            not isinstance(value, dict)
+            or not isinstance(pid, int)
+            or isinstance(pid, bool)
+        ):
+            return value
+        live = self.live_state(pid, boss_mode)
+        expected_size = int(mode_spec(boss_mode)["teamSize"])
+        hero_type_ids = live.get("teamHeroIds")
+        if (
+            live.get("screen") != "team_selection"
+            or not isinstance(hero_type_ids, list)
+            or len(hero_type_ids) != expected_size
+            or any(
+                not isinstance(hero_id, int)
+                or isinstance(hero_id, bool)
+                or hero_id < 0
+                for hero_id in hero_type_ids
+            )
+        ):
+            return value
+        selected_type_ids = [hero_id for hero_id in hero_type_ids if hero_id > 0]
+        if len(set(selected_type_ids)) != len(selected_type_ids):
+            return value
+        hero_instance_ids = live.get("teamHeroInstanceIds")
+        team = {"heroTypeIds": selected_type_ids}
+        if (
+            isinstance(hero_instance_ids, list)
+            and len(hero_instance_ids) == len(selected_type_ids)
+            and all(
+                isinstance(hero_id, int)
+                and not isinstance(hero_id, bool)
+                and hero_id > 0
+                for hero_id in hero_instance_ids
+            )
+            and len(set(hero_instance_ids)) == len(hero_instance_ids)
+        ):
+            team["heroInstanceIds"] = list(hero_instance_ids)
+        return {**value, "team": team}
 
     def create_strategy_profile(
         self, value: Any, name: Any, boss_mode: str = "chimera"
@@ -753,6 +841,81 @@ class ChimeraService:
             atomic_write_json(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
 
+    def export_strategy_profile(
+        self, strategy_id: str | None, boss_mode: str = "chimera"
+    ) -> dict[str, Any]:
+        """Return a portable profile without account-specific champion IDs."""
+        boss_mode = normalize_mode(boss_mode)
+        with self.lock:
+            store = self.strategy_store()
+            selected_id = str(
+                strategy_id or active_strategy_id(store, boss_mode)
+            ).strip()
+            strategy = strategy_for_mode(store, boss_mode, selected_id)
+        team = strategy.get("team")
+        if isinstance(team, dict):
+            portable_team = dict(team)
+            portable_team.pop("heroInstanceIds", None)
+            strategy["team"] = portable_team
+        return {
+            "format": "raid-boss-strategy",
+            "version": 1,
+            "exportedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "bossMode": boss_mode,
+            "strategy": strategy,
+        }
+
+    def import_strategy_profile(
+        self, document: Any, boss_mode: str = "chimera"
+    ) -> dict[str, Any]:
+        """Validate a portable document and create an independent profile."""
+        boss_mode = normalize_mode(boss_mode)
+        if not isinstance(document, dict):
+            raise ValueError("导入文件的根节点必须是对象")
+        if document.get("format") == "raid-boss-strategy":
+            version = document.get("version")
+            if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+                raise ValueError("不支持此策略导出版本")
+            value = document.get("strategy")
+            declared_mode = document.get("bossMode")
+        elif "format" in document:
+            raise ValueError("不支持此策略文件格式")
+        else:
+            # Also accept a raw strategy JSON from older/source-only builds.
+            value = document
+            declared_mode = document.get("bossMode")
+        if not isinstance(value, dict):
+            raise ValueError("导入文件中没有有效策略")
+        if declared_mode is not None and normalize_mode(declared_mode) != boss_mode:
+            raise ValueError("策略所属 Boss 与当前界面不一致，请先切换模式")
+        portable = dict(value)
+        team = portable.get("team")
+        if isinstance(team, dict):
+            portable_team = dict(team)
+            portable_team.pop("heroInstanceIds", None)
+            portable["team"] = portable_team
+        config = normalized_strategy(
+            portable, strategy_template(boss_mode), boss_mode
+        )
+        name = str(config.get("name") or "导入策略").strip() or "导入策略"
+        config["name"] = self.strategy_profile_name(name)
+        with self.lock:
+            store = self.strategy_store()
+            existing_ids = {
+                item["id"] for item in strategy_profiles_for_mode(store, boss_mode)
+            }
+            while True:
+                strategy_id = (
+                    f"strategy-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+                )
+                if strategy_id not in existing_ids:
+                    break
+            updated = update_mode_strategy(
+                store, boss_mode, config, strategy_id=strategy_id
+            )
+            atomic_write_json(STRATEGY_STORE, updated)
+            return self.strategy_bundle(boss_mode, updated)
+
     def refresh_processes(self, force: bool = False) -> list[dict[str, Any]]:
         with self.lock:
             if not force and self.processes and time.monotonic() - self.last_process_refresh < 4:
@@ -762,7 +925,7 @@ class ChimeraService:
         valid: dict[int, dict[str, Any]] = {}
         for raw in found.values():
             path = raw.get("path")
-            if not isinstance(path, str) or Path(path).resolve().parent != EXPECTED_BUILD:
+            if not isinstance(path, str) or not is_supported_raid_executable(path):
                 continue
             item = dict(raw)
             try:
@@ -804,6 +967,36 @@ class ChimeraService:
             "error": item.get("error"),
         }
 
+    @staticmethod
+    def preferred_process_pid(
+        available: dict[int, dict[str, Any]], boss_mode: str
+    ) -> int | None:
+        """Prefer the Raid process that is currently showing the requested boss."""
+        candidates: list[tuple[int, int, int]] = []
+        screen_priority = {"team_selection": 3, "battle": 2, "result": 1}
+        for pid in available:
+            try:
+                with AgentIpc(pid) as ipc:
+                    lifecycle = ipc.lifecycle() or {}
+            except (FileNotFoundError, ValueError, OSError):
+                continue
+            screen = str(lifecycle.get("screen") or "unknown")
+            section_name = "selection" if screen == "team_selection" else "battle"
+            section = lifecycle.get(section_name)
+            if not isinstance(section, dict) or section.get("bossMode") != boss_mode:
+                continue
+            observed = lifecycle.get("observedAtTick")
+            candidates.append(
+                (
+                    screen_priority.get(screen, 0),
+                    int(observed) if isinstance(observed, int) else 0,
+                    int(pid),
+                )
+            )
+        if candidates:
+            return max(candidates)[2]
+        return next(iter(sorted(available)), None)
+
     def heroes(self) -> list[dict[str, Any]]:
         with self.lock:
             catalog = {
@@ -820,6 +1013,7 @@ class ChimeraService:
                 if not isinstance(raw_skill, dict):
                     continue
                 skill = dict(raw_skill)
+                skill["name"] = skill_display_name(skill)
                 summary = skill_effect_summary(skill.get("typeId"))
                 if summary:
                     skill["effectSummary"] = summary
@@ -834,6 +1028,7 @@ class ChimeraService:
                 dict(head)
                 for _, head in sorted(self.hydra_head_catalog.items())
                 if isinstance(head, dict)
+                and head.get("typeId") not in HYDRA_RESERVED_HEAD_TYPE_IDS
             ]
 
     def update_hydra_heads(self, values: Any) -> bool:
@@ -852,7 +1047,7 @@ class ChimeraService:
                 if hydra_head_is_exposed_neck(normalized):
                     continue
                 type_id = canonical_hydra_head_type_id(normalized)
-                if type_id is None:
+                if type_id is None or type_id in HYDRA_RESERVED_HEAD_TYPE_IDS:
                     continue
                 previous = {
                     key: item
@@ -927,6 +1122,7 @@ class ChimeraService:
                     if isinstance(skill, dict) and isinstance(skill.get("slot"), int)
                 }
                 skills: list[dict[str, Any]] = []
+                seen_skill_type_ids: set[int] = set()
                 slot = 0
                 for raw_skill in raw_hero.get("skills", []):
                     if not isinstance(raw_skill, dict):
@@ -939,12 +1135,32 @@ class ChimeraService:
                     merged = dict(cached) if isinstance(cached, dict) else {}
                     merged.update({key: value for key, value in raw_skill.items() if value not in (None, "")})
                     merged["slot"] = int(raw_skill.get("slot") or slot)
-                    merged["name"] = str(raw_skill.get("name") or merged.get("name") or f"技能 {slot}")
+                    incoming_name = str(raw_skill.get("name") or "")
+                    cached_name = str(cached.get("name") or "") if isinstance(cached, dict) else ""
+                    if is_unresolved_skill_name(incoming_name) and not is_unresolved_skill_name(cached_name):
+                        merged["name"] = cached_name
+                    else:
+                        merged["name"] = skill_display_name(merged)
                     if runtime_hero_id == active_hero_type_id and isinstance(type_id, int):
                         live = live_skills.get(type_id)
                         if live:
                             merged.update({key: value for key, value in live.items() if value not in (None, "")})
+                            live_name = str(live.get("name") or "")
+                            if is_unresolved_skill_name(live_name) and not is_unresolved_skill_name(cached_name):
+                                merged["name"] = cached_name
+                            else:
+                                merged["name"] = skill_display_name(merged)
                     skills.append(merged)
+                    if isinstance(type_id, int):
+                        seen_skill_type_ids.add(type_id)
+                # Battle snapshots can expose only the current form. Keep the
+                # complete static catalog loaded during initialization so names
+                # and the other form's skills do not flicker out of the editor.
+                skills.extend(
+                    dict(skill)
+                    for type_id, skill in previous_by_type.items()
+                    if type_id not in seen_skill_type_ids
+                )
                 if not skills:
                     skills = [
                         dict(value)
@@ -986,7 +1202,7 @@ class ChimeraService:
         self,
         rotation: dict[str, Any],
         lifecycle_section: dict[str, Any],
-    ) -> None:
+    ) -> int | None:
         status_effects = rotation.get("statusEffects")
         if isinstance(status_effects, list):
             updated_effects = runtime_effect_options(status_effects)
@@ -997,39 +1213,39 @@ class ChimeraService:
         catalog = rotation.get("catalog")
         identity = rotation.get("identity")
         stage_id = lifecycle_section.get("stageId")
-        if not isinstance(catalog, dict) or not isinstance(stage_id, int):
-            return
+        if not isinstance(catalog, dict) or not isinstance(identity, dict):
+            return None
         selected: dict[str, Any] | None = None
         for difficulty in catalog.get("difficulties", []):
             if isinstance(difficulty, dict) and stage_id in difficulty.get("stageIds", []):
                 selected = difficulty
                 break
-        if selected is None or not isinstance(selected.get("difficultyId"), int):
-            return
-        fingerprint = (
-            identity.get("rewardRotationFingerprint")
-            if isinstance(identity, dict)
+        selected_difficulty_id = (
+            int(selected["difficultyId"])
+            if isinstance(selected, dict) and isinstance(selected.get("difficultyId"), int)
             else None
         )
+        fingerprint = identity.get("rewardRotationFingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
-            return
-        cache_key = (fingerprint, int(selected["difficultyId"]))
-        with self.lock:
-            if cache_key in self.cached_rotation_keys:
-                return
-        trials = [
+            return selected_difficulty_id
+        live_difficulties = [
             value
-            for value in selected.get("trials", [])
-            if isinstance(value, dict)
+            for value in catalog.get("difficulties", [])
+            if isinstance(value, dict) and isinstance(value.get("difficultyId"), int)
         ]
+        cache_keys = {
+            (fingerprint, int(value["difficultyId"]))
+            for value in live_difficulties
+        }
         with self.lock:
-            self.ui_catalog = cache_live_rewards(
-                self.ui_catalog,
-                int(selected["difficultyId"]),
-                trials,
-                fingerprint,
+            if cache_keys and cache_keys.issubset(self.cached_rotation_keys):
+                return selected_difficulty_id
+        with self.lock:
+            self.ui_catalog = cache_live_rotation_catalog(
+                self.ui_catalog, catalog, identity,
             )
-            self.cached_rotation_keys.add(cache_key)
+            self.cached_rotation_keys.update(cache_keys)
+        return selected_difficulty_id
 
     @staticmethod
     def _trial_statuses(state: dict[str, Any]) -> tuple[list[dict[str, Any]], list[int]]:
@@ -1072,11 +1288,27 @@ class ChimeraService:
 
         screen = lifecycle.get("screen")
         team = lifecycle_team_ids(lifecycle)
+        expected_team_size = int(spec["teamSize"])
         lifecycle_section = lifecycle.get(
             "selection" if screen == "team_selection" else "battle"
         )
         if not isinstance(lifecycle_section, dict):
             lifecycle_section = {}
+        raw_team_types = lifecycle_section.get("heroTypeIds")
+        preparation_team_slots = (
+            [
+                value
+                if isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+                else 0
+                for value in raw_team_types
+            ]
+            if screen == "team_selection"
+            and isinstance(raw_team_types, list)
+            and len(raw_team_types) == expected_team_size
+            else []
+        )
         raw_team_instances = lifecycle_section.get("heroIds")
         team_instances = (
             [
@@ -1087,7 +1319,7 @@ class ChimeraService:
             if isinstance(raw_team_instances, list)
             else []
         )
-        if len(team_instances) != int(spec["teamSize"]) or len(set(team_instances)) != len(team_instances):
+        if len(team_instances) != expected_team_size or len(set(team_instances)) != len(team_instances):
             team_instances = []
         if state.get("type") == "hero_catalog_state":
             self.update_hero_catalog(state)
@@ -1097,7 +1329,9 @@ class ChimeraService:
         lifecycle_catalog = lifecycle_section.get("heroCatalog")
         if isinstance(lifecycle_catalog, list):
             self.update_hero_catalog({"heroes": lifecycle_catalog})
-        self.update_rotation_catalog(rotation, lifecycle_section)
+        live_chimera_difficulty_id = self.update_rotation_catalog(
+            rotation, lifecycle_section
+        )
         battle = state.get("battle") if isinstance(state.get("battle"), dict) else {}
         state_mode = state.get("bossMode")
         lifecycle_mode = lifecycle_section.get("bossMode")
@@ -1120,8 +1354,16 @@ class ChimeraService:
             state or screen in {"team_selection", "result"}
         )
         team_cache_key = (pid, boss_mode)
-        expected_team_size = int(spec["teamSize"])
-        if mode_matches and len(team) == expected_team_size:
+        if mode_matches and preparation_team_slots:
+            team = preparation_team_slots
+            selected_team = [value for value in team if value > 0]
+            if (
+                len(selected_team) == expected_team_size
+                and len(set(selected_team)) == expected_team_size
+            ):
+                with self.lock:
+                    self.live_team_cache[team_cache_key] = list(team)
+        elif mode_matches and len(team) == expected_team_size:
             with self.lock:
                 self.live_team_cache[team_cache_key] = list(team)
         elif mode_matches and screen == "team_selection":
@@ -1181,11 +1423,6 @@ class ChimeraService:
             if screen == "result" and ledger.get("bossMode") == boss_mode
             else battle.get("currentDamage", 0)
         )
-        competition_points = (
-            ledger.get("competitionPoints", 0)
-            if screen == "result" and ledger.get("bossMode") == boss_mode
-            else battle.get("currentCompetitionPoints", 0)
-        )
         return {
             "bossMode": boss_mode,
             "screen": screen,
@@ -1196,12 +1433,14 @@ class ChimeraService:
             "bossHpPct": boss.get("healthPct") if boss_mode == "chimera" else None,
             "waitingForCommand": battle.get("waitingForManualCommand"),
             "chimeraTurn": chimera.get("turnCount"),
+            "chimeraDifficultyId": (
+                live_chimera_difficulty_id if boss_mode == "chimera" else None
+            ),
             "hydraTurn": hydra.get("turnCount", battle.get("turn")),
             "headCount": len(bosses) if boss_mode == "hydra" and mode_matches else 0,
             "heads": bosses if boss_mode == "hydra" and mode_matches else [],
             "playerTurn": battle.get("playerTurnCount"),
             "damage": damage,
-            "points": competition_points,
             "teamHeroIds": team,
             "teamHeroInstanceIds": team_instances,
             "completedTrialIds": completed,
@@ -1219,7 +1458,11 @@ class ChimeraService:
         available = {int(item["pid"]): item for item in processes}
         if pid not in available:
             running = self.controller.snapshot().get("pid")
-            pid = running if isinstance(running, int) and running in available else next(iter(sorted(available)), None)
+            pid = (
+                running
+                if isinstance(running, int) and running in available
+                else self.preferred_process_pid(available, boss_mode)
+            )
         strategy_bundle = self.strategy_bundle(boss_mode)
         config = strategy_bundle["config"]
         live = (
@@ -1250,6 +1493,7 @@ class ChimeraService:
             "heroes": self.heroes(),
             "hydraHeads": self.hydra_heads(),
             "effects": list(self.effect_options),
+            "language": self.ui_preferences()["language"],
             "difficulties": difficulties if isinstance(difficulties, list) else [],
             "state": live,
             "controller": self.controller.snapshot(boss_mode),
@@ -1480,19 +1724,32 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             body = self._body()
             if self.path == "/api/config":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
+                config = body.get("config")
+                if body.get("capturePreparedTeam") is True:
+                    config = self.server.service.config_with_prepared_team(
+                        config, body.get("pid"), boss_mode
+                    )
                 result = self.server.service.save_strategy(
-                    body.get("config"), boss_mode,
+                    config, boss_mode,
                     strategy_id=str(body.get("strategyId") or "") or None,
                 )
                 self._json({**result, "message": "策略组已保存"})
+                return
+            if self.path == "/api/preferences":
+                self._json(self.server.service.save_ui_preferences(body))
                 return
             if self.path == "/api/strategy/profile":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
                 action = str(body.get("action") or "")
                 strategy_id = str(body.get("strategyId") or "").strip()
                 if action == "create":
+                    config = body.get("config")
+                    if body.get("capturePreparedTeam") is True:
+                        config = self.server.service.config_with_prepared_team(
+                            config, body.get("pid"), boss_mode
+                        )
                     result = self.server.service.create_strategy_profile(
-                        body.get("config"), body.get("name"), boss_mode
+                        config, body.get("name"), boss_mode
                     )
                     message = "新策略组已创建"
                 elif action == "rename":
@@ -1516,6 +1773,17 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                         strategy_id, boss_mode
                     )
                     message = "策略组已删除"
+                elif action == "export":
+                    document = self.server.service.export_strategy_profile(
+                        strategy_id or None, boss_mode
+                    )
+                    self._json({"document": document})
+                    return
+                elif action == "import":
+                    result = self.server.service.import_strategy_profile(
+                        body.get("document"), boss_mode
+                    )
+                    message = "策略已导入为新的策略组"
                 else:
                     raise ValueError("未知的策略组操作")
                 self._json({**result, "message": message})
@@ -1581,6 +1849,49 @@ class ChimeraHttpServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def restore_internal_worker_streams() -> None:
+    """Reconnect PyInstaller windowed workers to their inherited pipes."""
+    if os.name != "nt":
+        return
+    try:
+        import msvcrt
+
+        get_std_handle = ctypes.windll.kernel32.GetStdHandle
+        get_std_handle.argtypes = [ctypes.c_ulong]
+        get_std_handle.restype = ctypes.c_void_p
+        for attribute, identifier in (("stdout", -11), ("stderr", -12)):
+            if getattr(sys, attribute) is not None:
+                continue
+            handle = get_std_handle(identifier & 0xFFFFFFFF)
+            if not handle or handle == ctypes.c_void_p(-1).value:
+                continue
+            descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY)
+            stream = open(
+                descriptor,
+                "w",
+                encoding="utf-8",
+                errors="replace",
+                buffering=1,
+                closefd=False,
+            )
+            setattr(sys, attribute, stream)
+    except (OSError, ValueError):
+        pass
+
+
+def run_internal_worker(worker: str, arguments: list[str]) -> int:
+    """Run controller helpers inside the bundled interpreter."""
+    restore_internal_worker_streams()
+    sys.argv = [sys.argv[0], *arguments]
+    if worker == "injector":
+        from inject_probe import main as worker_main
+    elif worker == "controller":
+        from chimera_controller import main as worker_main
+    else:
+        raise ValueError(f"未知内部工作进程：{worker}")
+    return int(worker_main())
+
+
 def self_test() -> int:
     if not (DIST_DIR / "index.html").is_file():
         raise RuntimeError("React 界面尚未构建")
@@ -1593,6 +1904,7 @@ def self_test() -> int:
     assert reward_asset is not None and reward_asset.is_file()
     head_ids = {head.get("typeId") for head in service.hydra_heads()}
     assert set(HYDRA_HEAD_TYPE_IDS).issubset(head_ids)
+    assert head_ids.isdisjoint(HYDRA_RESERVED_HEAD_TYPE_IDS)
     assert service.update_hydra_heads(
         [
             {
@@ -1604,10 +1916,9 @@ def self_test() -> int:
         ]
     )
     assert 26300 in {head.get("typeId") for head in service.hydra_heads()}
-    # The installed model catalog may lead the separate portrait bundle (for
-    # example newly staged Stone/Electric heads), so only the six portrait
-    # identities currently shipped by HeroAvatarsHydra are required here.
-    for head_type_id in (26040, 26080, 26120, 26160, 26200, 26240):
+    # Only the six complete heads are exposed; installed art placeholders are
+    # deliberately excluded from the strategy editor.
+    for head_type_id in HYDRA_HEAD_TYPE_IDS:
         head_asset = service.asset("head", [str(head_type_id)])
         assert head_asset is not None and head_asset.is_file()
     thor_asset = service.asset("hero", ["9170"])
@@ -1636,6 +1947,8 @@ def self_test() -> int:
 
 
 def main() -> int:
+    if len(sys.argv) >= 3 and sys.argv[1] == "--internal-worker":
+        return run_internal_worker(sys.argv[2], sys.argv[3:])
     parser = argparse.ArgumentParser(description="奇美拉 React 策略中心")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--no-window", action="store_true", help=argparse.SUPPRESS)
@@ -1676,16 +1989,63 @@ def main() -> int:
 
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
         webview.settings["SHOW_DEFAULT_MENUS"] = False
-        webview.create_window(
+        webview.settings["ALLOW_DOWNLOADS"] = True
+        window = webview.create_window(
             "Alliance Boss Strategy Studio",
             url,
             width=1380,
             height=860,
             min_size=(1024, 640),
+            hidden=True,
             background_color="#07101b",
             text_select=True,
         )
-        webview.start(gui="edgechromium", debug=False, private_mode=True)
+
+        def reveal_ready_window() -> None:
+            # Moving a WinForms host while WebView2 is still creating its
+            # controller can leave a permanently blank surface.  Build and
+            # navigate the hidden window first, then reveal it as soon as the
+            # initial document is ready.  If the renderer itself cannot load a
+            # local document, fail visibly instead of exposing a blank form.
+            if not window.events.loaded.wait(15.0):
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    "WebView2 未能完成初始化，请关闭工具后重新打开。",
+                    "联盟 Boss 策略中心",
+                    0x10,
+                )
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
+                return
+            window.show()
+
+            # React mounts before making the slower bootstrap API request.  If
+            # the module failed to mount at all, retry the local navigation once
+            # rather than leaving the user on a bare background indefinitely.
+            time.sleep(2.0)
+            try:
+                mounted = bool(
+                    window.evaluate_js(
+                        "document.documentElement.dataset.appMounted === 'true'"
+                    )
+                )
+            except Exception:
+                mounted = False
+            if mounted:
+                return
+            try:
+                window.load_url(url)
+            except Exception:
+                pass
+
+        webview.start(
+            reveal_ready_window,
+            gui="edgechromium",
+            debug=False,
+            private_mode=True,
+        )
         return 0
     finally:
         server.stopping.set()

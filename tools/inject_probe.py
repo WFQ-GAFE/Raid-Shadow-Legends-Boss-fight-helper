@@ -22,16 +22,13 @@ from pathlib import Path
 
 from agent_ipc import AGENT_BUILD_ID, COMMAND_VERSION, AgentIpc, read_agent_status
 from chimera_inventory import inspect_pe
-from raid_processes import raid_processes
+from raid_processes import is_supported_raid_executable, raid_processes
 
 
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-DEFAULT_AGENT = PROJECT_ROOT / "build" / "agent-1226" / "Release" / "RaidChimeraAgent.dll"
-EXPECTED_BUILD = Path(
-    r"C:\EXTEND\PlariumPlay\StandAloneApps\raid-shadow-legends\build"
-).resolve()
+DEFAULT_AGENT = PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll"
 PIPE_NAME_PREFIX = r"\\.\pipe\RaidChimeraPrototype-"
 
 PROCESS_CREATE_THREAD = 0x0002
@@ -927,14 +924,11 @@ def main() -> int:
     if not isinstance(target_path, str):
         return fail("cannot_read_target_path", output, pid=args.pid)
     target_file = Path(target_path).resolve()
-    if target_file.name.casefold() != "raid.exe":
-        return fail("target_is_not_raid_exe", output, path=str(target_file))
-    if target_file.parent != EXPECTED_BUILD:
+    if not is_supported_raid_executable(target_file):
         return fail(
-            "unexpected_raid_build",
+            "unexpected_raid_installation",
             output,
-            expected=str(EXPECTED_BUILD),
-            actual=str(target_file.parent),
+            actual=str(target_file),
         )
 
     if args.check_only:

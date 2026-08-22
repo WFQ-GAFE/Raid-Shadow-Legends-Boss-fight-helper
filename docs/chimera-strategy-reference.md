@@ -14,7 +14,7 @@
 - `nextForm`：按上述固定周期预测下一形态；内部 `Snake` 与用户配置中的 `Viper` 视为同一毒蛇形态。
 - `allianceDifficultyId`、`chimeraStageId`、`stageRotationIndex`：难度、当前属性阶段及其在该难度阶段列表中的序号。
 - `catalogFingerprint`、`trialDefinitionFingerprint`、`rewardRotationFingerprint`、`attributeRotationFingerprint`：总目录、稳定试炼定义、随时间变化的奖励、Boss 属性阶段版本。
-- `currentDamageAtLeast`、`currentDamageBelow`、`currentCompetitionPointsAtLeast`：当前伤害和竞赛积分。
+- `currentDamageAtLeast`、`currentDamageBelow`：当前伤害范围。
 
 ## 英雄、生命与效果
 
@@ -59,7 +59,7 @@
 
 界面中的“选择当前试炼”只显示当前奇美拉难度对应的 27 条试炼，并直接使用游戏当前数据里的中文说明与奖励。稳定的试炼定义和会随时间变化的奖励轮换用不同指纹识别；离开奇美拉或难度无法确认时会清空临时列表，不沿用旧轮换。策略保存时还会记录当前生命周期里核对过的五名英雄实例 ID，供首次自动入场及免费重整后复核，规则本身仍按英雄类型匹配，因此不限定固定英雄阵容。
 
-界面规则编辑器支持当前/下一形态、固定回合、伤害、积分、试炼完成/失败/进度、Boss/行动英雄/任一友方/指定友方的效果类型和剩余回合，以及 Boss、全体友方或指定友方的效果格数。“缺少/不足”表示找不到满足所填最低剩余回合的效果，可用于在效果到期前补充。动作方式可以直接选择“自动学习并维持必要效果”，分别填写 Boss、当前行动英雄或任一友方所需效果，不需要手写 JSON。
+界面规则编辑器支持当前/下一形态、固定回合、伤害、试炼完成/失败/进度、Boss/行动英雄/任一友方/指定友方的效果类型和剩余回合，以及 Boss、全体友方或指定友方的效果格数。“缺少/不足”表示找不到满足所填最低剩余回合的效果，可用于在效果到期前补充。动作方式可以直接选择“自动学习并维持必要效果”，分别填写 Boss、当前行动英雄或任一友方所需效果，不需要手写 JSON。
 
 ## 动作与目标
 

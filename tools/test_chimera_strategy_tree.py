@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 from chimera_controller import (
     GamePaused,
-    ResultScreenReached,
     SkillCapabilityMemory,
     annotate_team_positions,
     archive_rotation_catalog_if_changed,
@@ -315,6 +314,29 @@ def main() -> int:
     assert strict_decision is not None
     assert strict_decision.rule == "strict-reserved-s2"
     assert strict_decision.skill["typeId"] == 88962
+    explicit_opener = copy.deepcopy(strict_ready)
+    explicit_opener["rules"][1]["action"]["firstTurnSkill"] = {
+        "skillTypeId": 88961,
+        "skillSlot": 1,
+        "target": "boss",
+    }
+    explicit_opener["rules"][1]["action"]["blockedSkillTypeIds"] = [88961]
+    first_hero_turn = copy.deepcopy(positioned)
+    first_hero_turn["activeHeroTurnCount"] = 0
+    opener_decision = evaluate(explicit_opener, first_hero_turn)
+    assert opener_decision is not None
+    assert opener_decision.rule.endswith("首回合技能")
+    assert opener_decision.skill["typeId"] == 88961
+    first_hero_turn["activeHeroTurnCount"] = 1
+    one_based_opener_decision = evaluate(explicit_opener, first_hero_turn)
+    assert one_based_opener_decision is not None
+    assert one_based_opener_decision.rule.endswith("首回合技能")
+    assert one_based_opener_decision.skill["typeId"] == 88961
+    first_hero_turn["activeHeroTurnCount"] = 2
+    later_hero_turn_decision = evaluate(explicit_opener, first_hero_turn)
+    assert later_hero_turn_decision is not None
+    assert later_hero_turn_decision.rule == "strict-reserved-s2"
+    validate_strategy_config({"mode": "execute", **explicit_opener})
     strict_listed_after_default = copy.deepcopy(strict_ready)
     strict_listed_after_default["rules"].reverse()
     reordered_strict_decision = evaluate(strict_listed_after_default, positioned)
@@ -403,7 +425,6 @@ def main() -> int:
             "objectives": {
                 "mandatoryTrialIds": [8000501, 8000502],
                 "minimumDamage": 1_000_000,
-                "minimumCompetitionPoints": 40,
             }
         },
         completed_objective_state,
@@ -573,19 +594,15 @@ def main() -> int:
     assert "英雄“测试英雄”命中规则“recoverable-manual-race”" in hydra_log
     assert "执行成功：英雄“测试英雄”已按规则“recoverable-manual-race”" in hydra_log
     assert "六头蛇回合 4→5" in hydra_log
-    try:
-        wait_for_turn_advance(ResultIpc(), state, 123, timeout_seconds=0.1)
-    except ResultScreenReached:
-        pass
-    else:
-        raise AssertionError("result screen did not end turn confirmation immediately")
+    assert wait_for_turn_advance(
+        ResultIpc(), state, 123, timeout_seconds=0.1
+    ) is None
     validate_strategy_config(
         {
             "mode": "observe",
             "objectives": {
                 "mandatoryTrialIds": [8000501],
                 "minimumDamage": 0,
-                "minimumCompetitionPoints": 0,
                 "maxRegroupRetries": 10,
                 "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
                 "onAllMetAtResult": "hold_for_user",
@@ -1178,7 +1195,6 @@ def main() -> int:
         "objectives": {
             "mandatoryTrialIds": [8000501, 8000502],
             "minimumDamage": 1_000_000,
-            "minimumCompetitionPoints": 40,
         },
         "strategyTree": {
             "type": "priority",

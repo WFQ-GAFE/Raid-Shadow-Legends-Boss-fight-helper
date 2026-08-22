@@ -445,6 +445,34 @@ class BrowserView:
                 int(self.Location.X / scale),
                 int(self.Location.Y / scale),
             )
+            self.notify_webview_parent_moved()
+
+        def notify_webview_parent_moved(self):
+            """Keep WebView2 attached while its host window is being moved.
+
+            WebView2 requires an explicit parent-position notification.  The
+            WinForms control does not expose its controller publicly, so use
+            the same private field that the control itself owns.  In
+            particular this closes a race where moving the form while the
+            controller is being initialized leaves only the form background.
+            """
+            if not is_chromium or not getattr(self, 'webview', None):
+                return
+
+            try:
+                field = self.webview.GetType().GetField(
+                    '_coreWebView2Controller',
+                    BindingFlags.Instance | BindingFlags.NonPublic,
+                )
+                controller = field.GetValue(self.webview) if field else None
+                if controller:
+                    controller.NotifyParentWindowPositionChanged()
+                    self.webview.Invalidate()
+            except Exception as e:
+                # A move can arrive before CoreWebView2InitializationCompleted.
+                # on_webview_ready repeats the notification once the controller
+                # exists, so this early event is safe to ignore.
+                logger.debug(f'Failed to notify WebView2 about parent move: {e}')
 
         def evaluate_js(self, script, parse_json):
             result = self.browser.evaluate_js(script, parse_json)

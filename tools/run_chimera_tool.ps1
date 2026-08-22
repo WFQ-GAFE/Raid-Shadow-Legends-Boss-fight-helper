@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [switch]$Classic,
     [switch]$SourceConsole
 )
 
@@ -25,7 +24,7 @@ function Test-IsAdministrator {
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $desktopExe = Join-Path $projectRoot "build\desktop\ChimeraStrategyCenter\ChimeraStrategyCenter.exe"
-if (-not $SourceConsole -and -not $Classic -and (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
+if (-not $SourceConsole -and (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
     try {
         Start-Process -FilePath $desktopExe -WorkingDirectory (Split-Path -Parent $desktopExe) | Out-Null
     }
@@ -37,9 +36,6 @@ if (-not $SourceConsole -and -not $Classic -and (Test-Path -LiteralPath $desktop
 
 if (-not (Test-IsAdministrator)) {
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    if ($Classic) {
-        $arguments += " -Classic"
-    }
     if ($SourceConsole) {
         $arguments += " -SourceConsole"
     }
@@ -56,12 +52,10 @@ if (-not (Test-IsAdministrator)) {
 
 try {
     $python = (Get-Command python.exe -ErrorAction Stop).Source
-    $entryArgument = if ($Classic) { "tools\chimera_gui.py" } else { "tools\chimera_web.py" }
-    if (-not $Classic) {
-        $webIndex = Join-Path $projectRoot "ui\dist\index.html"
-        if (-not (Test-Path -LiteralPath $webIndex -PathType Leaf)) {
-            $entryArgument = "tools\chimera_gui.py"
-        }
+    $entryArgument = "tools\chimera_web.py"
+    $webIndex = Join-Path $projectRoot "ui\dist\index.html"
+    if (-not (Test-Path -LiteralPath $webIndex -PathType Leaf)) {
+        throw "The React interface has not been built. Run npm run build in the ui directory."
     }
     if ($SourceConsole) {
         $env:CHIMERA_PROJECT_ROOT = $projectRoot

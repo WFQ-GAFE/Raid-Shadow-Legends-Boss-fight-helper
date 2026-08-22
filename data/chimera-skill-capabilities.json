@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updatedAt": "2026-08-21T21:14:06.597219+00:00",
+  "updatedAt": "2026-08-22T21:33:48.021446+00:00",
   "skills": {
     "47101": [
       {
@@ -175,7 +175,7 @@
         "effectKindId": 2029,
         "effectKind": "Negator",
         "lifetime": 0,
-        "turnsLeft": 2
+        "turnsLeft": 3
       },
       {
         "targetScope": "self",
@@ -226,6 +226,26 @@
         "effectKind": "StatusCounterattack",
         "lifetime": 2,
         "turnsLeft": 5
+      }
+    ],
+    "92002": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 2,
+        "turnsLeft": 3
+      }
+    ],
+    "92003": [
+      {
+        "targetScope": "boss",
+        "effectTypeId": 131,
+        "effectKindId": 3101,
+        "effectKind": "StatusReduceAttack",
+        "lifetime": 3,
+        "turnsLeft": 2
       }
     ],
     "95101": [
@@ -381,7 +401,7 @@
         "effectKindId": 2003,
         "effectKind": "ContinuousHeal",
         "lifetime": 3,
-        "turnsLeft": 5
+        "turnsLeft": 6
       },
       {
         "targetScope": "ally",
@@ -424,6 +444,16 @@
         "effectKind": "Shield",
         "lifetime": 3,
         "turnsLeft": 5
+      }
+    ],
+    "100036": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 620,
+        "effectKindId": 2022,
+        "effectKind": "StoneSkin",
+        "lifetime": 1,
+        "turnsLeft": 1
       }
     ],
     "100056": [
@@ -511,6 +541,32 @@
         "effectKindId": 3101,
         "effectKind": "StatusReduceAttack",
         "lifetime": 3,
+        "turnsLeft": 3
+      }
+    ],
+    "104102": [
+      {
+        "targetScope": "self",
+        "effectTypeId": 100,
+        "effectKindId": 2002,
+        "effectKind": "BlockDebuff",
+        "lifetime": 1,
+        "turnsLeft": 1
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 221,
+        "effectKindId": 2106,
+        "effectKind": "StatusIncreaseAccuracy",
+        "lifetime": 1,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "self",
+        "effectTypeId": 411,
+        "effectKindId": 2010,
+        "effectKind": "ReflectDamage",
+        "lifetime": 2,
         "turnsLeft": 3
       }
     ],
@@ -936,8 +992,8 @@
         "effectTypeId": 91,
         "effectKindId": 2003,
         "effectKind": "ContinuousHeal",
-        "lifetime": 2,
-        "turnsLeft": 2
+        "lifetime": 3,
+        "turnsLeft": 3
       },
       {
         "targetScope": "boss",
@@ -1042,6 +1098,14 @@
         "effectTypeId": 870,
         "effectKindId": 2030,
         "effectKind": "Inspiration",
+        "lifetime": 2,
+        "turnsLeft": 2
+      },
+      {
+        "targetScope": "boss",
+        "effectTypeId": 91,
+        "effectKindId": 2003,
+        "effectKind": "ContinuousHeal",
         "lifetime": 2,
         "turnsLeft": 2
       }
@@ -1423,9 +1487,9 @@
       "maxDamage": 0.0
     },
     "88901": {
-      "samples": 419,
-      "emaDamage": 0.002,
-      "maxDamage": 83838.0,
+      "samples": 541,
+      "emaDamage": 68749.784,
+      "maxDamage": 230000.0,
       "trials": {
         "8000501": {
           "samples": 1,
@@ -1435,9 +1499,9 @@
       }
     },
     "88902": {
-      "samples": 439,
-      "emaDamage": 0.002,
-      "maxDamage": 49970.0,
+      "samples": 592,
+      "emaDamage": 46245.153,
+      "maxDamage": 310000.0,
       "trials": {
         "8000501": {
           "samples": 1,
@@ -1447,34 +1511,49 @@
       }
     },
     "88903": {
-      "samples": 82,
-      "emaDamage": 0.002,
-      "maxDamage": 10496.0
+      "samples": 109,
+      "emaDamage": 75657.344,
+      "maxDamage": 230000.0
+    },
+    "92001": {
+      "samples": 12,
+      "emaDamage": 34457.665,
+      "maxDamage": 149904.0
+    },
+    "92002": {
+      "samples": 8,
+      "emaDamage": 0.0,
+      "maxDamage": 0.0
+    },
+    "92003": {
+      "samples": 12,
+      "emaDamage": 116134.609,
+      "maxDamage": 190683.0
     },
     "95101": {
-      "samples": 229,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 296,
+      "emaDamage": 31886.654,
+      "maxDamage": 170000.0
     },
     "95102": {
-      "samples": 276,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 396,
+      "emaDamage": 174234.543,
+      "maxDamage": 4140000.0
     },
     "95103": {
-      "samples": 284,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 378,
+      "emaDamage": 593.269,
+      "maxDamage": 90000.0
     },
     "99001": {
-      "samples": 291,
-      "emaDamage": 0.002,
-      "maxDamage": 429259.0
+      "samples": 359,
+      "emaDamage": 1147980.791,
+      "maxDamage": 2470000.0
     },
     "99002": {
-      "samples": 303,
-      "emaDamage": 0.002,
-      "maxDamage": 1768620.0
+      "samples": 424,
+      "emaDamage": 238485263.579,
+      "maxDamage": 343650000.0
     },
     "99003": {
       "samples": 1,
@@ -1482,49 +1561,49 @@
       "maxDamage": 0.0
     },
     "99501": {
-      "samples": 378,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 510,
+      "emaDamage": 58534.287,
+      "maxDamage": 911600.0
     },
     "99502": {
-      "samples": 206,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 268,
+      "emaDamage": 167705.867,
+      "maxDamage": 750000.0
     },
     "99503": {
-      "samples": 199,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 283,
+      "emaDamage": 23.784,
+      "maxDamage": 40000.0
     },
     "100501": {
-      "samples": 192,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 257,
+      "emaDamage": 360324.031,
+      "maxDamage": 1040000.0
     },
     "100502": {
-      "samples": 263,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 365,
+      "emaDamage": 308974.712,
+      "maxDamage": 1790000.0
     },
     "100503": {
-      "samples": 190,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 255,
+      "emaDamage": 628375.468,
+      "maxDamage": 2600100.0
     },
     "104101": {
-      "samples": 162,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 216,
+      "emaDamage": 75588.021,
+      "maxDamage": 577800.0
     },
     "104102": {
-      "samples": 200,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 297,
+      "emaDamage": 173785.953,
+      "maxDamage": 1591200.0
     },
     "104103": {
-      "samples": 302,
-      "emaDamage": 0.0,
-      "maxDamage": 0.0
+      "samples": 390,
+      "emaDamage": 5958.052,
+      "maxDamage": 120000.0
     },
     "104301": {
       "samples": 39,

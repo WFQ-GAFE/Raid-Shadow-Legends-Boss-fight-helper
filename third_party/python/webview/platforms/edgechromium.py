@@ -295,6 +295,12 @@ class EdgeChrome:
         settings.IsSwipeNavigationEnabled = False
         settings.IsZoomControlEnabled = True
 
+        # The form may have been repositioned while WebView2 was initializing.
+        # WinForms does not forward this notification on its own; without it
+        # the newly created controller can remain visually detached and render
+        # only the host form's background colour.
+        self.form.notify_webview_parent_moved()
+
         if _state['user_agent']:
             settings.UserAgent = _state['user_agent']
 

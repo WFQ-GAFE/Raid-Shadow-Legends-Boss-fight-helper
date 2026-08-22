@@ -50,17 +50,14 @@ from chimera_icons import (
 )
 from inject_probe import seed_battle_context, seed_selection_context
 from named_mutex import NamedMutex
-from raid_processes import attach_windows, raid_processes
+from raid_processes import attach_windows, is_supported_raid_executable, raid_processes
 
 
 CONTROLLER = PROJECT_ROOT / "tools" / "chimera_controller.py"
 INJECTOR = PROJECT_ROOT / "tools" / "inject_probe.py"
-AGENT = PROJECT_ROOT / "build" / "agent-1226" / "Release" / "RaidChimeraAgent.dll"
+AGENT = PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll"
 DEFAULT_STRATEGY = PROJECT_ROOT / "config" / "chimera-strategy.a1-test.json"
 USER_STRATEGY = PROJECT_ROOT / "config" / "chimera-strategy.user.json"
-EXPECTED_BUILD = Path(
-    r"C:\EXTEND\PlariumPlay\StandAloneApps\raid-shadow-legends\build"
-).resolve()
 
 KNOWN_HEROES = {
     8896: "地窖守卫威克斯维尔",
@@ -2911,7 +2908,7 @@ class ChimeraToolApp:
             valid = []
             for item in processes.values():
                 path = item.get("path")
-                if isinstance(path, str) and Path(path).resolve().parent == EXPECTED_BUILD:
+                if isinstance(path, str) and is_supported_raid_executable(path):
                     item["account"] = identify_account(int(item["pid"]))
                     valid.append(item)
             self.events.put(("processes_refreshed", (valid, current_pid)))

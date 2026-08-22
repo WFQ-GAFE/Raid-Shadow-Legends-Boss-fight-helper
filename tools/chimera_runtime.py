@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -21,25 +20,33 @@ from chimera_controller import latest_account_state
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
+RESOURCE_ROOT = Path(
+    os.environ.get("CHIMERA_RESOURCE_ROOT", getattr(sys, "_MEIPASS", PROJECT_ROOT))
+).resolve()
 CONTROLLER = PROJECT_ROOT / "tools" / "chimera_controller.py"
 INJECTOR = PROJECT_ROOT / "tools" / "inject_probe.py"
-AGENT = PROJECT_ROOT / "build" / "agent-1226" / "Release" / "RaidChimeraAgent.dll"
+AGENT = next(
+    (
+        candidate
+        for candidate in (
+            RESOURCE_ROOT / "agent" / "RaidChimeraAgent.dll",
+            PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll",
+        )
+        if candidate.is_file()
+    ),
+    PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll",
+)
 USER_STRATEGY = STRATEGY_STORE
-EXPECTED_BUILD = Path(
-    r"C:\EXTEND\PlariumPlay\StandAloneApps\raid-shadow-legends\build"
-).resolve()
 
 
-def worker_python() -> str:
-    if not getattr(sys, "frozen", False):
-        return sys.executable
-    configured = os.environ.get("CHIMERA_PYTHON")
-    if configured and Path(configured).is_file():
-        return str(Path(configured).resolve())
-    discovered = shutil.which("python.exe") or shutil.which("python")
-    if discovered:
-        return discovered
-    raise RuntimeError("未找到控制器所需的 Python 运行环境")
+def worker_command(worker: str) -> list[str]:
+    """Launch a source script or dispatch through the frozen desktop exe."""
+    scripts = {"injector": INJECTOR, "controller": CONTROLLER}
+    if worker not in scripts:
+        raise ValueError(f"未知内部工作进程：{worker}")
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--internal-worker", worker]
+    return [sys.executable, str(scripts[worker])]
 
 
 def strategy_template(mode: str = "chimera") -> dict[str, Any]:
@@ -242,7 +249,7 @@ def require_expected_account(pid: int, account_name: str, user_id: int) -> None:
 
 def identify_account(pid: int) -> dict[str, Any] | None:
     state = usable_account_state(pid, latest_account_state(pid))
-    common = [worker_python(), str(INJECTOR), "--pid", str(pid), "--agent", str(AGENT)]
+    common = [*worker_command("injector"), "--pid", str(pid), "--agent", str(AGENT)]
     creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     check = subprocess.run(
         [*common, "--check-only"],

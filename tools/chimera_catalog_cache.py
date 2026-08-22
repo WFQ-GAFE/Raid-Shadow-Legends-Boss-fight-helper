@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,41 @@ from typing import Any
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-ROTATION_ARCHIVE = PROJECT_ROOT / "data" / "chimera-rotation-catalogs.json"
-TRIAL_RECIPES = PROJECT_ROOT / "data" / "chimera-trial-recipes.json"
-SKILL_CAPABILITIES = PROJECT_ROOT / "data" / "chimera-skill-capabilities.json"
+RESOURCE_ROOT = Path(os.environ.get("CHIMERA_RESOURCE_ROOT", PROJECT_ROOT)).resolve()
+ROTATION_ARCHIVE = RESOURCE_ROOT / "data" / "chimera-rotation-catalogs.json"
+TRIAL_RECIPES = RESOURCE_ROOT / "data" / "chimera-trial-recipes.json"
+SKILL_CAPABILITIES = RESOURCE_ROOT / "data" / "chimera-skill-capabilities.json"
 UI_CATALOG_CACHE = PROJECT_ROOT / "cache" / "chimera-ui-catalog.json"
 HERO_CATALOG_CACHE = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
+
+
+def is_unresolved_skill_name(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    lowered = text.casefold()
+    if lowered.startswith("l10n:skill/"):
+        return True
+    if re.fullmatch(r"(?:技能|skill)\s*\d+", text, flags=re.IGNORECASE):
+        return True
+    parts = lowered.split()
+    return (
+        len(parts) == 3
+        and parts[0] == "skill"
+        and parts[1].isdigit()
+        and parts[2] in {"name", "title"}
+    )
+
+
+def skill_display_name(skill: dict[str, Any]) -> str:
+    name = str(skill.get("name") or "").strip()
+    if not is_unresolved_skill_name(name):
+        return name
+    slot = skill.get("slot")
+    if isinstance(slot, int) and not isinstance(slot, bool) and slot > 0:
+        return f"技能 {slot}"
+    type_id = skill.get("typeId")
+    return f"技能 {type_id}" if isinstance(type_id, int) else "技能"
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -165,6 +196,52 @@ def cache_live_rewards(
         and isinstance(value.get("id"), int)
         and isinstance(value.get("reward"), dict)
     ]
+    if updated != catalog:
+        UI_CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        UI_CATALOG_CACHE.write_text(
+            json.dumps(updated, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return updated
+
+
+def cache_live_rotation_catalog(
+    catalog: dict[str, Any],
+    live_catalog: dict[str, Any],
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Replace startup trial definitions and rewards with the live rotation."""
+    difficulties = [
+        copy.deepcopy(value)
+        for value in live_catalog.get("difficulties", [])
+        if isinstance(value, dict)
+        and isinstance(value.get("difficultyId"), int)
+        and isinstance(value.get("trials"), list)
+    ]
+    reward_fingerprint = identity.get("rewardRotationFingerprint")
+    if not difficulties or not isinstance(reward_fingerprint, str) or not reward_fingerprint:
+        return catalog
+    updated = copy.deepcopy(catalog)
+    updated["difficulties"] = difficulties
+    for key in (
+        "trialDefinitionFingerprint",
+        "rewardRotationFingerprint",
+        "attributeRotationFingerprint",
+    ):
+        value = identity.get(key)
+        if isinstance(value, str) and value:
+            updated[key] = value
+    live_rotations = updated.setdefault("liveRewardRotations", {})
+    live_rotations[reward_fingerprint] = {
+        str(difficulty["difficultyId"]): [
+            {"id": trial.get("id"), "reward": copy.deepcopy(trial.get("reward"))}
+            for trial in difficulty.get("trials", [])
+            if isinstance(trial, dict)
+            and isinstance(trial.get("id"), int)
+            and isinstance(trial.get("reward"), dict)
+        ]
+        for difficulty in difficulties
+    }
     if updated != catalog:
         UI_CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
         UI_CATALOG_CACHE.write_text(

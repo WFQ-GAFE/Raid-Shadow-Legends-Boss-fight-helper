@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import struct
 from pathlib import Path
 from typing import Any
 
-
-DEFAULT_BUILD = Path(r"C:\EXTEND\PlariumPlay\StandAloneApps\raid-shadow-legends\build")
 
 REQUIRED_IL2CPP_EXPORTS = {
     "il2cpp_domain_get",
@@ -158,10 +157,29 @@ def metadata_names(path: Path) -> tuple[int, set[str]]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build", type=Path, default=DEFAULT_BUILD)
+    parser.add_argument("--build", type=Path)
     args = parser.parse_args()
 
-    build = args.build.resolve()
+    build = args.build
+    if build is None:
+        configured = os.environ.get("CHIMERA_GAME_BUILD")
+        if configured:
+            build = Path(configured)
+        else:
+            from raid_processes import is_supported_raid_executable, raid_processes
+
+            build = next(
+                (
+                    Path(str(process["path"])).resolve().parent
+                    for process in raid_processes().values()
+                    if isinstance(process.get("path"), str)
+                    and is_supported_raid_executable(str(process["path"]))
+                ),
+                None,
+            )
+    if build is None:
+        parser.error("--build is required when RAID is not running")
+    build = build.resolve()
     manifest = json.loads((build / "manifest.json").read_text(encoding="utf-8"))
 
     metadata_version, names = metadata_names(

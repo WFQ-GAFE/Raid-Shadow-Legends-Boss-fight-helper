@@ -199,6 +199,46 @@ def test_hydra_saved_type_ids_match_different_instance_ids() -> None:
         )
 
 
+def test_partial_hydra_team_can_start() -> None:
+    ipc = FakeIpc(
+        active_lifecycle(
+            "team_selection",
+            {
+                "selection": {
+                    "bossMode": "hydra",
+                    "context": 2001,
+                    "valid": True,
+                    "filled": False,
+                    "autoBattle": False,
+                    "quickBattle": False,
+                    "heroIds": [39104],
+                }
+            },
+        )
+    )
+    def acknowledge(*args, **kwargs):
+        ipc.current_lifecycle = active_lifecycle(
+            "battle", {"battle": {"bossMode": "hydra", "context": 3001}}
+        )
+        return {"status": "submitted", "reason": "battle_start_submitted"}
+
+    with (
+        patch(
+            "chimera_controller.queue_lifecycle_command",
+            return_value={"queued": True},
+        ) as queue,
+        patch("chimera_controller.wait_for_command_ack", side_effect=acknowledge),
+    ):
+        assert start_first_battle_if_ready(
+            ipc,
+            pid=1,
+            agent=AGENT,
+            session_id=SESSION,
+            boss_mode="hydra",
+        )
+    queue.assert_called_once()
+
+
 def test_account_binding_rejects_pid_only_and_account_change() -> None:
     snapshot = {
         "pid": 123,
@@ -510,8 +550,6 @@ def test_retry_budget_stops_before_mutation() -> None:
         impossible_trial_ids=(1,),
         current_damage=0,
         minimum_damage=0,
-        current_points=0,
-        minimum_points=0,
     )
     runtime = {"regroupRetries": 1}
     with (
@@ -555,8 +593,6 @@ def test_retry_success_updates_session_budget() -> None:
         impossible_trial_ids=(1,),
         current_damage=0,
         minimum_damage=0,
-        current_points=0,
-        minimum_points=0,
     )
     runtime = {"regroupRetries": 0}
     with (
@@ -641,6 +677,7 @@ def main() -> int:
     test_nonce_uniqueness()
     test_team_reader_never_falls_back_from_partial_type_ids()
     test_hydra_start_retries_selection_settle()
+    test_partial_hydra_team_can_start()
     test_account_binding_rejects_pid_only_and_account_change()
     test_prepare_transition_does_not_repeat_execute()
     test_refresh_selection_uses_read_only_action()

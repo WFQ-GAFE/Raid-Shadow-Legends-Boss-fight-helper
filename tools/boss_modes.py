@@ -44,8 +44,12 @@ MODE_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
-HYDRA_HEAD_TYPE_IDS = (26000, 26040, 26080, 26120, 26160, 26200, 26240, 26280)
+# Only the six heads that have complete gameplay definitions and portraits.
+# Stone (26000) and Electric (26280) are installed art placeholders without
+# combat parameters, localization, portraits, or complete skill definitions.
+HYDRA_HEAD_TYPE_IDS = (26040, 26080, 26120, 26160, 26200, 26240)
 HYDRA_HEAD_TYPE_ID_SET = frozenset(HYDRA_HEAD_TYPE_IDS)
+HYDRA_RESERVED_HEAD_TYPE_IDS = frozenset({26000, 26280})
 HYDRA_EXPOSED_NECK_SKILL_TYPE_IDS = frozenset({260009, 260010, 260011})
 HYDRA_MARKER_SKILL_TYPE_IDS = frozenset({260006, 260007, 260008})
 
@@ -301,13 +305,20 @@ def strategy_profiles_for_mode(
             if isinstance(team, dict)
             else []
         )
+        saved_hero_ids = [
+            hero_id
+            for hero_id in hero_ids
+            if isinstance(hero_id, int)
+            and not isinstance(hero_id, bool)
+            and hero_id > 0
+        ] if isinstance(hero_ids, list) else []
         rules = strategy.get("rules") if isinstance(strategy, dict) else []
         result.append(
             {
                 "id": strategy_id,
                 "name": str(strategy.get("name") or "未命名策略"),
                 "active": strategy_id == active_id,
-                "teamHeroIds": list(hero_ids) if isinstance(hero_ids, list) else [],
+                "teamHeroIds": saved_hero_ids,
                 "ruleCount": len(rules) if isinstance(rules, list) else 0,
             }
         )
@@ -344,6 +355,14 @@ def sanitize_strategy_for_mode(
             return
         if not isinstance(node, dict):
             return
+        if node.get("type") == "hydraHeadPriority" and isinstance(
+            node.get("headTypeIds"), list
+        ):
+            node["headTypeIds"] = [
+                type_id
+                for type_id in node["headTypeIds"]
+                if type_id not in HYDRA_RESERVED_HEAD_TYPE_IDS
+            ]
         when = node.get("when")
         if isinstance(when, dict):
             for key in HYDRA_BATTLE_TURN_CONDITION_KEYS:

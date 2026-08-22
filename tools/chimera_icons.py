@@ -3,27 +3,26 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib
 import io
 import os
 import re
 import threading
-import tkinter as tk
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from raid_processes import is_supported_raid_executable, raid_processes
+
 
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-GAME_BUILD = Path(
-    r"C:\EXTEND\PlariumPlay\StandAloneApps\raid-shadow-legends\build"
-)
+RESOURCE_ROOT = Path(os.environ.get("CHIMERA_RESOURCE_ROOT", PROJECT_ROOT)).resolve()
 CACHE_DIR = PROJECT_ROOT / "cache" / "chimera-icons"
 ASSET_CACHE_DIR = PROJECT_ROOT / "cache" / "chimera-visual-assets"
-GAME_RESOURCE_DIR = GAME_BUILD.parent / "resources"
 GAME_ASSET_MANIFEST = ASSET_CACHE_DIR / "game-assets.json"
 _GAME_ASSET_LOCK = threading.RLock()
 _GAME_ASSET_MANIFEST_MEMORY: dict[str, Any] | None = None
@@ -33,12 +32,58 @@ _GAME_REWARD_PATHS_MEMORY: dict[str, Path] = {}
 _GAME_AVATAR_CACHE_CHECKED = False
 _GAME_SKILL_CACHE_CHECKED: set[int] = set()
 _GAME_REWARD_CACHE_CHECKED = False
+_GAME_BUILD_MEMORY: Path | None = None
+tk: Any = None
+
+
+def game_build_directory() -> Path | None:
+    """Resolve Plarium's current RAID build without assuming a drive letter."""
+    global _GAME_BUILD_MEMORY
+    if _GAME_BUILD_MEMORY is not None and _GAME_BUILD_MEMORY.is_dir():
+        return _GAME_BUILD_MEMORY
+    candidates: list[Path] = []
+    configured = os.environ.get("CHIMERA_GAME_BUILD")
+    if configured:
+        candidates.append(Path(configured))
+    try:
+        candidates.extend(
+            Path(str(process["path"])).resolve().parent
+            for process in raid_processes().values()
+            if isinstance(process.get("path"), str)
+            and is_supported_raid_executable(str(process["path"]))
+        )
+    except OSError:
+        pass
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(
+            Path(local_app_data)
+            / "PlariumPlay"
+            / "StandAloneApps"
+            / "raid-shadow-legends"
+            / "build"
+        )
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if (resolved / "Raid.exe").is_file():
+            _GAME_BUILD_MEMORY = resolved
+            return resolved
+    return None
+
+
+def game_resource_directory() -> Path | None:
+    build = game_build_directory()
+    return build.parent / "resources" if build is not None else None
 
 
 @lru_cache(maxsize=1)
 def discover_game_hydra_heads() -> tuple[tuple[int, str], ...]:
     """Read every installed Hydra head identity without entering the game process."""
-    if not GAME_RESOURCE_DIR.is_dir():
+    resource_dir = game_resource_directory()
+    if resource_dir is None or not resource_dir.is_dir():
         return ()
     pattern = re.compile(
         r"^Hydra_(?P<kind>[A-Za-z][A-Za-z0-9]*)_"
@@ -47,7 +92,7 @@ def discover_game_hydra_heads() -> tuple[tuple[int, str], ...]:
     )
     discovered: dict[int, str] = {}
     try:
-        directories = GAME_RESOURCE_DIR.iterdir()
+        directories = resource_dir.iterdir()
     except OSError:
         return ()
     for directory in directories:
@@ -475,7 +520,7 @@ def effect_label(token: Any) -> str:
 
 @lru_cache(maxsize=1)
 def _skill_capabilities() -> dict[int, list[dict[str, Any]]]:
-    path = PROJECT_ROOT / "data" / "chimera-skill-capabilities.json"
+    path = RESOURCE_ROOT / "data" / "chimera-skill-capabilities.json"
     if not path.is_file():
         return {}
     try:
@@ -666,11 +711,12 @@ def _valid_manifest_paths(values: Any) -> dict[str, Path]:
 
 
 def _avatar_bundle_sources() -> list[Path]:
-    if not GAME_RESOURCE_DIR.is_dir():
+    resource_dir = game_resource_directory()
+    if resource_dir is None or not resource_dir.is_dir():
         return []
     sources = [
         path
-        for directory in GAME_RESOURCE_DIR.glob("HeroAvatars*")
+        for directory in resource_dir.glob("HeroAvatars*")
         if directory.is_dir()
         for path in directory.rglob("__data")
         if path.is_file()
@@ -745,11 +791,12 @@ def _version_tuple(name: str) -> tuple[int, ...]:
 
 def _hero_skill_bundle_sources(base_id: int) -> list[Path]:
     """Locate only the hero prefab bundles that can contain this hero's sprites."""
-    if not GAME_RESOURCE_DIR.is_dir():
+    resource_dir = game_resource_directory()
+    if resource_dir is None or not resource_dir.is_dir():
         return []
     token = re.compile(rf"(?:id|_){base_id}(?:_|$)", re.IGNORECASE)
     candidates: list[Path] = []
-    for directory in GAME_RESOURCE_DIR.iterdir():
+    for directory in resource_dir.iterdir():
         name = directory.name
         if (
             not directory.is_dir()
@@ -863,11 +910,12 @@ def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
 
 def _latest_resource_bundle_source(prefix: str) -> Path | None:
     """Return the newest downloaded game-resource bundle for one UI family."""
-    if not GAME_RESOURCE_DIR.is_dir():
+    resource_dir = game_resource_directory()
+    if resource_dir is None or not resource_dir.is_dir():
         return None
     directories = [
         directory
-        for directory in GAME_RESOURCE_DIR.glob(f"{prefix}_*")
+        for directory in resource_dir.glob(f"{prefix}_*")
         if directory.is_dir() and _version_tuple(directory.name)
     ]
     if not directories:
@@ -1020,7 +1068,10 @@ def preload_game_visuals(
 
 
 def _latest_bundle(category: str) -> Path | None:
-    base = GAME_BUILD / "Raid_Data" / "StreamingAssets" / "AssetBundles" / category
+    game_build = game_build_directory()
+    if game_build is None:
+        return None
+    base = game_build / "Raid_Data" / "StreamingAssets" / "AssetBundles" / category
     candidates = list(base.glob("*/*/WindowsPlayer/*.unity3d")) if base.is_dir() else []
     return max(candidates, key=lambda value: value.stat().st_mtime_ns, default=None)
 
@@ -1085,6 +1136,12 @@ def ensure_icon_cache() -> dict[str, Path]:
 
 class ChimeraIconRepository:
     def __init__(self, master: tk.Misc) -> None:
+        # The React desktop shell does not use Tk.  Resolve it only when the
+        # retained legacy development UI explicitly constructs this class, so
+        # PyInstaller does not bundle Tcl/Tk in the current release.
+        global tk
+        if tk is None:
+            tk = importlib.import_module("tkinter")
         self.master = master
         self.paths = ensure_icon_cache()
         self._photos: dict[tuple[str, str], tk.PhotoImage] = {}
