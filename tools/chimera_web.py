@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import locale
 import mimetypes
 import os
 import secrets
@@ -270,6 +271,24 @@ def utf8_subprocess_environment() -> dict[str, str]:
     return environment
 
 
+def decode_worker_output(value: bytes | str) -> str:
+    """Decode packaged worker output without destroying legacy CP936 bytes."""
+    if isinstance(value, str):
+        return value
+    encodings = ("utf-8-sig", locale.getpreferredencoding(False), "gb18030")
+    attempted: set[str] = set()
+    for encoding in encodings:
+        normalized = encoding.lower()
+        if normalized in attempted:
+            continue
+        attempted.add(normalized)
+        try:
+            return value.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return value.decode("utf-8", errors="replace")
+
+
 def process_display(item: dict[str, Any]) -> str:
     account = item.get("account")
     pid = int(item["pid"])
@@ -378,7 +397,7 @@ def controller_exit_label(code: int, stop_requested: bool) -> str:
 class ControllerManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
-        self.process: subprocess.Popen[str] | None = None
+        self.process: subprocess.Popen[Any] | None = None
         self.pid: int | None = None
         self.boss_mode = "chimera"
         self.status = "已停止"
@@ -445,16 +464,19 @@ class ControllerManager:
 
     def _run_injector(self, arguments: list[str], timeout: int) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
+        binary_result = subprocess.run(
             [*worker_command("injector"), "--pid", str(arguments[0]), "--agent", str(AGENT), *arguments[1:]],
             cwd=PROJECT_ROOT,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
             creationflags=creation_flags,
             env=utf8_subprocess_environment(),
+        )
+        result = subprocess.CompletedProcess(
+            binary_result.args,
+            binary_result.returncode,
+            decode_worker_output(binary_result.stdout),
+            decode_worker_output(binary_result.stderr),
         )
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
         return result, payload if isinstance(payload, dict) else {}
@@ -541,10 +563,7 @@ class ControllerManager:
                 cwd=PROJECT_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
+                bufsize=0,
                 creationflags=creation_flags,
                 env=utf8_subprocess_environment(),
             )
@@ -555,7 +574,7 @@ class ControllerManager:
             self.append("控制器已启动。", boss_mode)
             assert process.stdout is not None
             for line in process.stdout:
-                self.append(line, boss_mode)
+                self.append(decode_worker_output(line), boss_mode)
             code = process.wait()
             with self.lock:
                 self.status = controller_exit_label(code, self.stop_requested)
@@ -1947,7 +1966,16 @@ def restore_internal_worker_streams() -> None:
         get_std_handle.argtypes = [ctypes.c_ulong]
         get_std_handle.restype = ctypes.c_void_p
         for attribute, identifier in (("stdout", -11), ("stderr", -12)):
-            if getattr(sys, attribute) is not None:
+            existing = getattr(sys, attribute)
+            if existing is not None:
+                reconfigure = getattr(existing, "reconfigure", None)
+                if callable(reconfigure):
+                    reconfigure(
+                        encoding="utf-8",
+                        errors="backslashreplace",
+                        line_buffering=True,
+                        write_through=True,
+                    )
                 continue
             handle = get_std_handle(identifier & 0xFFFFFFFF)
             if not handle or handle == ctypes.c_void_p(-1).value:
@@ -1962,7 +1990,7 @@ def restore_internal_worker_streams() -> None:
                 closefd=False,
             )
             setattr(sys, attribute, stream)
-    except (OSError, ValueError):
+    except (OSError, TypeError, ValueError):
         pass
 
 

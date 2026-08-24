@@ -91,6 +91,22 @@ _INITIAL_SKILL_NAMES = {
     and isinstance(skill.get("typeId"), int)
     and not is_unresolved_skill_name(skill.get("name"))
 }
+
+
+def configure_text_streams() -> None:
+    """Emit controller logs as UTF-8 even inside a frozen Windows worker."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(
+                    encoding="utf-8",
+                    errors="backslashreplace",
+                    line_buffering=True,
+                    write_through=True,
+                )
+            except (OSError, TypeError, ValueError):
+                pass
 SUPPORTED_CONDITION_KEYS = frozenset(
     {
         "form",
@@ -5750,6 +5766,7 @@ def process_state(
 
 def main() -> int:
     global _PAUSE_EVENT, ACTIVE_BOSS_MODE
+    configure_text_streams()
     parser = argparse.ArgumentParser(description="奇美拉策略控制器")
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
