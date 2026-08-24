@@ -22,7 +22,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $injector = Join-Path $PSScriptRoot "inject_probe.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $targetPid = [int](Get-Process -Name "Raid" -ErrorAction Stop | Sort-Object Id | Select-Object -First 1).Id
 $output = Join-Path $projectRoot "build\chimera-context-probe-$targetPid.json"
 

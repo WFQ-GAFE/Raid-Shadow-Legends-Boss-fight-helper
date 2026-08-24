@@ -41,7 +41,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $controller = Join-Path $PSScriptRoot "chimera_controller.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $configPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $Config))
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     throw "Strategy config does not exist: $configPath"

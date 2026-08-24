@@ -23,7 +23,7 @@ from raid_processes import raid_processes
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_AGENT = PROJECT_ROOT / "build" / "agent-1225" / "Release" / "RaidChimeraAgent.dll"
+DEFAULT_AGENT = PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll"
 
 
 def resolve_account_pid(account_name: str) -> tuple[int, dict[str, Any]]:

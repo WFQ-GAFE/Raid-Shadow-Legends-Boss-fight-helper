@@ -193,6 +193,152 @@ def main() -> None:
     priority["headTypeIds"] = [99998, 99999]
     assert select_target(priority, skill, state)[0] == 23
     assert select_target({"type": "auto"}, skill, state)[0] == 22
+
+    # Long Hydra battles retain old head UI entries.  The current legal head
+    # can therefore be absent from the bounded boss snapshot even though the
+    # Devoured effect on its victim still exposes the head as producerId.
+    late_hydra_state = {
+        "activeHeroId": 10,
+        "activeHeroTypeId": 100,
+        "heroes": [
+            {"id": 10, "typeId": 100, "name": "actor", "effects": []},
+            {
+                "id": 11,
+                "typeId": 200,
+                "name": "victim",
+                "effects": [
+                    {
+                        "effectKind": "Devoured",
+                        "effectKindId": 9024,
+                        "producerId": 70,
+                    }
+                ],
+            },
+        ],
+        "bosses": [
+            {
+                "id": 69,
+                "typeId": 26240,
+                "name": "other-head",
+                "healthPct": 20,
+                "effects": [],
+            }
+        ],
+        "skills": [
+            {
+                "slot": 2,
+                "typeId": 1002,
+                "ready": True,
+                "validTargetIds": [69, 70, 71, 72],
+            }
+        ],
+    }
+    rescued = select_target(
+        {"type": "devouringHead"}, late_hydra_state["skills"][0], late_hydra_state
+    )
+    assert rescued == (70, "正在吞噬·victim")
+    assert select_target(
+        {"type": "auto"}, late_hydra_state["skills"][0], late_hydra_state
+    )[0] == 70
+    late_decision = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "late-rescue",
+                    "when": {"activeHeroTypeId": [100]},
+                    "action": {
+                        "type": "cast",
+                        "skillTypeId": 1002,
+                        "target": {"type": "devouringHead"},
+                    },
+                }
+            ]
+        },
+        late_hydra_state,
+    )
+    assert late_decision is not None and late_decision.target_id == 70
+    late_hydra_state["heroes"][1]["effects"] = []
+    fallback_decision = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "late-default",
+                    "when": {"activeHeroTypeId": [100]},
+                    "action": {
+                        "type": "defaultSkillPriority",
+                        "prioritySkills": [
+                            {
+                                "skillTypeId": 1002,
+                                "skillSlot": 2,
+                                "target": {"type": "devouringHead"},
+                            }
+                        ],
+                    },
+                }
+            ]
+        },
+        late_hydra_state,
+    )
+    assert fallback_decision is not None and fallback_decision.target_id == 69
+    assert "优先目标不可用" in fallback_decision.target_label
+
+    # A legacy agent can retain 64 historical head contexts while the current
+    # SkillData window already exposes newer legal actor IDs.  Automatic/default
+    # targeting must trust those legal IDs instead of stalling after resume.
+    stale_head_state = {
+        "bossMode": "hydra",
+        "hydra": {"active": True, "turnCount": 833},
+        "activeHeroId": 3,
+        "activeHeroTypeId": 10416,
+        "heroes": [
+            {"id": hero_id, "typeId": 10000 + hero_id, "dead": False}
+            for hero_id in range(6)
+        ],
+        "bosses": [
+            {"id": head_id, "dead": True, "effects": []}
+            for head_id in range(8, 72)
+        ],
+        "skills": [
+            {
+                "slot": 2,
+                "typeId": 104102,
+                "ready": True,
+                "validTargetIds": [72, 73, 74, 75],
+            }
+        ],
+    }
+    stale_target = select_target(
+        {"type": "auto"}, stale_head_state["skills"][0], stale_head_state
+    )
+    assert stale_target is not None and stale_target[0] == 72
+    assert "技能合法目标" in stale_target[1]
+    assert select_target(
+        {"type": "boss"}, stale_head_state["skills"][0], stale_head_state
+    )[0] == 72
+    stale_decision = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "resume-with-stale-head-cache",
+                    "when": {"activeHeroTypeId": [10416]},
+                    "action": {
+                        "type": "defaultSkillPriority",
+                        "prioritySkills": [
+                            {
+                                "skillTypeId": 104102,
+                                "skillSlot": 2,
+                                "target": {"type": "devouringHead"},
+                            }
+                        ],
+                    },
+                }
+            ]
+        },
+        stale_head_state,
+    )
+    assert stale_decision is not None and stale_decision.target_id == 72
+    assert "优先目标不可用" in stale_decision.target_label
+
     state["activeHeroTypeId"] = 100
     state["skills"] = [
         {"slot": 2, "typeId": 1002, "ready": True, "validTargetIds": [21, 22, 23]}

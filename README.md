@@ -2,7 +2,7 @@
 
 A local Windows strategy editor and battle controller for the Alliance Chimera and Hydra encounters in **RAID: Shadow Legends**.
 
-Current release: **1.0.0**.
+Current release: **1.0.1**.
 
 The application reads live battle state from the selected RAID client, evaluates user-defined rules, and submits guarded in-game actions. It includes an English and Chinese interface, separate Chimera and Hydra workspaces, multiple saved strategy profiles, live team discovery, hero and skill catalogs, target priorities, and independent run logs.
 
@@ -28,6 +28,7 @@ The application reads live battle state from the selected RAID client, evaluates
 - Supports trial-aware automatic decisions and structured recipes for known trial categories.
 - Handles Mythical champion transformations and keeps the two forms' skill catalogs separate.
 - Can perform a guarded free regroup when a required trial becomes impossible, then verify the same five champions before re-entering battle.
+- At the result screen, retries automatically when either the damage target or any required trial is still incomplete; it holds only after both are satisfied.
 
 ### Hydra
 
@@ -42,7 +43,7 @@ The application reads live battle state from the selected RAID client, evaluates
 
 The runtime consists of this project's Python controller, React interface, and native IL2CPP agent. The native agent uses the bundled MinHook source and Windows system APIs. Python UI dependencies are vendored under `third_party/python`, and the web interface is built from the packages declared in `ui/package.json`.
 
-The application is Windows-specific because the guarded state agent and process APIs are Windows x64 components. It does not assume a drive letter: supported Plarium installations are discovered from the running `Raid.exe` process. A packaged release includes Python, the controller workers, the native agent, encounter data, and the built React interface.
+The application is Windows-specific because the guarded state agent and process APIs are Windows x64 components. It does not assume a drive letter: supported Plarium installations are discovered from the running `Raid.exe` process. A packaged release is a single executable containing Python, the controller workers, the native agent, encounter data, and the built React interface. User strategies, preferences, and generated visual caches are kept under `%LOCALAPPDATA%\WFQ-GAFE\RaidBossStrategyStudio`, so replacing the executable does not erase them.
 
 ## Requirements
 
@@ -81,7 +82,11 @@ After building the x64 native agent and React interface, run:
 powershell -File .\tools\build_chimera_desktop.ps1
 ```
 
-The build machine needs Python, PyInstaller, and UnityPy; target PCs do not. Distribute the entire `build\desktop\ChimeraStrategyCenter` directory, not only its `.exe`. On a clean Windows 10/11 x64 PC the folder requires no separate Python, Node.js, Visual Studio, or UnityPy installation. WebView2 is intentionally kept as the single Windows runtime prerequisite instead of adding a roughly browser-sized fixed runtime to every release.
+The build machine needs Python plus UnityPy, fmod-toolkit, and archspec; PyInstaller and the desktop UI dependencies are already vendored in the repository. The default output is the single file `build\release\AllianceBossStrategyStudio-1.0.1.exe`. Target PCs do not need Python, Node.js, Visual Studio, the Visual C++ runtime, UnityPy, fmod-toolkit, or archspec. The native agent itself depends only on Windows system DLLs.
+
+On first launch the executable requests administrator permission and may take a few seconds to unpack its private runtime. Microsoft Edge WebView2 Runtime is the only external runtime prerequisite; it is already installed on normal supported Windows 10/11 systems with Microsoft Edge. Bundling a fixed WebView2 runtime would add roughly a browser-sized dependency, so it is intentionally not included.
+
+For packaging diagnostics, `-NoUac` creates the same executable without the administrator manifest, and `-OneDir` creates the traditional folder-based form.
 
 ## Repository layout
 

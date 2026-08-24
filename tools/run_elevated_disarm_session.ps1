@@ -29,7 +29,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $probe = Join-Path $PSScriptRoot "inject_probe.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 
 & $python $probe `
     --pid $RaidPid `

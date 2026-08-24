@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from chimera_controller import (
     AccountBinding,
+    LIFECYCLE_RESTART_CHIMERA_RESULT,
     LIFECYCLE_PREPARE_FREE_REGROUP,
     LIFECYCLE_REFRESH_TEAM_SELECTION,
     LIFECYCLE_SELECT_HEROES,
@@ -16,6 +17,7 @@ from chimera_controller import (
     process_state,
     require_account_binding,
     refresh_team_selection,
+    restart_chimera_from_result,
     result_screen_reached,
     select_team_heroes,
     start_first_battle_if_ready,
@@ -47,17 +49,29 @@ class FakeAccountIpc:
 
 
 class FakeResultIpc(FakeIpc):
-    def __init__(self, damage: int) -> None:
+    def __init__(
+        self,
+        damage: int,
+        boss_mode: str = "hydra",
+        completed_ids: list[int] | None = None,
+    ) -> None:
         super().__init__(
             active_lifecycle(
                 "result",
-                {"result": {"bossMode": "hydra", "context": 9001}},
+                {"result": {"bossMode": boss_mode, "context": 9001}},
             )
         )
         self.damage = damage
+        self.boss_mode = boss_mode
+        self.completed_ids = list(completed_ids or [])
 
     def battle_ledger(self) -> dict:
-        return {"bossMode": "hydra", "damage": self.damage}
+        return {
+            "bossMode": self.boss_mode,
+            "damage": self.damage,
+            "completedChallengeCount": len(self.completed_ids),
+            "completedChallengeIds": self.completed_ids,
+        }
 
 
 def active_lifecycle(screen: str, body: dict) -> dict:
@@ -434,17 +448,25 @@ def test_retry_rejects_changed_team_before_start() -> None:
     start.assert_not_called()
 
 
-def test_retry_accepts_same_team_and_new_context() -> None:
+def test_retry_accepts_same_team_when_battle_context_is_reused() -> None:
     ipc = FakeIpc(
-        active_lifecycle(
-            "battle", {"battle": {"context": 1001, "heroIds": HERO_IDS}}
-        )
+        {
+            **active_lifecycle(
+                "battle", {"battle": {"context": 1001, "heroIds": HERO_IDS}}
+            ),
+            "sequence": 10,
+            "observedAtTick": 100,
+        }
     )
 
     def submit(*args, **kwargs):
-        ipc.current_lifecycle = active_lifecycle(
-            "team_selection", {"selection": {"context": 2001}}
-        )
+        ipc.current_lifecycle = {
+            **active_lifecycle(
+                "team_selection", {"selection": {"context": 2001}}
+            ),
+            "sequence": 11,
+            "observedAtTick": 110,
+        }
         return {"status": "submitted"}
 
     refreshed = active_lifecycle(
@@ -459,9 +481,20 @@ def test_retry_accepts_same_team_and_new_context() -> None:
             }
         },
     )
-    new_battle = active_lifecycle(
-        "battle", {"battle": {"context": 3001, "heroIds": HERO_IDS}}
-    )
+    new_battle = {
+        **active_lifecycle(
+            "battle",
+            {
+                "battle": {
+                    "context": 1001,
+                    "bossMode": "chimera",
+                    "heroIds": HERO_IDS,
+                }
+            },
+        ),
+        "sequence": 12,
+        "observedAtTick": 120,
+    }
     with (
         patch("chimera_controller.submit_free_regroup", side_effect=submit),
         patch(
@@ -642,6 +675,45 @@ def test_hydra_result_holds_after_damage_target() -> None:
     restart.assert_not_called()
 
 
+def test_chimera_result_restart_uses_native_result_action() -> None:
+    ipc = FakeResultIpc(1, boss_mode="chimera")
+    queued: list[dict] = []
+
+    def queue(*args, **kwargs):
+        queued.append(kwargs)
+        return {"queued": True}
+
+    def acknowledge(*args, **kwargs):
+        ipc.current_lifecycle = active_lifecycle(
+            "battle",
+            {
+                "battle": {
+                    "bossMode": "chimera",
+                    "context": 9002,
+                    "heroIds": HERO_IDS,
+                    "heroTypeIds": HERO_TYPE_IDS,
+                }
+            },
+        )
+        return {"status": "submitted"}
+
+    with (
+        patch("chimera_controller.queue_lifecycle_command", side_effect=queue),
+        patch("chimera_controller.wait_for_command_ack", side_effect=acknowledge),
+    ):
+        restarted = restart_chimera_from_result(
+            ipc,
+            pid=1,
+            agent=AGENT,
+            session_id=SESSION,
+            nonce=20,
+            desired_hero_ids=HERO_IDS,
+            desired_hero_type_ids=HERO_TYPE_IDS,
+        )
+    assert restarted is True
+    assert queued[0]["action"] == LIFECYCLE_RESTART_CHIMERA_RESULT
+
+
 def test_hydra_result_retries_below_damage_target() -> None:
     ipc = FakeResultIpc(6_500_000_000)
     config = {
@@ -673,6 +745,90 @@ def test_hydra_result_retries_below_damage_target() -> None:
     restart.assert_called_once()
 
 
+def test_chimera_result_holds_only_after_all_objectives() -> None:
+    ipc = FakeResultIpc(
+        85_000_000,
+        boss_mode="chimera",
+        completed_ids=[8000607, 8000608, 8000609],
+    )
+    config = {
+        "mode": "execute",
+        "objectives": {
+            "minimumDamage": 80_000_000,
+            "mandatoryTrialIds": [8000609],
+            "maxRegroupRetries": 100,
+            "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+        },
+    }
+    runtime = {
+        "regroupRetries": 0,
+        "lastObjectiveReport": {
+            "mandatoryTrialIds": [8000607, 8000608, 8000609],
+            "completedTrialIds": [8000607, 8000608],
+        },
+    }
+    with patch("chimera_controller.restart_chimera_from_result") as restart:
+        should_stop = result_screen_reached(
+            ipc,
+            config=config,
+            pid=1,
+            agent=AGENT,
+            session_id=SESSION,
+            boss_mode="chimera",
+            execute_requested=True,
+            runtime_state=runtime,
+        )
+    assert should_stop is True
+    assert runtime["regroupRetries"] == 0
+    restart.assert_not_called()
+
+
+def test_chimera_result_retries_for_missing_trial_or_damage() -> None:
+    config = {
+        "mode": "execute",
+        "objectives": {
+            "minimumDamage": 80_000_000,
+            "mandatoryTrialIds": [8000609],
+            "maxRegroupRetries": 100,
+            "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
+        },
+    }
+    for damage, completed_ids in (
+        (85_000_000, [8000607, 8000608]),
+        (75_000_000, [8000607, 8000608, 8000609]),
+    ):
+        ipc = FakeResultIpc(
+            damage,
+            boss_mode="chimera",
+            completed_ids=completed_ids,
+        )
+        runtime = {
+            "regroupRetries": 0,
+            "lastObjectiveReport": {
+                "mandatoryTrialIds": [8000607, 8000608, 8000609],
+                "completedTrialIds": completed_ids,
+            },
+        }
+        with patch("chimera_controller.restart_chimera_from_result") as restart:
+            should_stop = result_screen_reached(
+                ipc,
+                config=config,
+                pid=1,
+                agent=AGENT,
+                session_id=SESSION,
+                boss_mode="chimera",
+                execute_requested=True,
+                runtime_state=runtime,
+                desired_hero_ids=HERO_IDS,
+                desired_hero_type_ids=HERO_TYPE_IDS,
+                nonce=19,
+            )
+        assert should_stop is False
+        assert runtime["regroupRetries"] == 1
+        assert "lastObjectiveReport" not in runtime
+        restart.assert_called_once()
+
+
 def main() -> int:
     test_nonce_uniqueness()
     test_team_reader_never_falls_back_from_partial_type_ids()
@@ -683,11 +839,14 @@ def main() -> int:
     test_refresh_selection_uses_read_only_action()
     test_select_team_uses_five_bound_hero_ids()
     test_retry_rejects_changed_team_before_start()
-    test_retry_accepts_same_team_and_new_context()
+    test_retry_accepts_same_team_when_battle_context_is_reused()
     test_retry_budget_stops_before_mutation()
     test_retry_success_updates_session_budget()
     test_hydra_result_holds_after_damage_target()
+    test_chimera_result_restart_uses_native_result_action()
     test_hydra_result_retries_below_damage_target()
+    test_chimera_result_holds_only_after_all_objectives()
+    test_chimera_result_retries_for_missing_trial_or_damage()
     print("chimera-lifecycle-flow-tests-ok")
     return 0
 

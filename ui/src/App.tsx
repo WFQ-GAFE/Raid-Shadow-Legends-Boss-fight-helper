@@ -130,7 +130,10 @@ type EffectOption = {
   token: string
   icon: string
   label: string
+  labelEn?: string
   group: string
+  nativeName?: string
+  iconReady?: boolean
 }
 
 const ENGLISH_EFFECT_NAMES: Record<string, string> = {
@@ -185,7 +188,7 @@ function hydraHeadDisplayName(head?: HydraHead): string {
 function effectDisplay(effect: EffectOption) {
   const english = document.documentElement.lang === 'en'
   return {
-    label: english ? ENGLISH_EFFECT_NAMES[effect.icon] ?? splitIdentifier(effect.icon) : effect.label,
+    label: english ? effect.labelEn ?? ENGLISH_EFFECT_NAMES[effect.icon] ?? splitIdentifier(effect.icon) : effect.label,
     group: english
       ? ({ 增益: 'Buff', 减益: 'Debuff', 特殊: 'Special', 奇美拉: 'Chimera' }[effect.group] ?? effect.group)
       : effect.group,
@@ -196,6 +199,14 @@ type Rule = {
   name?: string
   when?: JsonObject
   action?: JsonObject
+}
+
+type DefaultSkillPolicyDraft = {
+  prioritySkillIds: number[]
+  blockedSkillIds: number[]
+  firstTurnSkillId?: number
+  skillTargets: Record<number, JsonObject>
+  hydraTargetSkillId?: number
 }
 
 type Strategy = {
@@ -505,6 +516,76 @@ function defaultHeroPriorityIds(hero?: Hero) {
     .map((skill) => skill.typeId)
 }
 
+function cloneSkillTargets(targets: Record<number, JsonObject>): Record<number, JsonObject> {
+  return Object.fromEntries(Object.entries(targets).map(([id, target]) => [id, {
+    ...target,
+    ...(Array.isArray(target.headTypeIds) ? { headTypeIds: [...target.headTypeIds] } : {}),
+  }]))
+}
+
+function cloneDefaultSkillPolicy(policy: DefaultSkillPolicyDraft): DefaultSkillPolicyDraft {
+  return {
+    prioritySkillIds: [...policy.prioritySkillIds],
+    blockedSkillIds: [...policy.blockedSkillIds],
+    firstTurnSkillId: policy.firstTurnSkillId,
+    skillTargets: cloneSkillTargets(policy.skillTargets),
+    hydraTargetSkillId: policy.hydraTargetSkillId,
+  }
+}
+
+function readDefaultSkillPolicy(
+  rawPolicy: JsonObject,
+  hero?: Hero,
+  fallback?: DefaultSkillPolicyDraft,
+): DefaultSkillPolicyDraft {
+  const catalogPriority = defaultHeroPriorityIds(hero)
+  const rawPrioritySkills = Array.isArray(rawPolicy.prioritySkills) ? rawPolicy.prioritySkills as unknown[] : undefined
+  const entries = rawPrioritySkills
+    ? rawPrioritySkills.filter((entry): entry is JsonObject => Boolean(entry && typeof entry === 'object' && !Array.isArray(entry)))
+    : []
+  const savedPriority = entries.flatMap((entry) => typeof entry.skillTypeId === 'number' ? [entry.skillTypeId] : [])
+  const prioritySkillIds = rawPrioritySkills
+    ? [...savedPriority, ...catalogPriority.filter((id) => !savedPriority.includes(id))]
+    : [...(fallback?.prioritySkillIds ?? catalogPriority)]
+  const blockedSkillIds = Array.isArray(rawPolicy.blockedSkillTypeIds)
+    ? asNumberArray(rawPolicy.blockedSkillTypeIds)
+    : [...(fallback?.blockedSkillIds ?? [])]
+  const hasFirstTurn = Object.prototype.hasOwnProperty.call(rawPolicy, 'firstTurnSkill')
+  const rawFirstTurn = rawPolicy.firstTurnSkill && typeof rawPolicy.firstTurnSkill === 'object' && !Array.isArray(rawPolicy.firstTurnSkill)
+    ? rawPolicy.firstTurnSkill as JsonObject
+    : undefined
+  const firstTurnSkillId = hasFirstTurn
+    ? (typeof rawFirstTurn?.skillTypeId === 'number' ? rawFirstTurn.skillTypeId : undefined)
+    : fallback?.firstTurnSkillId
+  const skillTargets = fallback ? cloneSkillTargets(fallback.skillTargets) : {}
+  for (const entry of entries) {
+    if (typeof entry.skillTypeId !== 'number') continue
+    const rawTarget = entry.target ?? rawPolicy.target
+    const target = typeof rawTarget === 'string' ? { type: rawTarget } : rawTarget
+    if (!target || typeof target !== 'object' || Array.isArray(target)) continue
+    const targetObject = target as JsonObject
+    skillTargets[entry.skillTypeId] = {
+      ...targetObject,
+      type: targetObject.type === 'hydraHeadSlot' ? 'hydraHeadPriority' : (targetObject.type ?? 'auto'),
+      ...(Array.isArray(targetObject.headTypeIds) ? { headTypeIds: [...targetObject.headTypeIds] } : {}),
+    }
+  }
+  if (typeof rawFirstTurn?.skillTypeId === 'number') {
+    const rawTarget = typeof rawFirstTurn.target === 'string' ? { type: rawFirstTurn.target } : rawFirstTurn.target
+    if (rawTarget && typeof rawTarget === 'object' && !Array.isArray(rawTarget)) {
+      skillTargets[rawFirstTurn.skillTypeId] = { ...(rawTarget as JsonObject) }
+    }
+  }
+  return {
+    prioritySkillIds,
+    blockedSkillIds,
+    firstTurnSkillId,
+    skillTargets,
+    hydraTargetSkillId: savedPriority.find((id) => skillTargets[id]?.type === 'hydraHeadPriority')
+      ?? fallback?.hydraTargetSkillId,
+  }
+}
+
 function ruleForms(rule: Rule): string[] {
   const value = rule.when?.form
   return Array.isArray(value) ? value.map(String) : value ? [String(value)] : ALL_FORMS
@@ -513,6 +594,10 @@ function ruleForms(rule: Rule): string[] {
 function actionLabel(rule: Rule, heroes: Hero[]) {
   const action = rule.action ?? {}
   if (action.type === 'defaultSkillPriority') {
+    const formPolicies = action.formPolicies && typeof action.formPolicies === 'object' && !Array.isArray(action.formPolicies)
+      ? Object.values(action.formPolicies as JsonObject).filter((policy) => policy && typeof policy === 'object' && !Array.isArray(policy))
+      : []
+    if (formPolicies.length) return `默认技能顺序 · ${formPolicies.length} 套形态技能组`
     const count = Array.isArray(action.prioritySkills) ? action.prioritySkills.length : 0
     const firstTurn = action.firstTurnSkill && typeof action.firstTurnSkill === 'object' && !Array.isArray(action.firstTurnSkill)
       ? action.firstTurnSkill as JsonObject
@@ -538,9 +623,13 @@ function actionLabel(rule: Rule, heroes: Hero[]) {
 function targetLabel(rule: Rule, heroes: Hero[], hydraHeads: HydraHead[] = []): string {
   const action = rule.action ?? {}
   if (action.type === 'defaultSkillPriority') {
-    const entries = Array.isArray(action.prioritySkills)
-      ? action.prioritySkills.filter((entry): entry is JsonObject => Boolean(entry && typeof entry === 'object' && !Array.isArray(entry)))
+    const rawFormPolicies = action.formPolicies && typeof action.formPolicies === 'object' && !Array.isArray(action.formPolicies)
+      ? Object.values(action.formPolicies as JsonObject)
       : []
+    const policies = rawFormPolicies.length ? rawFormPolicies : [action]
+    const entries = policies.flatMap((policy) => policy && typeof policy === 'object' && !Array.isArray(policy) && Array.isArray((policy as JsonObject).prioritySkills)
+      ? ((policy as JsonObject).prioritySkills as unknown[]).filter((entry): entry is JsonObject => Boolean(entry && typeof entry === 'object' && !Array.isArray(entry)))
+      : [])
     const customTargets = entries.filter((entry) => {
       const target = typeof entry.target === 'string' ? { type: entry.target } : entry.target as JsonObject | undefined
       return target?.type && target.type !== 'auto' && !entry.isTransform
@@ -572,7 +661,7 @@ function targetLabel(rule: Rule, heroes: Hero[], hydraHeads: HydraHead[] = []): 
   return '奇美拉 Boss'
 }
 
-function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[] = []) {
+function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[] = [], trials: Trial[] = []) {
   const when = rule.when ?? {}
   const ignored = new Set(['activeHeroTypeId', 'form', 'activeHeroFormIndex', 'activeHeroIsMetamorph'])
   const summarized = new Set<string>()
@@ -581,6 +670,13 @@ function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[]
   const parts = [turn !== undefined ? `Boss 回合 ${turn}+` : '', next ? `下一形态：${next}` : ''].filter(Boolean)
   if (turn !== undefined) summarized.add(when.chimeraTurnAtLeast !== undefined ? 'chimeraTurnAtLeast' : 'chimeraTurnCount')
   if (next) summarized.add('nextForm')
+  const eligibleTrialIds = asNumberArray(when.eligibleTrialsAny)
+  if (eligibleTrialIds.length) {
+    const selectedTrial = trials.find((trial) => trial.id === eligibleTrialIds[0])
+    const description = cleanText(selectedTrial?.description) || `试炼 ${eligibleTrialIds[0]}`
+    parts.push(`试炼激活：${description}`)
+    summarized.add('eligibleTrialsAny')
+  }
   const bossHas = Array.isArray(when.bossHasEffects) ? when.bossHasEffects : []
   if (bossHas.length) {
     const names = bossHas.slice(0, 2).map((token) => {
@@ -684,10 +780,10 @@ function SkillIcon({ hero, skill, slot }: { hero?: Hero; skill?: Skill; slot?: n
 
 function EffectIcon({ effect }: { effect: EffectOption }) {
   const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [effect.icon])
+  useEffect(() => setFailed(false), [effect.icon, effect.iconReady])
   return (
     <span className="effect-icon">
-      {!failed ? <img src={`/api/asset/effect/${encodeURIComponent(effect.icon)}`} alt="" onError={() => setFailed(true)} /> : <Sparkles size={14} />}
+      {effect.iconReady !== false && !failed ? <img src={`/api/asset/effect/${encodeURIComponent(effect.icon)}`} alt="" onError={() => setFailed(true)} /> : <Sparkles size={14} />}
     </span>
   )
 }
@@ -705,7 +801,7 @@ function EffectPicker({
   const selected = effects.find((effect) => effect.token === value)
   const visible = effects.filter((effect) => {
     const display = effectDisplay(effect)
-    return `${effect.label} ${effect.group} ${display.label} ${display.group} ${effect.token}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())
+    return `${effect.label} ${effect.labelEn ?? ''} ${effect.nativeName ?? ''} ${effect.group} ${display.label} ${display.group} ${effect.token}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())
   })
   const selectedDisplay = selected ? effectDisplay(selected) : undefined
 
@@ -895,6 +991,7 @@ function RuleEditor({
   hydraHeads,
   team,
   effects,
+  trials,
   bossMode,
   onSave,
 }: {
@@ -906,10 +1003,14 @@ function RuleEditor({
   hydraHeads: HydraHead[]
   team: number[]
   effects: EffectOption[]
+  trials: Trial[]
   bossMode: BossMode
   onSave: (rule: Rule) => void
 }) {
-  const firstHero = heroes[0]?.typeId ?? 0
+  const firstTeamHero = team
+    .map((typeId) => heroByRuntimeId(heroes, typeId))
+    .find((candidate) => candidate !== undefined)
+  const firstHero = firstTeamHero?.typeId ?? heroes[0]?.typeId ?? 0
   const [name, setName] = useState('')
   const [ruleKind, setRuleKind] = useState<'strict' | 'default'>('strict')
   const [heroId, setHeroId] = useState(firstHero)
@@ -920,11 +1021,8 @@ function RuleEditor({
   const [actionType, setActionType] = useState('cast')
   const [slot, setSlot] = useState(1)
   const [skillTypeId, setSkillTypeId] = useState<number | undefined>()
-  const [prioritySkillIds, setPrioritySkillIds] = useState<number[]>([])
-  const [blockedSkillIds, setBlockedSkillIds] = useState<number[]>([])
-  const [firstTurnSkillId, setFirstTurnSkillId] = useState<number | undefined>()
-  const [defaultSkillTargets, setDefaultSkillTargets] = useState<Record<number, JsonObject>>({})
-  const [defaultHydraTargetSkillId, setDefaultHydraTargetSkillId] = useState<number | undefined>()
+  const [defaultPolicyForm, setDefaultPolicyForm] = useState('Ultimate')
+  const [defaultPolicies, setDefaultPolicies] = useState<Record<string, DefaultSkillPolicyDraft>>({})
   const [target, setTarget] = useState('boss')
   const [targetPosition, setTargetPosition] = useState(1)
   const [headPriorityIds, setHeadPriorityIds] = useState<number[]>([])
@@ -933,6 +1031,7 @@ function RuleEditor({
   const [turnMax, setTurnMax] = useState('')
   const [switchWithin, setSwitchWithin] = useState('')
   const [nextForm, setNextForm] = useState('')
+  const [eligibleTrialId, setEligibleTrialId] = useState(0)
   const [damageMin, setDamageMin] = useState('')
   const [effectConditions, setEffectConditions] = useState<EffectConditionValue[]>([])
   const [effectConditionsMode, setEffectConditionsMode] = useState<'all' | 'any'>('all')
@@ -957,38 +1056,33 @@ function RuleEditor({
     setActionType(typeof action.type === 'string' ? action.type : 'cast')
     setSlot(typeof action.skillSlot === 'number' ? action.skillSlot : 1)
     setSkillTypeId(typeof action.skillTypeId === 'number' ? action.skillTypeId : undefined)
-    const catalogPriority = defaultHeroPriorityIds(initialHero ?? heroes[0])
-    const savedPriorityEntries = Array.isArray(action.prioritySkills)
-      ? action.prioritySkills.filter((entry): entry is JsonObject => Boolean(entry && typeof entry === 'object' && !Array.isArray(entry)))
-      : []
-    const savedPriority = savedPriorityEntries.flatMap((entry) => typeof entry.skillTypeId === 'number' ? [entry.skillTypeId] : [])
-    setPrioritySkillIds([...savedPriority, ...catalogPriority.filter((id) => !savedPriority.includes(id))])
-    setBlockedSkillIds(asNumberArray(action.blockedSkillTypeIds))
-    const savedFirstTurn = action.firstTurnSkill && typeof action.firstTurnSkill === 'object' && !Array.isArray(action.firstTurnSkill)
-      ? action.firstTurnSkill as JsonObject
-      : undefined
-    setFirstTurnSkillId(typeof savedFirstTurn?.skillTypeId === 'number' ? savedFirstTurn.skillTypeId : undefined)
-    const savedDefaultTargets: Record<number, JsonObject> = {}
-    for (const entry of savedPriorityEntries) {
-      if (typeof entry.skillTypeId !== 'number') continue
-      const rawSavedTarget = entry.target ?? (defaultRule ? action.target : undefined)
-      const rawEntryTarget = typeof rawSavedTarget === 'string' ? { type: rawSavedTarget } : rawSavedTarget
-      if (!rawEntryTarget || typeof rawEntryTarget !== 'object' || Array.isArray(rawEntryTarget)) continue
-      const targetObject = rawEntryTarget as JsonObject
-      savedDefaultTargets[entry.skillTypeId] = {
-        ...targetObject,
-        type: targetObject.type === 'hydraHeadSlot' ? 'hydraHeadPriority' : (targetObject.type ?? 'auto'),
-        ...(Array.isArray(targetObject.headTypeIds) ? { headTypeIds: [...targetObject.headTypeIds] } : {}),
+    const policyHero = initialHero ?? heroes[0]
+    const basePolicy = readDefaultSkillPolicy(action, policyHero)
+    const rawFormPolicies = action.formPolicies && typeof action.formPolicies === 'object' && !Array.isArray(action.formPolicies)
+      ? action.formPolicies as JsonObject
+      : {}
+    if (bossMode === 'chimera') {
+      const nextPolicies: Record<string, DefaultSkillPolicyDraft> = {}
+      // A form-specific policy inherits the normal skill order/targets from
+      // the legacy top-level policy, but its opener is always independent.
+      // The top-level policy serializes Ultimate for backwards compatibility;
+      // inheriting its opener here would silently copy it to every form.
+      const policyFallback = { ...basePolicy, firstTurnSkillId: undefined }
+      const hasFormPolicies = Object.keys(rawFormPolicies).length > 0
+      for (const form of ALL_FORMS) {
+        const rawFormPolicy = rawFormPolicies[form]
+        nextPolicies[form] = rawFormPolicy && typeof rawFormPolicy === 'object' && !Array.isArray(rawFormPolicy)
+          ? readDefaultSkillPolicy(rawFormPolicy as JsonObject, policyHero, policyFallback)
+          : cloneDefaultSkillPolicy(
+              !hasFormPolicies && form === 'Ultimate' ? basePolicy : policyFallback,
+            )
       }
+      setDefaultPolicies(nextPolicies)
+      setDefaultPolicyForm(ruleForms(initial ?? {})[0] ?? 'Ultimate')
+    } else {
+      setDefaultPolicies({ all: basePolicy })
+      setDefaultPolicyForm('all')
     }
-    if (typeof savedFirstTurn?.skillTypeId === 'number') {
-      const rawFirstTarget = typeof savedFirstTurn.target === 'string' ? { type: savedFirstTurn.target } : savedFirstTurn.target
-      if (rawFirstTarget && typeof rawFirstTarget === 'object' && !Array.isArray(rawFirstTarget)) {
-        savedDefaultTargets[savedFirstTurn.skillTypeId] = { ...(rawFirstTarget as JsonObject) }
-      }
-    }
-    setDefaultSkillTargets(savedDefaultTargets)
-    setDefaultHydraTargetSkillId(savedPriority.find((id) => savedDefaultTargets[id]?.type === 'hydraHeadPriority'))
     const rawTarget = defaultRule ? undefined : action.target
     const targetObject = typeof rawTarget === 'string' ? { type: rawTarget } : ((rawTarget ?? {}) as JsonObject)
     const savedTargetType = typeof targetObject.type === 'string' ? targetObject.type : undefined
@@ -1001,6 +1095,9 @@ function RuleEditor({
     setTurnMax(turnAtMost == null ? '' : String(turnAtMost))
     setSwitchWithin(when.turnsUntilFormChangeAtMost == null ? '' : String(when.turnsUntilFormChangeAtMost))
     setNextForm(typeof when.nextForm === 'string' ? when.nextForm : '')
+    const savedEligibleTrials = asNumberArray(when.eligibleTrialsAny)
+    setEligibleTrialId(savedEligibleTrials.length === 1 ? savedEligibleTrials[0] : 0)
+    if (savedEligibleTrials.length === 1) delete when.eligibleTrialsAny
     setDamageMin(when.currentDamageAtLeast == null ? '' : String(damageInMillions(Number(when.currentDamageAtLeast))))
     const fallbackTeamHeroId = team.find((typeId) => Number.isInteger(typeId) && typeId > 0) ?? ids[0] ?? 0
     const actionTeamHeroId = team.find((typeId) => {
@@ -1120,11 +1217,80 @@ function RuleEditor({
 
   const hero = heroes.find((item) => item.typeId === heroId)
   const allHeroSkills = hero?.skills ?? []
+  const defaultPolicyKey = bossMode === 'chimera' ? defaultPolicyForm : 'all'
+  const fallbackDefaultPolicy = readDefaultSkillPolicy({}, hero)
+  const activeDefaultPolicy = defaultPolicies[defaultPolicyKey] ?? fallbackDefaultPolicy
+  const prioritySkillIds = activeDefaultPolicy.prioritySkillIds
+  const blockedSkillIds = activeDefaultPolicy.blockedSkillIds
+  const firstTurnSkillId = activeDefaultPolicy.firstTurnSkillId
+  const defaultSkillTargets = activeDefaultPolicy.skillTargets
+  const defaultHydraTargetSkillId = activeDefaultPolicy.hydraTargetSkillId
+
+  function updateActiveDefaultPolicy(updater: (current: DefaultSkillPolicyDraft) => DefaultSkillPolicyDraft) {
+    setDefaultPolicies((current) => {
+      const existing = current[defaultPolicyKey] ?? fallbackDefaultPolicy
+      return { ...current, [defaultPolicyKey]: updater(cloneDefaultSkillPolicy(existing)) }
+    })
+  }
+
+  function setPrioritySkillIds(value: number[] | ((current: number[]) => number[])) {
+    updateActiveDefaultPolicy((current) => ({
+      ...current,
+      prioritySkillIds: typeof value === 'function' ? value(current.prioritySkillIds) : value,
+    }))
+  }
+
+  function setBlockedSkillIds(value: number[] | ((current: number[]) => number[])) {
+    updateActiveDefaultPolicy((current) => ({
+      ...current,
+      blockedSkillIds: typeof value === 'function' ? value(current.blockedSkillIds) : value,
+    }))
+  }
+
+  function setFirstTurnSkillId(value: number | undefined) {
+    updateActiveDefaultPolicy((current) => ({ ...current, firstTurnSkillId: value }))
+  }
+
+  function setDefaultSkillTargets(value: Record<number, JsonObject> | ((current: Record<number, JsonObject>) => Record<number, JsonObject>)) {
+    updateActiveDefaultPolicy((current) => ({
+      ...current,
+      skillTargets: typeof value === 'function' ? value(current.skillTargets) : value,
+    }))
+  }
+
+  function setDefaultHydraTargetSkillId(value: number | undefined) {
+    updateActiveDefaultPolicy((current) => ({ ...current, hydraTargetSkillId: value }))
+  }
+
+  function resetDefaultPoliciesForHero(nextHero?: Hero) {
+    const base = readDefaultSkillPolicy({}, nextHero)
+    if (bossMode === 'chimera') {
+      setDefaultPolicies(Object.fromEntries(ALL_FORMS.map((form) => [form, cloneDefaultSkillPolicy(base)])))
+      setDefaultPolicyForm('Ultimate')
+    } else {
+      setDefaultPolicies({ all: base })
+      setDefaultPolicyForm('all')
+    }
+  }
+
   const skills = heroForm === 'any'
     ? allHeroSkills
     : allHeroSkills.filter((item) => (item.formIndex ?? 0) === (heroForm === 'transformed' ? 1 : 0))
+  const teamHeroRank = new Map<number, number>()
+  team.forEach((typeId, index) => {
+    const teamHero = heroByRuntimeId(heroes, typeId)
+    if (teamHero && !teamHeroRank.has(teamHero.typeId)) teamHeroRank.set(teamHero.typeId, index)
+  })
   const visibleHeroes = heroes
     .filter((item) => item.name.toLocaleLowerCase().includes(heroSearch.trim().toLocaleLowerCase()))
+    .sort((left, right) => {
+      const leftRank = teamHeroRank.get(left.typeId)
+      const rightRank = teamHeroRank.get(right.typeId)
+      if (leftRank === undefined && rightRank === undefined) return 0
+      if (leftRank === undefined) return 1
+      if (rightRank === undefined) return -1
+      return leftRank - rightRank
+    })
     .slice(0, 48)
   const teamSize = bossMode === 'hydra' ? 6 : 5
   const teamHeroes = team.slice(0, teamSize).map((typeId) => heroByRuntimeId(heroes, typeId))
@@ -1179,6 +1345,34 @@ function RuleEditor({
     })
   }
 
+  function serializeDefaultSkillPolicy(policy: DefaultSkillPolicyDraft): JsonObject {
+    const firstTurnSkill = hero?.skills.find((item) => item.typeId === policy.firstTurnSkillId)
+    const firstTurnEntry: JsonObject | undefined = firstTurnSkill?.typeId
+      ? {
+          skillTypeId: firstTurnSkill.typeId,
+          skillSlot: firstTurnSkill.slot,
+          formIndex: firstTurnSkill.formIndex ?? 0,
+          isTransform: Boolean(firstTurnSkill.isTransform),
+          target: firstTurnSkill.isTransform
+            ? { type: 'self' }
+            : (policy.skillTargets[firstTurnSkill.typeId] ?? { type: 'auto' }),
+        }
+      : undefined
+    return {
+      ...(firstTurnEntry ? { firstTurnSkill: firstTurnEntry } : {}),
+      prioritySkills: policy.prioritySkillIds
+        .filter((id) => !policy.blockedSkillIds.includes(id))
+        .flatMap((id) => {
+          const skill = hero?.skills.find((item) => item.typeId === id)
+          const skillTarget = skill?.isTransform
+            ? { type: 'self' }
+            : (policy.skillTargets[id] ?? { type: 'auto' })
+          return skill ? [{ skillTypeId: id, skillSlot: skill.slot, formIndex: skill.formIndex ?? 0, isTransform: Boolean(skill.isTransform), target: skillTarget }] : []
+        }),
+      blockedSkillTypeIds: policy.blockedSkillIds,
+    }
+  }
+
   function commit() {
     try {
       const extra = JSON.parse(advanced || '{}')
@@ -1186,14 +1380,14 @@ function RuleEditor({
       if (bossMode === 'hydra') {
         for (const key of HYDRA_BATTLE_TURN_CONDITION_KEYS) delete extra[key]
       }
-      if (bossMode === 'chimera' && !forms.length) throw new Error('至少选择一个奇美拉形态')
+      if (bossMode === 'chimera' && ruleKind === 'strict' && !forms.length) throw new Error('至少选择一个奇美拉形态')
       const when: JsonObject = {
         ...(ruleKind === 'strict' ? extra : {}),
         activeHeroTypeId: ruleKind === 'strict' && allHeroes
           ? Array.from(new Set(heroes.flatMap((item) => heroRuntimeIds(item))))
           : heroRuntimeIds(hero),
       }
-      if (bossMode === 'chimera') when.form = forms
+      if (bossMode === 'chimera') when.form = ruleKind === 'default' ? ALL_FORMS : forms
       const actionPinsHeroForm = ruleKind === 'strict' && (actionType === 'cast' || actionType === 'transform')
       if (actionPinsHeroForm && heroForm !== 'any') {
         when.activeHeroFormIndex = heroForm === 'original' ? 0 : 1
@@ -1217,6 +1411,9 @@ function RuleEditor({
           }
         }
         if (bossMode === 'chimera' && nextForm) when.nextForm = nextForm
+        if (bossMode === 'chimera' && eligibleTrialId > 0) {
+          when.eligibleTrialsAny = [eligibleTrialId]
+        }
         if (effectConditions.length) {
           const savedConditions: JsonObject[] = []
           for (const value of effectConditions) {
@@ -1286,32 +1483,20 @@ function RuleEditor({
         : target === 'hydraHeadPriority'
           ? { type: target, headTypeIds: headPriorityIds, fallback: 'lowestHp' }
           : { type: target }
-      const firstTurnSkill = hero?.skills.find((item) => item.typeId === firstTurnSkillId)
-      const firstTurnEntry: JsonObject | undefined = firstTurnSkill?.typeId
-        ? {
-            skillTypeId: firstTurnSkill.typeId,
-            skillSlot: firstTurnSkill.slot,
-            formIndex: firstTurnSkill.formIndex ?? 0,
-            isTransform: Boolean(firstTurnSkill.isTransform),
-            target: firstTurnSkill.isTransform
-              ? { type: 'self' }
-              : (defaultSkillTargets[firstTurnSkill.typeId] ?? { type: 'auto' }),
-          }
+      const serializedDefaultPolicies = bossMode === 'chimera'
+        ? Object.fromEntries(ALL_FORMS.map((form) => [
+            form,
+            serializeDefaultSkillPolicy(defaultPolicies[form] ?? fallbackDefaultPolicy),
+          ]))
         : undefined
+      const serializedDefaultBase = bossMode === 'chimera'
+        ? serializedDefaultPolicies?.Ultimate ?? serializeDefaultSkillPolicy(fallbackDefaultPolicy)
+        : serializeDefaultSkillPolicy(defaultPolicies.all ?? fallbackDefaultPolicy)
       const baseAction: JsonObject = ruleKind === 'default'
         ? {
             type: 'defaultSkillPriority',
-            ...(firstTurnEntry ? { firstTurnSkill: firstTurnEntry } : {}),
-            prioritySkills: prioritySkillIds
-              .filter((id) => !blockedSkillIds.includes(id))
-              .flatMap((id) => {
-                const skill = hero?.skills.find((item) => item.typeId === id)
-                const skillTarget = skill?.isTransform
-                  ? { type: 'self' }
-                  : (defaultSkillTargets[id] ?? { type: 'auto' })
-                return skill ? [{ skillTypeId: id, skillSlot: skill.slot, formIndex: skill.formIndex ?? 0, isTransform: Boolean(skill.isTransform), target: skillTarget }] : []
-              }),
-            blockedSkillTypeIds: blockedSkillIds,
+            ...serializedDefaultBase,
+            ...(serializedDefaultPolicies ? { formPolicies: serializedDefaultPolicies } : {}),
             reserveStrictRuleSkills: true,
           }
         : actionType === 'transform'
@@ -1339,7 +1524,8 @@ function RuleEditor({
         : baseAction
       if (ruleKind === 'default') {
         delete action.target
-        if (!firstTurnEntry) delete action.firstTurnSkill
+        if (!serializedDefaultBase.firstTurnSkill) delete action.firstTurnSkill
+        if (bossMode !== 'chimera') delete action.formPolicies
       }
       if (ruleKind === 'strict' && actionType === 'cast' && (allHeroes || !selectedSkill?.typeId)) {
         delete action.skillTypeId
@@ -1372,7 +1558,7 @@ function RuleEditor({
                 {ruleKind === 'strict' && <button type="button" aria-pressed={allHeroes} className={allHeroes ? 'all-heroes active' : 'all-heroes'} onClick={() => { const next = !allHeroes; setAllHeroes(next); setActionType(next && bossMode === 'chimera' ? 'executeTrialRecipe' : 'cast') }}><Users size={15} />{allHeroes ? '取消任意英雄' : '任意行动英雄'}</button>}
               </div>
               {!allHeroes && <div className="hero-library">
-                {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); setPrioritySkillIds(defaultHeroPriorityIds(item)); setBlockedSkillIds([]); setFirstTurnSkillId(undefined); setDefaultSkillTargets({}); setDefaultHydraTargetSkillId(undefined); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item.isMetamorph ? '神话 · 双形态' : `${item.skills.length} 个主动技能`}</small></span></button>)}
+                {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); resetDefaultPoliciesForHero(item); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item.isMetamorph ? '神话 · 双形态' : `${item.skills.length} 个主动技能`}</small></span></button>)}
                 {!visibleHeroes.length && <span className="library-empty">没有找到英雄</span>}
               </div>}
             </div>
@@ -1381,12 +1567,13 @@ function RuleEditor({
               <button type="button" className={ruleKind === 'strict' ? 'active' : ''} onClick={() => { setRuleKind('strict'); setActionType('cast') }}><ShieldCheck size={16} /><span><strong>严格执行规则</strong></span></button>
               <button type="button" className={ruleKind === 'default' ? 'active' : ''} onClick={() => { setRuleKind('default'); setAllHeroes(false); setActionType('defaultSkillPriority'); if (!prioritySkillIds.length) setPrioritySkillIds(defaultHeroPriorityIds(hero)) }}><Sparkles size={16} /><span><strong>默认技能规则</strong></span></button>
             </div>
-            {bossMode === 'chimera' && <fieldset className="field span-2"><legend>奇美拉形态</legend><div className="chip-group">{ALL_FORMS.map((form) => <button type="button" key={form} className={forms.includes(form) ? 'chip active' : 'chip'} onClick={() => setForms((current) => current.includes(form) ? current.filter((item) => item !== form) : [...current, form])}>{FORM_LABEL[form]}</button>)}</div></fieldset>}
+            {bossMode === 'chimera' && ruleKind === 'strict' && <fieldset className="field span-2"><legend>奇美拉形态</legend><div className="chip-group">{ALL_FORMS.map((form) => <button type="button" key={form} className={forms.includes(form) ? 'chip active' : 'chip'} onClick={() => setForms((current) => current.includes(form) ? current.filter((item) => item !== form) : [...current, form])}>{FORM_LABEL[form]}</button>)}</div></fieldset>}
             {hero?.isMetamorph && <fieldset className="field span-2"><legend>英雄形态与技能组</legend><div className="chip-group"><button type="button" className={heroForm === 'any' ? 'chip active' : 'chip'} onClick={() => setHeroForm('any')}>同时查看两套</button><button type="button" className={heroForm === 'original' ? 'chip active' : 'chip'} onClick={() => { setHeroForm('original'); setSkillTypeId(undefined); setSlot(1) }}>原始形态</button><button type="button" className={heroForm === 'transformed' ? 'chip active' : 'chip'} onClick={() => { setHeroForm('transformed'); setSkillTypeId(undefined); setSlot(1) }}>变形形态</button></div></fieldset>}
             {ruleKind === 'default' && <fieldset className="skill-policy span-2">
               <legend>默认技能释放顺序与目标</legend>
+              {bossMode === 'chimera' && <div className="default-form-policy-tabs"><span>为每个奇美拉形态分别设置</span><div className="chip-group">{ALL_FORMS.map((form) => <button type="button" key={form} className={defaultPolicyForm === form ? 'chip active' : 'chip'} onClick={() => setDefaultPolicyForm(form)}>{FORM_LABEL[form]}</button>)}</div></div>}
               <div className="first-turn-policy">
-                <span><strong>英雄首回合技能</strong><small>优先于严格规则执行</small></span>
+                <span><strong>{bossMode === 'chimera' ? '本形态英雄首回合技能' : '英雄首回合技能'}</strong><small>{bossMode === 'chimera' ? '每次进入该形态时优先于严格规则执行' : '优先于严格规则执行'}</small></span>
                 <select value={firstTurnSkillId ?? ''} onChange={(event) => setFirstTurnSkillId(event.target.value ? Number(event.target.value) : undefined)}>
                   <option value="">不设定</option>
                   {allHeroSkills.filter((skill): skill is Skill & { typeId: number } => typeof skill.typeId === 'number').map((skill) => <option key={`${skill.formIndex ?? 0}-${skill.typeId}`} value={skill.typeId}>{skill.name || `技能 ${skill.slot}`}{hero?.isMetamorph ? ` · ${(skill.formIndex ?? 0) === 1 ? '变形形态' : '原始形态'}` : ''}</option>)}
@@ -1468,6 +1655,7 @@ function RuleEditor({
                 {bossMode === 'chimera' && <label className="field"><span>距切换形态 ≤</span><input type="text" inputMode="numeric" value={switchWithin} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && Number(event.target.value || 0) <= 5 && setSwitchWithin(event.target.value)} placeholder="不限" /></label>}
                 {bossMode === 'chimera' && <label className="field"><span>下一形态</span><select value={nextForm} onChange={(event) => setNextForm(event.target.value)}><option value="">不限</option>{ALL_FORMS.map((form) => <option key={form} value={form}>{FORM_LABEL[form]}</option>)}</select></label>}
                 <label className="field"><span>当前伤害 ≥（M）</span><input type="text" inputMode="decimal" value={damageMin} onFocus={selectNumericInput} onChange={(event) => /^\d*(?:\.\d*)?$/.test(event.target.value) && setDamageMin(event.target.value)} placeholder="例如 150" /></label>
+                {bossMode === 'chimera' && <label className="field trial-active-condition"><span>仅当试炼当前激活 <small>已完成、尚未解锁或不在对应形态时忽略此规则</small></span><select value={eligibleTrialId || ''} onChange={(event) => setEligibleTrialId(Number(event.target.value) || 0)}><option value="">不限制试炼状态</option>{eligibleTrialId > 0 && !trials.some((trial) => trial.id === eligibleTrialId) && <option value={eligibleTrialId}>已保存试炼 {eligibleTrialId}</option>}{trials.map((trial) => <option key={trial.id} value={trial.id}>{FORM_LABEL[trial.form ?? ''] ?? trial.form ?? '奇美拉'} · {TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty ?? '试炼'} · {cleanText(trial.description) || `试炼 ${trial.id}`}</option>)}</select></label>}
               </div>
             </fieldset>
             <fieldset className="effect-condition-builder span-2">
@@ -1622,9 +1810,10 @@ function App() {
     if (!selectedPid || loading) return
     const timer = window.setInterval(async () => {
       try {
-        const next = await api<{ state: LiveState; controller: ControllerState; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }>(`/api/state?pid=${selectedPid}&mode=${bossMode}`)
+        const next = await api<{ state: LiveState; controller: ControllerState; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }>(`/api/state?pid=${selectedPid}&mode=${bossMode}`)
         setLive(next.state)
         setController(next.controller)
+        if (next.strategyProfiles) setStrategyProfiles(next.strategyProfiles)
         if (next.heroes || next.hydraHeads || next.effects || next.difficulties) {
           setData((current) => current ? {
             ...current,
@@ -2104,7 +2293,7 @@ function App() {
                     <div className="form-pills">{bossMode === 'chimera' ? ruleForms(rule).slice(0, 4).map((form) => <span key={form}>{FORM_LABEL[form] ?? form}</span>) : <span>六头蛇全程</span>}</div>
                     <div className="rule-action"><SkillIcon hero={hero} skill={skill} slot={slot} /><span><small>行动</small><strong>{actionLabel(rule, heroes)}</strong></span></div>
                     <div className="rule-target"><Crosshair size={16} /><span><small>目标</small><strong>{targetLabel(rule, heroes, hydraHeads)}</strong></span></div>
-                    <div className="rule-condition"><small>{action.type === 'defaultSkillPriority' ? '默认技能规则' : '严格执行规则'}</small><span>{action.type === 'defaultSkillPriority' ? `禁用 ${asNumberArray(action.blockedSkillTypeIds).length} 个技能` : conditionLabel(rule, effects, heroes)}</span></div>
+                    <div className="rule-condition"><small>{action.type === 'defaultSkillPriority' ? '默认技能规则' : '严格执行规则'}</small><span>{action.type === 'defaultSkillPriority' ? (action.formPolicies ? '按奇美拉形态分别配置' : `禁用 ${asNumberArray(action.blockedSkillTypeIds).length} 个技能`) : conditionLabel(rule, effects, heroes, trials)}</span></div>
                     <div className="rule-buttons">
                       <button className="icon-button" title="上移" disabled={index === 0} onClick={() => moveRule(index, -1)}><ArrowUp size={16} /></button>
                       <button className="icon-button" title="下移" disabled={index === rules.length - 1} onClick={() => moveRule(index, 1)}><ArrowDown size={16} /></button>
@@ -2142,7 +2331,7 @@ function App() {
       </Dialog.Root>
 
       {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={(ids) => updateObjective('mandatoryTrialIds', ids)} />}
-      <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} bossMode={bossMode} onSave={saveRule} />
+      <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} onSave={saveRule} />
       <Dialog.Root open={logsExpanded} onOpenChange={setLogsExpanded}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />

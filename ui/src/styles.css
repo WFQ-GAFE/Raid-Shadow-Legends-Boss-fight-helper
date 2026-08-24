@@ -478,6 +478,9 @@ select option { color: #e9f0f5; background: #102033; }
 .skill-policy legend { padding: 0 6px; color: #cbd7df; font-size: 11px; font-weight: 650; }
 .skill-policy legend small { color: var(--muted); font-size: 9px; font-weight: 400; }
 .skill-policy > p { margin: 0 0 9px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.default-form-policy-tabs { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .45); }
+.default-form-policy-tabs > span { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.default-form-policy-tabs .chip { min-height: 28px; }
 .first-turn-policy { min-height: 44px; display: grid; grid-template-columns: minmax(150px, 1fr) minmax(210px, .9fr); align-items: center; gap: 10px; margin-bottom: 9px; padding: 7px 9px; border: 1px solid rgba(247, 195, 89, .4); border-radius: 9px; background: rgba(247, 195, 89, .07); }
 .first-turn-policy > span { display: grid; gap: 2px; }
 .first-turn-policy strong { color: var(--gold); font-size: 10px; }
@@ -570,6 +573,9 @@ select option { color: #e9f0f5; background: #102033; }
 .condition-builder legend, .cooldown-condition-builder legend, .effect-condition-builder legend { padding: 0 6px; color: #cbd7df; font-size: 11px; font-weight: 650; }
 .condition-builder legend small, .cooldown-condition-builder legend small, .effect-condition-builder legend small { color: var(--muted); font-size: 9px; font-weight: 400; }
 .condition-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.trial-active-condition { grid-column: 1 / -1; }
+.trial-active-condition > span { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.trial-active-condition > span small { color: var(--muted); }
 .condition-subsection { min-width: 0; }
 .condition-subsection + .condition-subsection { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .condition-subsection-title { margin-bottom: 7px; color: var(--teal); font-size: 9px; font-weight: 750; letter-spacing: .04em; }
@@ -714,6 +720,8 @@ body { font-size: 14px; }
 .skill-policy legend, .skill-picker legend, .target-picker legend, .condition-builder legend, .cooldown-condition-builder legend, .effect-condition-builder legend { font-size: 14px; }
 .skill-policy legend small, .skill-picker legend small, .target-picker legend small, .condition-builder legend small, .cooldown-condition-builder legend small, .effect-condition-builder legend small { font-size: 11px; }
 .skill-policy > p { font-size: 12px; }
+.default-form-policy-tabs { padding: 9px 11px; }
+.default-form-policy-tabs > span { font-size: 12px; }
 .first-turn-policy { min-height: 56px; padding: 9px 11px; }
 .first-turn-policy strong { font-size: 13px; }
 .first-turn-policy small { font-size: 11px; }

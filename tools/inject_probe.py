@@ -28,7 +28,7 @@ from raid_processes import is_supported_raid_executable, raid_processes
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-DEFAULT_AGENT = PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll"
+DEFAULT_AGENT = PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll"
 PIPE_NAME_PREFIX = r"\\.\pipe\RaidChimeraPrototype-"
 
 PROCESS_CREATE_THREAD = 0x0002
@@ -757,7 +757,7 @@ def encode_lifecycle_request(
         or not isinstance(context, int)
         or isinstance(context, bool)
         or not 0 < context <= 0xFFFFFFFFFFFFFFFF
-        or action not in {1, 2, 3, 4, 5, 6}
+        or action not in {1, 2, 3, 4, 5, 6, 7}
         or not isinstance(nonce, int)
         or isinstance(nonce, bool)
         or not 0 < nonce <= 0xFFFFFFFF

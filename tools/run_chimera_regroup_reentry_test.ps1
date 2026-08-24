@@ -35,7 +35,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $test = Join-Path $PSScriptRoot "test_chimera_regroup_reentry.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $log = Join-Path $projectRoot "build\chimera-regroup-reentry-test.log"
 
 Set-Location -LiteralPath $projectRoot

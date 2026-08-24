@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "source": "RAID 11.70.0 StaticAllianceData trial descriptions",
   "recipes": [
     {
@@ -39,7 +39,7 @@
     },
     {
       "trialId": 8000504,
-      "name": "Ram/尾巴/简单：增加精准下六种减益",
+      "name": "Ram/尾巴/简单：增加精准下指定数量减益",
       "form": "Ram",
       "part": "Tail",
       "difficulty": "Easy",
@@ -48,7 +48,15 @@
       "requirements": [
         {"scope": "activeHero", "anyOf": [{"effectTypeId": 220}, {"effectTypeId": 221}], "keepTurnsAtLeast": 1}
       ],
-      "minimumBossEffects": 6,
+      "minimumBossDebuffs": 6,
+      "difficultyOverrides": {
+        "1": {"minimumBossDebuffs": 2},
+        "2": {"minimumBossDebuffs": 3},
+        "3": {"minimumBossDebuffs": 4},
+        "4": {"minimumBossDebuffs": 5},
+        "5": {"minimumBossDebuffs": 6},
+        "6": {"minimumBossDebuffs": 7}
+      },
       "requiredMechanics": ["sixDistinctDebuffs"]
     },
     {
@@ -95,15 +103,23 @@
     },
     {
       "trialId": 8000508,
-      "name": "Ram/爪子/普通：六种减益与六种增益",
+      "name": "Ram/爪子/普通：指定数量减益与增益",
       "form": "Ram",
       "part": "Paw",
       "difficulty": "Normal",
       "automation": "assisted",
       "actionGoal": "applyDistinctEffects",
       "requirements": [],
-      "minimumBossEffects": 6,
-      "minimumActiveHeroEffects": 6,
+      "minimumBossDebuffs": 6,
+      "minimumActiveHeroBuffs": 6,
+      "difficultyOverrides": {
+        "1": {"minimumBossDebuffs": 2, "minimumActiveHeroBuffs": 2},
+        "2": {"minimumBossDebuffs": 3, "minimumActiveHeroBuffs": 3},
+        "3": {"minimumBossDebuffs": 4, "minimumActiveHeroBuffs": 4},
+        "4": {"minimumBossDebuffs": 5, "minimumActiveHeroBuffs": 5},
+        "5": {"minimumBossDebuffs": 6, "minimumActiveHeroBuffs": 6},
+        "6": {"minimumBossDebuffs": 6, "minimumActiveHeroBuffs": 6}
+      },
       "requiredMechanics": ["sixDistinctDebuffs", "sixDistinctBuffs", "threeBossTurns"]
     },
     {
@@ -121,7 +137,7 @@
     },
     {
       "trialId": 8000510,
-      "name": "Lion/翅膀/简单：五种减益与增加防御下伤害",
+      "name": "Lion/翅膀/简单：指定数量减益与增加防御下伤害",
       "form": "Lion",
       "part": "Wing",
       "difficulty": "Easy",
@@ -130,7 +146,15 @@
       "requirements": [
         {"scope": "activeHero", "anyOf": [{"effectTypeId": 140}, {"effectTypeId": 141}], "keepTurnsAtLeast": 1}
       ],
-      "minimumBossEffects": 5,
+      "minimumBossDebuffs": 5,
+      "difficultyOverrides": {
+        "1": {"minimumBossDebuffs": 1},
+        "2": {"minimumBossDebuffs": 2},
+        "3": {"minimumBossDebuffs": 3},
+        "4": {"minimumBossDebuffs": 4},
+        "5": {"minimumBossDebuffs": 5},
+        "6": {"minimumBossDebuffs": 6}
+      },
       "requiredMechanics": ["singleSkillDamage", "excludeCounterattack"]
     },
     {
@@ -168,7 +192,7 @@
       "automation": "automatic",
       "actionGoal": "damageBoss",
       "requirements": [],
-      "minimumActiveHeroEffects": 5,
+      "minimumActiveHeroBuffs": 5,
       "requiredMechanics": ["damageAcrossBossTurns", "excludeEnemyMaxHpDamage"]
     },
     {
@@ -211,7 +235,7 @@
     },
     {
       "trialId": 8000517,
-      "name": "Lion/爪子/普通：十个减益且含降低抗性",
+      "name": "Lion/爪子/普通：多次施加减益且含降低抗性",
       "form": "Lion",
       "part": "Paw",
       "difficulty": "Normal",
@@ -220,7 +244,15 @@
       "requirements": [
         {"scope": "boss", "anyOf": [{"effectTypeId": 720}, {"effectTypeId": 721}], "keepTurnsAtLeast": 1}
       ],
-      "minimumBossEffects": 10,
+      "minimumBossDebuffs": 10,
+      "difficultyOverrides": {
+        "1": {"minimumBossDebuffs": 6},
+        "2": {"minimumBossDebuffs": 8},
+        "3": {"minimumBossDebuffs": 10},
+        "4": {"minimumBossDebuffs": 10},
+        "5": {"minimumBossDebuffs": 10},
+        "6": {"minimumBossDebuffs": 10}
+      },
       "requiredMechanics": ["tenDebuffApplications", "threeBossTurns"]
     },
     {
@@ -264,14 +296,22 @@
     },
     {
       "trialId": 8000521,
-      "name": "Snake/翅膀/苦难：九个减益且无阻挡主动技能",
+      "name": "Snake/翅膀/苦难：指定数量减益且无阻挡主动技能",
       "form": "Snake",
       "part": "Wing",
       "difficulty": "Hard",
       "automation": "assisted",
       "actionGoal": "applyDistinctEffects",
       "requirements": [],
-      "minimumBossEffects": 9,
+      "minimumBossDebuffs": 9,
+      "difficultyOverrides": {
+        "1": {"minimumBossDebuffs": 5},
+        "2": {"minimumBossDebuffs": 6},
+        "3": {"minimumBossDebuffs": 7},
+        "4": {"minimumBossDebuffs": 8},
+        "5": {"minimumBossDebuffs": 9},
+        "6": {"minimumBossDebuffs": 10}
+      },
       "forbiddenBossEffectTypeIds": [290],
       "requiredMechanics": ["damage"]
     },
