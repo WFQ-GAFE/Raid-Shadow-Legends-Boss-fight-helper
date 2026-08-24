@@ -30,7 +30,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $tool = Join-Path $PSScriptRoot "return_to_chimera_preparation.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 if (-not $Log) {
     $Log = Join-Path $projectRoot "build\chimera-return-to-preparation.log"
 } elseif (-not [IO.Path]::IsPathRooted($Log)) {

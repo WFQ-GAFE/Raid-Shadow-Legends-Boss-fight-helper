@@ -28,7 +28,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $injector = Join-Path $PSScriptRoot "inject_probe.py"
-$newAgent = Join-Path $projectRoot "build\agent-1231\Release\RaidChimeraAgent.dll"
+$newAgent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $probeResult = Join-Path $projectRoot "build\chimera-agent-current-gafee.json"
 
 Set-Location -LiteralPath $projectRoot

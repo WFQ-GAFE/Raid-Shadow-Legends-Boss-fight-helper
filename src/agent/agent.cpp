@@ -53,7 +53,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 3;
-constexpr std::uint64_t kAgentBuildId = 2026082207ULL;
+constexpr std::uint64_t kAgentBuildId = 2026082403ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -137,6 +137,7 @@ constexpr std::uint32_t kLifecyclePrepareFreeRegroup = 3;
 constexpr std::uint32_t kLifecycleRefreshTeamSelection = 4;
 constexpr std::uint32_t kLifecycleSelectHeroes = 5;
 constexpr std::uint32_t kLifecycleRestartHydraResult = 6;
+constexpr std::uint32_t kLifecycleRestartChimeraResult = 7;
 
 struct LifecycleCommandRequest {
     std::uint32_t magic{};
@@ -211,6 +212,10 @@ std::array<std::string, 7> g_chimera_catalog_by_difficulty{};
 std::string g_chimera_rotation_identity_json{};
 std::string g_chimera_rotation_fingerprint{};
 SRWLOCK g_chimera_catalog_lock = SRWLOCK_INIT;
+const MethodInfo* g_shared_model_utc_now_method{};
+const MethodInfo* g_chimera_settings_method{};
+const MethodInfo* g_chimera_prize_offset_method{};
+const MethodInfo* g_chimera_dynamic_data_method{};
 Il2CppClass* g_alliance_chimera_difficulty_class{};
 Il2CppClass* g_effect_kind_id_class{};
 Il2CppClass* g_chimera_form_class{};
@@ -456,6 +461,10 @@ const MethodInfo* g_execute_cancel_chimera_method{};
 const MethodInfo* g_cancel_chimera_method{};
 const MethodInfo* g_hydra_total_damage_method{};
 const MethodInfo* g_hydra_result_restart_pressed_method{};
+const MethodInfo* g_chimera_result_restart_pressed_method{};
+std::array<std::int32_t, 256> g_last_completed_challenge_ids{};
+std::size_t g_last_completed_challenge_count{};
+SRWLOCK g_completed_challenges_lock = SRWLOCK_INIT;
 
 struct ExecutedTurnToken {
     std::uint64_t mode{};
@@ -1105,7 +1114,8 @@ struct IntObjectDictionaryItems {
     bool valid{};
 };
 
-IntObjectDictionaryItems read_int_object_dictionary(void* dictionary) {
+IntObjectDictionaryItems read_int_object_dictionary(
+    void* dictionary, bool keep_latest = false) {
     IntObjectDictionaryItems snapshot{};
     Il2CppClass* dictionary_class = nullptr;
     if (!safe_read(dictionary, 0, dictionary_class) || !dictionary_class) {
@@ -1164,8 +1174,7 @@ IntObjectDictionaryItems read_int_object_dictionary(void* dictionary) {
     const std::size_t used = (std::min)(
         static_cast<std::size_t>(reported_count), array_length);
     auto* vector = static_cast<unsigned char*>(entries) + 32;
-    for (std::size_t index = 0;
-         index < used && snapshot.count < snapshot.keys.size(); ++index) {
+    for (std::size_t index = 0; index < used; ++index) {
         void* entry = vector + index * static_cast<std::size_t>(entry_size);
         std::int32_t hash_code = 0;
         std::int32_t key = 0;
@@ -1176,9 +1185,21 @@ IntObjectDictionaryItems read_int_object_dictionary(void* dictionary) {
             !safe_read(entry, value_offset, value) || !value) {
             continue;
         }
-        snapshot.keys[snapshot.count] = key;
-        snapshot.objects[snapshot.count] = value;
-        ++snapshot.count;
+        if (snapshot.count < snapshot.keys.size()) {
+            snapshot.keys[snapshot.count] = key;
+            snapshot.objects[snapshot.count] = value;
+            ++snapshot.count;
+        } else if (keep_latest) {
+            for (std::size_t retained = 1;
+                 retained < snapshot.keys.size(); ++retained) {
+                snapshot.keys[retained - 1] = snapshot.keys[retained];
+                snapshot.objects[retained - 1] = snapshot.objects[retained];
+            }
+            snapshot.keys.back() = key;
+            snapshot.objects.back() = value;
+        } else {
+            break;
+        }
     }
     snapshot.valid = true;
     return snapshot;
@@ -1644,10 +1665,61 @@ void append_int_list(std::ostringstream& output, const IntListItems& values) {
     output << ']';
 }
 
+bool try_get_current_chimera_prize_offset(std::int32_t& prize_offset) {
+    prize_offset = 0;
+    if (g_shared_model_utc_now_method && g_chimera_settings_method &&
+        g_chimera_prize_offset_method) {
+        void* now_boxed = nullptr;
+        void* settings = nullptr;
+        if (safe_runtime_invoke_object(g_shared_model_utc_now_method, nullptr,
+                                       &now_boxed) &&
+            safe_runtime_invoke_object(g_chimera_settings_method, nullptr,
+                                       &settings) &&
+            now_boxed && settings) {
+            __try {
+                void* now = g_api.object_unbox(now_boxed);
+                void* parameters[2] = {now, settings};
+                void* exception = nullptr;
+                void* boxed_offset = now
+                    ? g_api.runtime_invoke(g_chimera_prize_offset_method,
+                                           nullptr, parameters, &exception)
+                    : nullptr;
+                void* unboxed_offset = boxed_offset && !exception
+                    ? g_api.object_unbox(boxed_offset)
+                    : nullptr;
+                if (unboxed_offset) {
+                    const std::int32_t candidate =
+                        *reinterpret_cast<std::int32_t*>(unboxed_offset);
+                    if (candidate >= 0 && candidate < 4096) {
+                        prize_offset = candidate;
+                        return true;
+                    }
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
+
+    // The server-owned ChimeraData exposes the current prize offset directly.
+    // It is an adequate startup fallback if the time-aware game helper is not
+    // available yet (for example while services are still initializing).
+    void* dynamic_data = nullptr;
+    std::int32_t candidate = 0;
+    if (safe_runtime_invoke_object(g_chimera_dynamic_data_method, nullptr,
+                                   &dynamic_data) &&
+        safe_read_field(dynamic_data, "PrizeOffset", nullptr, candidate) &&
+        candidate >= 0 && candidate < 4096) {
+        prize_offset = candidate;
+        return true;
+    }
+    return false;
+}
+
 void* find_chimera_challenge_reward(void* chimera_type,
                                     std::int32_t form,
                                     std::int32_t part,
-                                    std::int32_t difficulty) {
+                                    std::int32_t difficulty,
+                                    std::int32_t prize_offset) {
     void* reward_groups_list = nullptr;
     if (!safe_read_field(chimera_type, "ChimeraChallengeRewards", nullptr,
                          reward_groups_list) ||
@@ -1656,26 +1728,43 @@ void* find_chimera_challenge_reward(void* chimera_type,
     }
     const ObjectListItems reward_groups =
         read_object_list(reward_groups_list);
+    std::size_t first_match = reward_groups.count;
     for (std::size_t index = 0; index < reward_groups.count; ++index) {
         void* group = reward_groups.objects[index];
         std::int32_t group_form = -1;
         std::int32_t group_part = -1;
-        void* rewards_by_difficulty = nullptr;
         if (!safe_read_field(group, "Form", nullptr, group_form) ||
             !safe_read_field(group, "Part", nullptr, group_part) ||
-            group_form != form || group_part != part ||
-            !safe_read_field(group, "RewardsByChallengeDifficulty", nullptr,
-                             rewards_by_difficulty) ||
-            !rewards_by_difficulty) {
+            group_form != form || group_part != part) {
             continue;
         }
-        const IntObjectDictionaryItems rewards =
-            read_int_object_dictionary(rewards_by_difficulty);
-        for (std::size_t reward_index = 0;
-             reward_index < rewards.count; ++reward_index) {
-            if (rewards.keys[reward_index] == difficulty) {
-                return rewards.objects[reward_index];
-            }
+        first_match = index;
+        break;
+    }
+    if (first_match >= reward_groups.count || reward_groups.count == 0) {
+        return nullptr;
+    }
+    const std::int64_t count =
+        static_cast<std::int64_t>(reward_groups.count);
+    std::int64_t normalized_offset = prize_offset % count;
+    if (normalized_offset < 0) {
+        normalized_offset += count;
+    }
+    const std::size_t selected_index = static_cast<std::size_t>(
+        (static_cast<std::int64_t>(first_match) + normalized_offset) % count);
+    void* selected_group = reward_groups.objects[selected_index];
+    void* rewards_by_difficulty = nullptr;
+    if (!safe_read_field(selected_group, "RewardsByChallengeDifficulty",
+                         nullptr, rewards_by_difficulty) ||
+        !rewards_by_difficulty) {
+        return nullptr;
+    }
+    const IntObjectDictionaryItems rewards =
+        read_int_object_dictionary(rewards_by_difficulty);
+    for (std::size_t reward_index = 0; reward_index < rewards.count;
+         ++reward_index) {
+        if (rewards.keys[reward_index] == difficulty) {
+            return rewards.objects[reward_index];
         }
     }
     return nullptr;
@@ -1775,7 +1864,8 @@ void append_flexible_reward_signature(std::ostringstream& output,
 void append_static_chimera_signatures(
     std::ostringstream& trial_definitions,
     std::ostringstream& reward_rotation,
-    std::ostringstream& attribute_rotation) {
+    std::ostringstream& attribute_rotation,
+    std::int32_t prize_offset) {
     void* alliance_data = static_data_section("AllianceData");
     void* chimera_types_list = nullptr;
     if (!alliance_data ||
@@ -1845,7 +1935,8 @@ void append_static_chimera_signatures(
             append_flexible_reward_signature(
                 reward_rotation,
                 find_chimera_challenge_reward(
-                    chimera_type, form, part, challenge_difficulty));
+                    chimera_type, form, part, challenge_difficulty,
+                    prize_offset));
         }
     }
 }
@@ -1859,6 +1950,7 @@ void append_static_chimera_catalog(
     Il2CppClass* status_effect_type_id_class,
     Il2CppClass* flexible_reward_type_class,
     Il2CppClass* resource_type_id_class,
+    std::int32_t prize_offset,
     std::int32_t selected_alliance_difficulty = INT_MIN) {
     void* alliance_data = static_data_section("AllianceData");
     void* chimera_types_list = nullptr;
@@ -1964,7 +2056,8 @@ void append_static_chimera_catalog(
             append_flexible_reward(
                 output,
                 find_chimera_challenge_reward(
-                    chimera_type, form, part, challenge_difficulty),
+                    chimera_type, form, part, challenge_difficulty,
+                    prize_offset),
                 flexible_reward_type_class, resource_type_id_class);
             output << '}';
         }
@@ -1973,7 +2066,8 @@ void append_static_chimera_catalog(
     output << "]}";
 }
 
-std::string chimera_rotation_metadata_json() {
+std::string chimera_rotation_metadata_json(std::int32_t prize_offset,
+                                           bool prize_offset_available) {
     void* alliance_data = static_data_section("AllianceData");
     void* sequence_dictionary = nullptr;
     std::int32_t turns_between_forms = 0;
@@ -1994,7 +2088,10 @@ std::string chimera_rotation_metadata_json() {
         }
     }
     std::ostringstream output;
-    output << "{\"turnsBetweenForms\":" << turns_between_forms
+    output << "{\"prizeOffset\":" << prize_offset
+           << ",\"prizeOffsetAvailable\":"
+           << (prize_offset_available ? "true" : "false")
+           << ",\"turnsBetweenForms\":" << turns_between_forms
            << ",\"formSequence\":[";
     for (std::size_t index = 0; index < sequence.count; ++index) {
         if (index) {
@@ -2028,23 +2125,27 @@ std::string fingerprint_text(std::uint64_t fingerprint) {
 }
 
 bool refresh_chimera_rotation_catalog(bool force) {
+    std::int32_t prize_offset = 0;
+    const bool prize_offset_available =
+        try_get_current_chimera_prize_offset(prize_offset);
     std::ostringstream full_catalog;
     append_static_chimera_catalog(
         full_catalog, g_alliance_chimera_difficulty_class,
         g_chimera_form_class, g_chimera_challenge_part_class,
         g_chimera_challenge_difficulty_class,
         g_status_effect_type_id_class, g_flexible_reward_type_class,
-        g_resource_type_id_class);
+        g_resource_type_id_class, prize_offset);
     const std::string catalog_json = full_catalog.str();
     const std::string status_effects_json =
         enum_catalog_json(g_status_effect_type_id_class);
-    const std::string metadata_json = chimera_rotation_metadata_json();
+    const std::string metadata_json = chimera_rotation_metadata_json(
+        prize_offset, prize_offset_available);
     std::ostringstream trial_definition_signature;
     std::ostringstream reward_rotation_signature;
     std::ostringstream attribute_rotation_signature;
     append_static_chimera_signatures(
         trial_definition_signature, reward_rotation_signature,
-        attribute_rotation_signature);
+        attribute_rotation_signature, prize_offset);
     const std::string trial_definition_fingerprint = fingerprint_text(
         fnv1a64(trial_definition_signature.str()));
     const std::string reward_rotation_fingerprint = fingerprint_text(
@@ -2072,7 +2173,7 @@ bool refresh_chimera_rotation_catalog(bool force) {
             g_chimera_form_class, g_chimera_challenge_part_class,
             g_chimera_challenge_difficulty_class,
             g_status_effect_type_id_class, g_flexible_reward_type_class,
-            g_resource_type_id_class, difficulty);
+            g_resource_type_id_class, prize_offset, difficulty);
         by_difficulty[difficulty] = selected.str();
     }
 
@@ -2108,7 +2209,9 @@ bool refresh_chimera_rotation_catalog(bool force) {
     }
     diagnostic("chimera_rotation_catalog_published fingerprint=" +
                fingerprint + " bytes=" +
-               std::to_string(payload.str().size()));
+               std::to_string(payload.str().size()) + " prize_offset=" +
+               std::to_string(prize_offset) + " offset_available=" +
+               (prize_offset_available ? "1" : "0"));
     return true;
 }
 
@@ -2510,10 +2613,14 @@ bool raw_format_runtime_exception(void* exception, char* message,
     }
 }
 
-bool safe_runtime_invoke_void(const MethodInfo* method, void* instance) {
+bool safe_runtime_invoke_void(const MethodInfo* method, void* instance,
+                              std::string* failure_reason = nullptr) {
     void* exception = nullptr;
     if (!raw_runtime_invoke_void(method, instance, &exception)) {
         diagnostic("runtime_invoke_void_native_exception");
+        if (failure_reason) {
+            *failure_reason = "native_exception";
+        }
         return false;
     }
     if (!exception) {
@@ -2527,6 +2634,12 @@ bool safe_runtime_invoke_void(const MethodInfo* method, void* instance) {
     diagnostic(std::string("runtime_invoke_void_managed_exception message=\"") +
                json_escape(message.data()) + "\" stack=\"" +
                json_escape(stack.data()) + "\"");
+    if (failure_reason) {
+        *failure_reason = message.data();
+        if (failure_reason->size() > 512) {
+            failure_reason->resize(512);
+        }
+    }
     return false;
 }
 
@@ -3535,6 +3648,39 @@ void drain_pending_lifecycle_command() {
                               "hydra_result_restart_submitted");
         return;
     }
+    if (request.action == kLifecycleRestartChimeraResult) {
+        void* context = g_result_context.load(std::memory_order_acquire);
+        if (!context || context != reinterpret_cast<void*>(request.context) ||
+            g_screen_state.load(std::memory_order_acquire) != kScreenResult ||
+            g_takeover_boss_mode.load(std::memory_order_acquire) !=
+                kTakeoverBossModeChimera ||
+            !object_has_class_name(
+                context, "BattleFinishAllianceChimeraDialogContext") ||
+            !g_chimera_result_restart_pressed_method) {
+            publish_lifecycle_ack(request, "rejected",
+                                  "chimera_result_context_changed");
+            return;
+        }
+        diagnostic("lifecycle_chimera_result_regroup_pressed nonce=" +
+                   std::to_string(request.nonce));
+        g_internal_action_depth.fetch_add(1, std::memory_order_acq_rel);
+        std::string invoke_error;
+        const bool invoked = safe_runtime_invoke_void(
+            g_chimera_result_restart_pressed_method, context,
+            &invoke_error);
+        g_internal_action_depth.fetch_sub(1, std::memory_order_acq_rel);
+        if (!invoked) {
+            std::string reason = "chimera_result_restart_exception";
+            if (!invoke_error.empty()) {
+                reason += ":" + invoke_error;
+            }
+            publish_lifecycle_ack(request, "exception", reason.c_str());
+            return;
+        }
+        publish_lifecycle_ack(request, "submitted",
+                              "chimera_result_restart_submitted");
+        return;
+    }
     if (request.action == kLifecycleFreeRegroup ||
         request.action == kLifecyclePrepareFreeRegroup) {
         void* context = g_battle_context.load(std::memory_order_acquire);
@@ -4374,6 +4520,8 @@ void append_model_effects(std::ostringstream& output, void* hero) {
         std::int32_t apply_turn = 0;
         std::int32_t lifetime = 0;
         std::int32_t turns_left = 0;
+        std::int32_t devoured_hero_id = -1;
+        bool has_digestion_info = false;
         safe_read_field(effect, "Id", nullptr, id);
         safe_read_field(effect, "ProducerId", nullptr, producer_id);
         safe_read_field(effect, "SkillTypeId", nullptr, skill_type_id);
@@ -4381,6 +4529,13 @@ void append_model_effects(std::ostringstream& output, void* hero) {
         safe_read_field(effect, "ApplyTurn", nullptr, apply_turn);
         safe_read_field(effect, "Lifetime", nullptr, lifetime);
         safe_read_field(effect, "TurnLeft", nullptr, turns_left);
+        void* digestion_info = nullptr;
+        if (safe_read_field(effect, "DigestionInfo", nullptr,
+                            digestion_info) && digestion_info) {
+            has_digestion_info = safe_read_field(
+                digestion_info, "DevouredHeroId", nullptr,
+                devoured_hero_id);
+        }
         void* effect_type = nullptr;
         if (safe_read_field(effect, "_type", nullptr, effect_type) &&
             effect_type) {
@@ -4399,9 +4554,54 @@ void append_model_effects(std::ostringstream& output, void* hero) {
                << ",\"effectGroupId\":" << effect_group_id
                << ",\"applyTurn\":" << apply_turn
                << ",\"lifetime\":" << lifetime
-               << ",\"turnsLeft\":" << turns_left << '}';
+               << ",\"turnsLeft\":" << turns_left;
+        if (has_digestion_info) {
+            output << ",\"devouredHeroId\":" << devoured_hero_id;
+        }
+        output << '}';
     }
     output << ']';
+}
+
+bool read_hydra_digestion_state(void* hero,
+                                std::int32_t* devoured_hero_id,
+                                std::int32_t* digestion_turns) {
+    if (!hero || !devoured_hero_id || !digestion_turns) {
+        return false;
+    }
+    void* hero_state = nullptr;
+    void* effects_list = nullptr;
+    if (!safe_read_field(hero, "_heroState", nullptr, hero_state) ||
+        !hero_state ||
+        !safe_read_field(hero_state, "AppliedEffects", nullptr,
+                         effects_list) ||
+        !effects_list) {
+        return false;
+    }
+    const ObjectListItems effects = read_object_list(effects_list);
+    for (std::size_t index = 0; index < effects.count; ++index) {
+        void* effect = effects.objects[index];
+        void* digestion_info = nullptr;
+        if (!safe_read_field(effect, "DigestionInfo", nullptr,
+                             digestion_info) ||
+            !digestion_info) {
+            continue;
+        }
+        std::int32_t hero_id = -1;
+        if (!safe_read_field(digestion_info, "DevouredHeroId", nullptr,
+                             hero_id) ||
+            hero_id < 0) {
+            continue;
+        }
+        std::int32_t turns = -1;
+        if (!safe_read_field(effect, "TurnLeft", nullptr, turns)) {
+            safe_read_field(effect, "Lifetime", nullptr, turns);
+        }
+        *devoured_hero_id = hero_id;
+        *digestion_turns = turns;
+        return true;
+    }
+    return false;
 }
 
 std::int32_t first_model_challenge_id(void* hero) {
@@ -4506,6 +4706,29 @@ void append_model_challenges(std::ostringstream& output, void* hero) {
         snapshot.challenge = challenges.objects[index];
         snapshot.identity = alliance_chimera_trial_identity(snapshot.id);
         read_model_challenge_snapshot(snapshot);
+    }
+
+    const bool has_chimera_trials = std::any_of(
+        snapshots.begin(), snapshots.begin() + snapshot_count,
+        [](const ModelChallengeSnapshot& snapshot) {
+            return snapshot.identity.form_id > 0 &&
+                snapshot.identity.part_id > 0 &&
+                snapshot.identity.challenge_difficulty_id > 0;
+        });
+    if (has_chimera_trials) {
+        AcquireSRWLockExclusive(&g_completed_challenges_lock);
+        g_last_completed_challenge_count = 0;
+        for (std::size_t index = 0; index < snapshot_count; ++index) {
+            const ModelChallengeSnapshot& snapshot = snapshots[index];
+            if (!snapshot.completed || snapshot.id <= 0 ||
+                g_last_completed_challenge_count >=
+                    g_last_completed_challenge_ids.size()) {
+                continue;
+            }
+            g_last_completed_challenge_ids[
+                g_last_completed_challenge_count++] = snapshot.id;
+        }
+        ReleaseSRWLockExclusive(&g_completed_challenges_lock);
     }
 
     output << '[';
@@ -4674,12 +4897,10 @@ void append_model_challenges(std::ostringstream& output, void* hero) {
 
 void append_actor_state(std::ostringstream& output, void* mode,
                         const IntObjectDictionaryItems& actors,
-                        const char* side) {
+                        const char* side, bool living_only = false) {
     output << '[';
+    bool first_actor = true;
     for (std::size_t index = 0; index < actors.count; ++index) {
-        if (index) {
-            output << ',';
-        }
         const std::int32_t actor_id = actors.keys[index];
         std::int32_t type_id = actor_hero_type_id(actors.objects[index]);
         void* hero = find_battle_hero(mode, actor_id);
@@ -4701,6 +4922,7 @@ void append_actor_state(std::ostringstream& output, void* mode,
         bool rages = false;
         bool is_hydra_head = false;
         bool is_hydra_neck = false;
+        bool is_digesting_now = false;
         std::int32_t devoured_hero_id = -1;
         std::int32_t digestion_turns = -1;
         std::int32_t battle_position = 0;
@@ -4727,11 +4949,12 @@ void append_actor_state(std::ostringstream& output, void* mode,
                 runtime_get_bool(g_api.class_get_method_from_name(
                                      hero_class, "get_IsHydraNeck", 0),
                                  hero, &is_hydra_neck);
+                runtime_get_bool(g_api.class_get_method_from_name(
+                                     hero_class, "get_IsDigestingNow", 0),
+                                 hero, &is_digesting_now);
             }
             safe_read_field(hero, "IsHydraHead", nullptr, is_hydra_head);
             safe_read_field(hero, "IsHydraNeck", nullptr, is_hydra_neck);
-            safe_read_field(hero, "DevouredHeroId", nullptr,
-                            devoured_hero_id);
             if (!safe_read_field(hero, "BattlePosition", nullptr,
                                  battle_position)) {
                 if (!safe_read_field(hero, "TeamPosition", nullptr,
@@ -4740,18 +4963,8 @@ void append_actor_state(std::ostringstream& output, void* mode,
                                     battle_position);
                 }
             }
-            void* digestion_info = nullptr;
-            if (safe_read_field(hero, "DigestionInfo", nullptr,
-                                digestion_info) && digestion_info) {
-                if (!safe_read_field(digestion_info, "TurnsLeft", nullptr,
-                                     digestion_turns)) {
-                    if (!safe_read_field(digestion_info, "RemainingTurns",
-                                         nullptr, digestion_turns)) {
-                        safe_read_field(digestion_info, "TurnCount", nullptr,
-                                        digestion_turns);
-                    }
-                }
-            }
+            read_hydra_digestion_state(hero, &devoured_hero_id,
+                                       &digestion_turns);
             if (safe_read_field(hero, "_heroState", nullptr, hero_state) &&
                 hero_state) {
                 safe_read_field(hero_state, "IsDead", nullptr, dead);
@@ -4776,6 +4989,13 @@ void append_actor_state(std::ostringstream& output, void* mode,
                 }
             }
         }
+        if (living_only && dead) {
+            continue;
+        }
+        if (!first_actor) {
+            output << ',';
+        }
+        first_actor = false;
         const ResolvedText name = resolve_static_hero_name(type_id);
         const std::string avatar =
             resolve_static_hero_avatar(type_id, current_form_index);
@@ -4808,7 +5028,9 @@ void append_actor_state(std::ostringstream& output, void* mode,
                << "\""
                << ",\"devouredHeroId\":" << devoured_hero_id
                << ",\"isDevouring\":"
-               << (devoured_hero_id >= 0 ? "true" : "false")
+               << ((is_digesting_now || devoured_hero_id >= 0)
+                       ? "true"
+                       : "false")
                << ",\"digestionTurns\":" << digestion_turns
                << ",\"battlePosition\":" << battle_position
                << ",\"states\":{\"stunned\":"
@@ -4968,7 +5190,7 @@ ChimeraBattleMetrics read_hydra_battle_metrics(void* mode) {
         return metrics;
     }
     const IntObjectDictionaryItems bosses =
-        read_int_object_dictionary(bosses_dictionary);
+        read_int_object_dictionary(bosses_dictionary, true);
     if (!bosses.valid) {
         return metrics;
     }
@@ -5140,7 +5362,7 @@ void capture_battle_state(void* mode, void* skill_data,
     const IntObjectDictionaryItems actors =
         read_int_object_dictionary(actors_dictionary);
     const IntObjectDictionaryItems bosses =
-        read_int_object_dictionary(bosses_dictionary);
+        read_int_object_dictionary(bosses_dictionary, true);
 
     std::int32_t skill_id = -1;
     std::int32_t level = 0;
@@ -5284,7 +5506,8 @@ void capture_battle_state(void* mode, void* skill_data,
     output << "},\"heroes\":";
     append_actor_state(output, mode, actors, "ally");
     output << ",\"bosses\":";
-    append_actor_state(output, mode, bosses, "enemy");
+    append_actor_state(output, mode, bosses, "enemy",
+                       runtime.hydra_battle);
     output << ",\"chimera\":{\"id\":" << runtime.chimera_id
            << ",\"typeId\":" << runtime.chimera_type_id
            << ",\"currentFormIndex\":" << runtime.chimera_form_index
@@ -5397,7 +5620,7 @@ void capture_decision_state(void* generator) {
     const IntObjectDictionaryItems actors =
         read_int_object_dictionary(actors_dictionary);
     const IntObjectDictionaryItems bosses =
-        read_int_object_dictionary(bosses_dictionary);
+        read_int_object_dictionary(bosses_dictionary, true);
     const AllianceBossIdentity boss_identity = identify_alliance_boss(
         runtime.active_hero_valid, runtime.active_hero_type_id,
         runtime.chimera_preset, runtime.reported_hydra_battle,
@@ -5571,7 +5794,8 @@ void capture_decision_state(void* generator) {
     output << ",\"heroes\":";
     append_actor_state(output, mode, actors, "ally");
     output << ",\"bosses\":";
-    append_actor_state(output, mode, bosses, "enemy");
+    append_actor_state(output, mode, bosses, "enemy",
+                       runtime.hydra_battle);
     output << ",\"chimera\":{\"id\":" << runtime.chimera_id
            << ",\"typeId\":" << runtime.chimera_type_id
            << ",\"currentFormIndex\":" << runtime.chimera_form_index
@@ -5836,6 +6060,15 @@ void capture_result_state(void* self, std::int64_t returned_damage) {
         runtime_get_int(g_result_completed_challenges_method, self,
                         &completed);
     }
+    std::array<std::int32_t, 256> completed_ids{};
+    std::size_t completed_id_count = 0;
+    if (is_chimera) {
+        AcquireSRWLockShared(&g_completed_challenges_lock);
+        completed_id_count = g_last_completed_challenge_count;
+        std::copy_n(g_last_completed_challenge_ids.begin(),
+                    completed_id_count, completed_ids.begin());
+        ReleaseSRWLockShared(&g_completed_challenges_lock);
+    }
     g_result_context.store(self, std::memory_order_release);
     g_selection_context.store(nullptr, std::memory_order_release);
     g_screen_state.store(kScreenResult, std::memory_order_release);
@@ -5848,6 +6081,14 @@ void capture_result_state(void* self, std::int64_t returned_damage) {
                << ",\"screen\":\"result\",\"damage\":" << damage
                << ",\"competitionPoints\":" << points
                << ",\"completedChallengeCount\":" << completed
+               << ",\"completedChallengeIds\":[";
+        for (std::size_t index = 0; index < completed_id_count; ++index) {
+            if (index) {
+                output << ',';
+            }
+            output << completed_ids[index];
+        }
+        output << ']'
                << ",\"disposition\":\"awaiting_user\""
                << ",\"resultSaved\":false,\"automaticRestart\":false"
                << ",\"observedAtTick\":" << GetTickCount64() << '}';
@@ -5992,6 +6233,9 @@ void __fastcall hook_hydra_damage_counter_change(
 
 void __fastcall hook_on_enabled(void* self, const MethodInfo* method) {
     g_original_on_enabled(self, method);
+    AcquireSRWLockExclusive(&g_completed_challenges_lock);
+    g_last_completed_challenge_count = 0;
+    ReleaseSRWLockExclusive(&g_completed_challenges_lock);
     if (g_game_window) {
         KillTimer(g_game_window, kSelectionCaptureTimerId);
     }
@@ -7400,6 +7644,14 @@ DWORD WINAPI probe_thread(void*) {
         find_class_anywhere(api, "ChimeraChallengeFormContext");
     const ClassLocation chimera_challenge_extensions =
         find_class_anywhere(api, "ChimeraChallengeExtensions");
+    const ClassLocation chimera_extensions = find_class_in_namespace(
+        api, "SharedModel.Meta.Alliances.Chimera.Extensions",
+        "ChimeraExtensions");
+    const ClassLocation alliance_chimeras_wrapper = find_class_in_namespace(
+        api, "Client.Model.Gameplay.Alliance",
+        "AllianceChimerasWrapperReadOnly");
+    const ClassLocation shared_model_time = find_class_in_namespace(
+        api, "SharedModel.Common.Time", "SharedModelTime");
     const ClassLocation alliance_chimera_type =
         find_class_anywhere(api, "AllianceChimeraType");
     const ClassLocation flexible_reward =
@@ -7600,6 +7852,17 @@ DWORD WINAPI probe_thread(void*) {
         find_method_by_name(api, app_model.klass, "ReadUser");
     const MethodLocation user_read_guard_dispose_method =
         find_method_by_name(api, user_read_guard.klass, "Dispose");
+    g_shared_model_utc_now_method =
+        find_method_by_name(api, shared_model_time.klass, "get_UtcNow").method;
+    g_chimera_settings_method =
+        find_method_by_name(api, alliance_chimeras_wrapper.klass,
+                            "get_Settings").method;
+    g_chimera_dynamic_data_method =
+        find_method_by_name(api, alliance_chimeras_wrapper.klass,
+                            "get_DynamicData").method;
+    g_chimera_prize_offset_method =
+        find_method_by_name(api, chimera_extensions.klass,
+                            "GetPrizeOffset").method;
     g_app_model_instance_method = app_model_instance_method.method;
     void* app_model_instance = nullptr;
     void* static_data_instance = nullptr;
@@ -7726,8 +7989,10 @@ DWORD WINAPI probe_thread(void*) {
         api, battle_finish_alliance_chimera.klass, "OnEnabled");
     const MethodLocation battle_finish_save_result = find_method_by_name(
         api, battle_finish_alliance_chimera.klass, "OnSaveResultPressed");
-    const MethodLocation battle_finish_quick_restart = find_method_by_name(
-        api, battle_finish_alliance_chimera.klass, "QuickRestartBattle");
+    const MethodLocation battle_finish_restart_pressed =
+        find_method_by_name(
+            api, battle_finish_alliance_chimera.klass,
+            "OnRestartPressed");
     const MethodLocation battle_finish_total_damage = find_method_by_name(
         api, battle_finish_alliance_chimera.klass, "TotalDamageDealt");
     const MethodLocation hydra_finish_total_damage = find_method_by_name(
@@ -7769,6 +8034,10 @@ DWORD WINAPI probe_thread(void*) {
         find_hydra_total_damage_method(hydra_extensions.klass);
     g_hydra_result_restart_pressed_method =
         hydra_finish_restart_pressed.method;
+    g_chimera_result_restart_pressed_method =
+        battle_finish_restart_pressed.parameter_count == 0
+        ? battle_finish_restart_pressed.method
+        : nullptr;
     const bool hooks_installed =
         install_capture_hooks(on_enabled, on_disabled, request_command,
                               select_skill, select_target, mode_select_skill,
@@ -7814,6 +8083,8 @@ DWORD WINAPI probe_thread(void*) {
                 g_hydra_total_damage_method != nullptr);
     append_bool(output, "hydraResultRegroupButton",
                 g_hydra_result_restart_pressed_method != nullptr);
+    append_bool(output, "chimeraResultRegroupButton",
+                g_chimera_result_restart_pressed_method != nullptr);
     append_bool(output, "windowDispatcherInstalled", window_dispatch_installed);
     output << "\"resolvedClasses\":{";
     append_class_location(output, "BattleProcessor", battle_processor);
@@ -8003,8 +8274,9 @@ DWORD WINAPI probe_thread(void*) {
                            battle_finish_on_enabled);
     append_method_location(output, "BattleFinishAllianceChimera.OnSaveResultPressed",
                            battle_finish_save_result);
-    append_method_location(output, "BattleFinishAllianceChimera.QuickRestartBattle",
-                           battle_finish_quick_restart, false);
+    append_method_location(
+        output, "BattleFinishAllianceChimera.OnRestartPressed",
+        battle_finish_restart_pressed, false);
     output << ',';
     append_method_location(output, "BattleFinishAllianceHydra.OnRestartPressed",
                            hydra_finish_restart_pressed, false);
@@ -8224,12 +8496,14 @@ DWORD WINAPI probe_thread(void*) {
     const ResolvedText probe_hero_name = resolve_static_hero_name(4716);
     const ResolvedText probe_skill_name = resolve_static_skill_name(47102);
     const ResolvedText probe_boss_name = resolve_static_hero_name(26866);
+    std::int32_t probe_prize_offset = 0;
+    try_get_current_chimera_prize_offset(probe_prize_offset);
     output << ",\"staticChimeraCatalog\":";
     append_static_chimera_catalog(
         output, alliance_chimera_difficulty.klass, chimera_form.klass,
         chimera_challenge_part.klass, chimera_challenge_difficulty.klass,
         status_effect_type_id.klass, flexible_reward_type.klass,
-        resource_type_id.klass);
+        resource_type_id.klass, probe_prize_offset);
     output << ",\"heroCatalog\":";
     append_all_static_hero_catalog(output);
     output << ",\"staticNameTest\":{\"hero4716\":{\"key\":\""
@@ -8330,7 +8604,8 @@ RaidChimeraAgentQueueLifecycleCommand(LPVOID parameter) {
          request.action != kLifecyclePrepareFreeRegroup &&
          request.action != kLifecycleRefreshTeamSelection &&
          request.action != kLifecycleSelectHeroes &&
-         request.action != kLifecycleRestartHydraResult) ||
+         request.action != kLifecycleRestartHydraResult &&
+         request.action != kLifecycleRestartChimeraResult) ||
          !request.context ||
          !request.nonce) {
         return 2;
@@ -8512,6 +8787,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI RaidChimeraAgentShutdown(LPVOID) {
     g_enemy_boss_current_method = nullptr;
     g_execute_cancel_chimera_method = nullptr;
     g_cancel_chimera_method = nullptr;
+    g_chimera_result_restart_pressed_method = nullptr;
+    g_hydra_result_restart_pressed_method = nullptr;
     g_selection_hero_method = nullptr;
     g_get_area_type = nullptr;
     g_get_region_type = nullptr;

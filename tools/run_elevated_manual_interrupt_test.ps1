@@ -30,7 +30,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $worker = Join-Path $PSScriptRoot "test_manual_interrupt_bound_live.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $output = Join-Path $projectRoot "build\gafee-manual-interrupt-live.json"
 
 & $python $worker `

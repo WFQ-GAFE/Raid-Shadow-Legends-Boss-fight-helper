@@ -22,7 +22,7 @@ if (-not (Test-IsAdministrator)) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $test = Join-Path $PSScriptRoot "test_hero_form_guard_live.py"
-$agent = Join-Path $projectRoot "build\agent-1225\Release\RaidChimeraAgent.dll"
+$agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $log = Join-Path $projectRoot "build\hero-form-guard-live.log"
 Set-Location -LiteralPath $projectRoot
 & $python $test --account $Account --agent $agent 2>&1 | Tee-Object -FilePath $log

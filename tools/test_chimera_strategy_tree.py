@@ -12,8 +12,12 @@ from unittest.mock import patch
 from chimera_controller import (
     GamePaused,
     SkillCapabilityMemory,
+    annotate_chimera_form_first_turn,
     annotate_team_positions,
     archive_rotation_catalog_if_changed,
+    buff_count,
+    debuff_count,
+    effect_target_has_capacity,
     evaluate,
     evaluate_objectives,
     is_battle_decision_state,
@@ -25,6 +29,7 @@ from chimera_controller import (
     require_takeover_active,
     safety_reason,
     turns_until_form_change,
+    trial_recipe_for_id,
     validate_strategy_config,
     wait_for_turn_advance,
 )
@@ -347,10 +352,189 @@ def main() -> int:
     reordered_default_decision = evaluate(reserved_listed_after_default, positioned)
     assert reordered_default_decision is not None
     assert reordered_default_decision.skill["typeId"] == 88961
+    form_switch_a1_config = {
+        "rules": [
+            {
+                "name": "default-a1-while-waiting",
+                "when": {
+                    "activeHeroTypeId": [8896],
+                    "form": ["Ultimate"],
+                },
+                "action": {
+                    "type": "defaultSkillPriority",
+                    "prioritySkills": [
+                        {
+                            "skillTypeId": 88961,
+                            "skillSlot": 1,
+                            "target": {"type": "boss"},
+                        }
+                    ],
+                    "blockedSkillTypeIds": [],
+                },
+            },
+            {
+                "name": "a1-on-form-switch-boundary",
+                "when": {
+                    "activeHeroTypeId": [8896],
+                    "form": ["Ultimate"],
+                    "nextForm": "Snake",
+                    "turnsUntilFormChangeAtMost": 0,
+                },
+                "action": {
+                    "type": "cast",
+                    "skillTypeId": 88961,
+                    "skillSlot": 1,
+                    "target": {"type": "boss"},
+                },
+            },
+        ]
+    }
+    before_switch = copy.deepcopy(positioned)
+    before_switch["chimera"].update({"currentForm": "Ultimate", "turnCount": 21})
+    before_switch["skills"] = [copy.deepcopy(positioned["skills"][0])]
+    assert turns_until_form_change(before_switch) == 4
+    assert not matches(form_switch_a1_config["rules"][1]["when"], before_switch)
+    waiting_decision = evaluate(form_switch_a1_config, before_switch)
+    assert waiting_decision is not None
+    assert waiting_decision.rule == "default-a1-while-waiting"
+    switch_boundary = copy.deepcopy(before_switch)
+    switch_boundary["chimera"]["turnCount"] = 25
+    assert turns_until_form_change(switch_boundary) == 0
+    assert matches(form_switch_a1_config["rules"][1]["when"], switch_boundary)
+    boundary_decision = evaluate(form_switch_a1_config, switch_boundary)
+    assert boundary_decision is not None
+    assert boundary_decision.rule == "a1-on-form-switch-boundary"
     unreserved_default = {"rules": [copy.deepcopy(strict_and_default["rules"][1])]}
     unreserved_decision = evaluate(unreserved_default, positioned)
     assert unreserved_decision is not None
     assert unreserved_decision.skill["typeId"] == 88962
+    form_specific_default = copy.deepcopy(unreserved_default)
+    form_specific_default["rules"][0]["when"]["form"] = [
+        "Ultimate", "Ram", "Lion", "Snake"
+    ]
+    form_specific_action = form_specific_default["rules"][0]["action"]
+    form_specific_action["prioritySkills"] = [
+        {"skillTypeId": 88961, "skillSlot": 1, "target": {"type": "boss"}}
+    ]
+    # The editor mirrors Ultimate at the top level for compatibility. Other
+    # form policies must not inherit this opener when they omit it.
+    form_specific_action["firstTurnSkill"] = {
+        "skillTypeId": 88961,
+        "skillSlot": 1,
+        "target": {"type": "boss"},
+    }
+    form_specific_action["formPolicies"] = {
+        "Ultimate": {
+            "firstTurnSkill": {
+                "skillTypeId": 88961,
+                "skillSlot": 1,
+                "target": {"type": "boss"},
+            },
+            "prioritySkills": [
+                {"skillTypeId": 88961, "skillSlot": 1, "target": {"type": "boss"}}
+            ],
+            "blockedSkillTypeIds": [],
+        },
+        "Ram": {
+            "firstTurnSkill": {
+                "skillTypeId": 88962,
+                "skillSlot": 2,
+                "target": {"type": "self"},
+            },
+            "prioritySkills": [
+                {"skillTypeId": 88962, "skillSlot": 2, "target": {"type": "self"}},
+                {"skillTypeId": 88961, "skillSlot": 1, "target": {"type": "boss"}},
+            ],
+            "blockedSkillTypeIds": [],
+        },
+        "Lion": {
+            "prioritySkills": [
+                {"skillTypeId": 88961, "skillSlot": 1, "target": {"type": "boss"}}
+            ],
+            "blockedSkillTypeIds": [88962],
+        },
+        "Snake": {
+            "prioritySkills": [
+                {"skillTypeId": 88961, "skillSlot": 1, "target": {"type": "boss"}}
+            ],
+            "blockedSkillTypeIds": [],
+        },
+    }
+    validate_strategy_config({"mode": "execute", **form_specific_default})
+    ram_form_decision = evaluate(form_specific_default, positioned)
+    assert ram_form_decision is not None
+    assert ram_form_decision.skill["typeId"] == 88962
+    lion_positioned = copy.deepcopy(positioned)
+    lion_positioned["chimera"]["currentForm"] = "Lion"
+    lion_form_decision = evaluate(form_specific_default, lion_positioned)
+    assert lion_form_decision is not None
+    assert lion_form_decision.skill["typeId"] == 88961
+    ram_first_turn = copy.deepcopy(positioned)
+    ram_first_turn["activeHeroTurnCount"] = 8
+    ram_first_turn["_chimeraFormHeroFirstTurn"] = True
+    ram_first_turn["_chimeraFormPhase"] = "Ram"
+    ram_first_turn_decision = evaluate(form_specific_default, ram_first_turn)
+    assert ram_first_turn_decision is not None
+    assert ram_first_turn_decision.rule.endswith("首回合技能")
+    assert ram_first_turn_decision.skill["typeId"] == 88962
+    ultimate_first_turn = copy.deepcopy(ram_first_turn)
+    ultimate_first_turn["chimera"]["currentForm"] = "Ultimate"
+    ultimate_first_turn["_chimeraFormPhase"] = "Ultimate"
+    ultimate_first_turn_decision = evaluate(
+        form_specific_default, ultimate_first_turn
+    )
+    assert ultimate_first_turn_decision is not None
+    assert ultimate_first_turn_decision.rule.endswith("首回合技能")
+    assert ultimate_first_turn_decision.skill["typeId"] == 88961
+    lion_first_turn = copy.deepcopy(ram_first_turn)
+    lion_first_turn["chimera"]["currentForm"] = "Lion"
+    lion_first_turn["_chimeraFormPhase"] = "Lion"
+    lion_first_turn_decision = evaluate(form_specific_default, lion_first_turn)
+    assert lion_first_turn_decision is not None
+    assert not lion_first_turn_decision.rule.endswith("首回合技能")
+    assert lion_first_turn_decision.skill["typeId"] == 88961
+    ram_later_turn = copy.deepcopy(ram_first_turn)
+    ram_later_turn["_chimeraFormHeroFirstTurn"] = False
+    ram_later_turn_decision = evaluate(form_specific_default, ram_later_turn)
+    assert ram_later_turn_decision is not None
+    assert not ram_later_turn_decision.rule.endswith("首回合技能")
+
+    form_turn_runtime: dict[str, object] = {}
+    mid_ram = copy.deepcopy(positioned)
+    annotate_chimera_form_first_turn(mid_ram, form_turn_runtime)
+    assert mid_ram["_chimeraFormHeroFirstTurn"] is False
+    first_lion_action = copy.deepcopy(mid_ram)
+    first_lion_action["chimera"]["currentForm"] = "Lion"
+    first_lion_action["chimera"]["turnCount"] = 10
+    first_lion_action["battle"]["playerTurnCount"] = 4
+    first_lion_action["activeHeroTurnCount"] = 3
+    annotate_chimera_form_first_turn(first_lion_action, form_turn_runtime)
+    assert first_lion_action["_chimeraFormHeroFirstTurn"] is True
+    refreshed_lion_action = copy.deepcopy(first_lion_action)
+    refreshed_lion_action["activeHeroSkillsUpdateCounter"] = 12
+    annotate_chimera_form_first_turn(refreshed_lion_action, form_turn_runtime)
+    assert refreshed_lion_action["_chimeraFormHeroFirstTurn"] is True
+    lion_extra_turn = copy.deepcopy(first_lion_action)
+    lion_extra_turn["battle"]["playerTurnCount"] = 5
+    lion_extra_turn["activeHeroTurnCount"] = 4
+    annotate_chimera_form_first_turn(lion_extra_turn, form_turn_runtime)
+    assert lion_extra_turn["_chimeraFormHeroFirstTurn"] is False
+    another_hero_lion = copy.deepcopy(lion_extra_turn)
+    another_hero_lion["activeHeroId"] = 1
+    another_hero_lion["activeHeroTypeId"] = 12345
+    another_hero_lion["activeHeroTurnCount"] = 2
+    another_hero_lion["battle"]["playerTurnCount"] = 6
+    annotate_chimera_form_first_turn(another_hero_lion, form_turn_runtime)
+    assert another_hero_lion["_chimeraFormHeroFirstTurn"] is True
+    second_ram_phase = copy.deepcopy(another_hero_lion)
+    second_ram_phase["chimera"]["currentForm"] = "Ram"
+    second_ram_phase["chimera"]["turnCount"] = 15
+    second_ram_phase["activeHeroId"] = 0
+    second_ram_phase["activeHeroTypeId"] = 8896
+    second_ram_phase["activeHeroTurnCount"] = 5
+    second_ram_phase["battle"]["playerTurnCount"] = 7
+    annotate_chimera_form_first_turn(second_ram_phase, form_turn_runtime)
+    assert second_ram_phase["_chimeraFormHeroFirstTurn"] is True
     blocked_default = copy.deepcopy(unreserved_default)
     blocked_default["rules"][0]["action"]["blockedSkillTypeIds"] = [88962]
     blocked_decision = evaluate(blocked_default, positioned)
@@ -473,6 +657,66 @@ def main() -> int:
     assert matches({"eligibleTrialsAll": [8000502]}, chained_trial_state)
     assert matches({"lockedTrialsAny": [8000503]}, chained_trial_state)
     assert not matches({"eligibleTrialsAny": [8000503]}, chained_trial_state)
+    trial_gated_strict_config = {
+        "rules": [
+            {
+                "name": "strict-only-while-trial-active",
+                "when": {
+                    "activeHeroTypeId": [8896],
+                    "form": ["Ram"],
+                    "eligibleTrialsAny": [8000502],
+                },
+                "action": {
+                    "type": "cast",
+                    "skillTypeId": 88962,
+                    "skillSlot": 2,
+                    "target": {"type": "self"},
+                },
+            },
+            {
+                "name": "trial-gate-default",
+                "when": {"activeHeroTypeId": [8896], "form": ["Ram"]},
+                "action": {
+                    "type": "defaultSkillPriority",
+                    "prioritySkills": [
+                        {
+                            "skillTypeId": 88962,
+                            "skillSlot": 2,
+                            "target": {"type": "self"},
+                        },
+                        {
+                            "skillTypeId": 88961,
+                            "skillSlot": 1,
+                            "target": {"type": "boss"},
+                        },
+                    ],
+                    "blockedSkillTypeIds": [],
+                },
+            },
+        ]
+    }
+    validate_strategy_config({"mode": "execute", **trial_gated_strict_config})
+    active_trial_decision = evaluate(trial_gated_strict_config, chained_trial_state)
+    assert active_trial_decision is not None
+    assert active_trial_decision.rule == "strict-only-while-trial-active"
+    completed_trial_gate_state = copy.deepcopy(chained_trial_state)
+    completed_trial_gate_state["bosses"][0]["challenges"][1]["completed"] = True
+    completed_trial_decision = evaluate(
+        trial_gated_strict_config, completed_trial_gate_state
+    )
+    assert completed_trial_decision is not None
+    assert completed_trial_decision.rule == "trial-gate-default"
+    unselected_trial_gate_state = copy.deepcopy(chained_trial_state)
+    unselected_trial_gate_state["bosses"][0]["challenges"] = [
+        trial
+        for trial in unselected_trial_gate_state["bosses"][0]["challenges"]
+        if trial.get("id") != 8000502
+    ]
+    unselected_trial_decision = evaluate(
+        trial_gated_strict_config, unselected_trial_gate_state
+    )
+    assert unselected_trial_decision is not None
+    assert unselected_trial_decision.rule == "trial-gate-default"
 
     executable_state = json.loads(json.dumps(state))
     executable_state["battle"].update(
@@ -856,6 +1100,64 @@ def main() -> int:
     assert len(recipes) == 27
     assert recipes[8000501]["automation"] == "automatic"
     assert recipes[8000503]["automation"] == "manual"
+    nightmare_snake_wing = trial_recipe_for_id(recipes, 8000521)
+    ultimate_nightmare_snake_wing = trial_recipe_for_id(recipes, 8000621)
+    assert nightmare_snake_wing is not None
+    assert ultimate_nightmare_snake_wing is not None
+    assert nightmare_snake_wing["minimumBossDebuffs"] == 9
+    assert ultimate_nightmare_snake_wing["trialId"] == 8000621
+    assert ultimate_nightmare_snake_wing["allianceDifficultyId"] == 6
+    assert ultimate_nightmare_snake_wing["minimumBossDebuffs"] == 10
+    mixed_effect_target = {
+        "effects": [
+            *[
+                {
+                    "effectTypeId": 131,
+                    "effectKindId": 3101,
+                    "effectKind": "StatusReduceAttack",
+                }
+                for _ in range(8)
+            ],
+            {
+                "effectTypeId": 141,
+                "effectKindId": 2102,
+                "effectKind": "StatusIncreaseDefence",
+            },
+            {
+                "effectTypeId": 161,
+                "effectKindId": 2103,
+                "effectKind": "StatusIncreaseSpeed",
+            },
+        ]
+    }
+    assert debuff_count(mixed_effect_target) == 8
+    assert buff_count(mixed_effect_target) == 2
+    capacity_state = {
+        "heroes": [],
+        "bosses": [{"id": 5, **mixed_effect_target}],
+    }
+    assert effect_target_has_capacity(
+        {"scope": "boss", "effect": {"effectTypeId": 151}},
+        5,
+        capacity_state,
+        capability={"effectTypeId": 151, "effectKindId": 3102},
+    )
+    ten_buff_target = {
+        "effects": [
+            {
+                "effectTypeId": 141,
+                "effectKindId": 2102,
+                "effectKind": "StatusIncreaseDefence",
+            }
+            for _ in range(10)
+        ]
+    }
+    assert not effect_target_has_capacity(
+        {"scope": "activeHero", "effect": {"effectTypeId": 161}},
+        0,
+        {"heroes": [{"id": 0, **ten_buff_target}], "bosses": []},
+        capability={"effectTypeId": 161, "effectKindId": 2103},
+    )
     recipe_state = json.loads(json.dumps(state))
     recipe_state["bosses"][0]["challenges"] = [
         {
@@ -894,6 +1196,238 @@ def main() -> int:
     assert recipe_decision.skill["slot"] == 1
     assert recipe_decision.trial_id == 8000501
 
+    boss_buff_gate_state = copy.deepcopy(recipe_state)
+    boss_buff_gate_state["chimera"]["currentForm"] = "Snake"
+    boss_buff_gate_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000520,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "progressRatio": 0.0,
+        }
+    ]
+    boss_buff_gate_state["bosses"][0]["effects"] = [
+        {"effectTypeId": 110, "effectKindId": 3008, "turnsLeft": 2},
+        {"effectTypeId": 470, "effectKindId": 3014, "turnsLeft": 2},
+        {"effectTypeId": 141, "effectKindId": 2102, "turnsLeft": 2},
+    ]
+    boss_buff_gate_decision = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "boss-must-have-no-buffs",
+                    "when": {"eligibleTrialsAny": [8000520]},
+                    "action": {
+                        "type": "executeTrialRecipe",
+                        "trialIds": [8000520],
+                    },
+                }
+            ]
+        },
+        boss_buff_gate_state,
+    )
+    assert boss_buff_gate_decision is not None
+    assert boss_buff_gate_decision.trial_id is None
+    assert "当前无可执行试炼专用动作" in boss_buff_gate_decision.rule
+
+    support_damage_state = copy.deepcopy(recipe_state)
+    support_damage_state["chimera"]["currentForm"] = "Snake"
+    support_damage_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000525,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "progressRatio": 0.0,
+        }
+    ]
+    support_damage_state["bosses"][0]["effects"] = [
+        {
+            "effectTypeId": 131,
+            "effectKindId": 3101,
+            "effectKind": "StatusReduceAttack",
+            "turnsLeft": 2,
+        }
+    ]
+    support_damage_state["heroes"][0]["effects"] = [
+        {
+            "effectTypeId": 161,
+            "effectKindId": 2103,
+            "effectKind": "StatusIncreaseSpeed",
+            "turnsLeft": 2,
+        }
+    ]
+    support_damage_state["skills"][1]["validTargetIds"] = [5]
+    support_damage_memory = SkillCapabilityMemory()
+    support_damage_memory._performance = {
+        88961: {"samples": 20, "emaDamage": 50_000.0},
+        88962: {"samples": 20, "emaDamage": 2_000.0},
+    }
+    support_damage_memory._remember(
+        88962,
+        {
+            "targetScope": "ally",
+            "effectTypeId": 161,
+            "effectKind": "StatusIncreaseSpeed",
+        },
+    )
+    support_damage_memory._remember(
+        88962,
+        {
+            "targetScope": "boss",
+            "effectTypeId": 151,
+            "effectKind": "StatusReduceDefence",
+        },
+    )
+    support_damage_config = {
+        "rules": [
+            {
+                "name": "support-trial-overlay",
+                "when": {"form": ["Snake"], "activeHeroTypeId": [8896]},
+                "action": {
+                    "type": "executeTrialRecipe",
+                    "trialIds": [8000525],
+                },
+            },
+            {
+                "name": "support-current-form-default",
+                "when": {
+                    "form": ["Ultimate", "Ram", "Lion", "Snake"],
+                    "activeHeroTypeId": [8896],
+                },
+                "action": {
+                    "type": "defaultSkillPriority",
+                    "prioritySkills": [
+                        {
+                            "skillTypeId": 88961,
+                            "skillSlot": 1,
+                            "target": {"type": "boss"},
+                        }
+                    ],
+                    "blockedSkillTypeIds": [],
+                    "formPolicies": {
+                        "Snake": {
+                            "prioritySkills": [
+                                {
+                                    "skillTypeId": 88962,
+                                    "skillSlot": 2,
+                                    "target": {"type": "boss"},
+                                },
+                                {
+                                    "skillTypeId": 88961,
+                                    "skillSlot": 1,
+                                    "target": {"type": "boss"},
+                                },
+                            ],
+                            "blockedSkillTypeIds": [],
+                        }
+                    },
+                },
+            },
+        ]
+    }
+    support_damage_decision = evaluate(
+        support_damage_config,
+        support_damage_state,
+        support_damage_memory,
+    )
+    assert support_damage_decision is not None
+    assert support_damage_decision.skill["typeId"] == 88962
+
+    strict_after_trial = copy.deepcopy(support_damage_config)
+    strict_after_trial["rules"].append(
+        {
+            "name": "explicit-strict-after-trial",
+            "when": {
+                "form": ["Snake"],
+                "activeHeroTypeId": [8896],
+                "effectConditions": [
+                    {
+                        "target": "boss",
+                        "presence": "has",
+                        "effect": {"effectTypeId": 131},
+                    }
+                ],
+            },
+            "action": {
+                "type": "cast",
+                "skillTypeId": 88961,
+                "skillSlot": 1,
+                "target": {"type": "boss"},
+            },
+        }
+    )
+    strict_after_trial_decision = evaluate(
+        strict_after_trial,
+        support_damage_state,
+        support_damage_memory,
+    )
+    assert strict_after_trial_decision is not None
+    assert strict_after_trial_decision.rule == "explicit-strict-after-trial"
+
+    reserved_strict_skill_config = copy.deepcopy(support_damage_config)
+    reserved_strict_skill_config["rules"][1]["action"]["formPolicies"]["Snake"][
+        "prioritySkills"
+    ].insert(
+        0,
+        {
+            "skillTypeId": 88963,
+            "skillSlot": 3,
+            "target": {"type": "boss"},
+        },
+    )
+    reserved_strict_skill_config["rules"].append(
+        {
+            "name": "conditional-strict-reserved-s3",
+            "when": {
+                "form": ["Snake"],
+                "activeHeroTypeId": [8896],
+                "effectConditions": [
+                    {
+                        "target": "boss",
+                        "presence": "missing",
+                        "effect": {"effectTypeId": 100},
+                    }
+                ],
+            },
+            "action": {
+                "type": "cast",
+                "skillTypeId": 88963,
+                "skillSlot": 3,
+                "target": {"type": "boss"},
+            },
+        }
+    )
+    blocked_debuff_state = copy.deepcopy(support_damage_state)
+    blocked_debuff_state["skills"].append(
+        {
+            "slot": 3,
+            "skillId": 2,
+            "typeId": 88963,
+            "ready": True,
+            "blocked": False,
+            "passive": False,
+            "validTargetIds": [5],
+        }
+    )
+    blocked_debuff_state["bosses"][0]["effects"].append(
+        {
+            "effectTypeId": 100,
+            "effectKindId": 2002,
+            "effectKind": "BlockDebuff",
+            "turnsLeft": 2,
+        }
+    )
+    reserved_trial_decision = evaluate(
+        reserved_strict_skill_config,
+        blocked_debuff_state,
+        support_damage_memory,
+    )
+    assert reserved_trial_decision is not None
+    assert reserved_trial_decision.rule.startswith("support-trial-overlay")
+    assert reserved_trial_decision.skill["typeId"] == 88962
+
     no_trial_window = json.loads(json.dumps(recipe_state))
     no_trial_window["bosses"][0]["challenges"] = []
     no_trial_fallback = evaluate(
@@ -909,8 +1443,143 @@ def main() -> int:
         no_trial_window,
     )
     assert no_trial_fallback is not None
-    assert no_trial_fallback.skill["slot"] == 1
-    assert "无需专用动作" in no_trial_fallback.rule
+    assert no_trial_fallback.skill["slot"] == 2
+    assert "当前无可执行试炼专用动作" in no_trial_fallback.rule
+    assert "按常规技能优先级" in no_trial_fallback.rule
+
+    explicit_default = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "trial-overlay",
+                    "when": {"activeHeroTypeId": [8890, 8896]},
+                    "action": {"type": "executeTrialRecipe"},
+                },
+                {
+                    "name": "hero-default",
+                    "when": {"activeHeroTypeId": [8890, 8896]},
+                    "action": {
+                        "type": "defaultSkillPriority",
+                        "prioritySkills": [
+                            {
+                                "skillTypeId": 88961,
+                                "skillSlot": 1,
+                                "target": {"type": "boss"},
+                            }
+                        ],
+                    },
+                },
+            ]
+        },
+        no_trial_window,
+    )
+    assert explicit_default is not None
+    assert explicit_default.rule == "hero-default"
+    assert explicit_default.skill["typeId"] == 88961
+
+    lower_difficulty_state = json.loads(json.dumps(recipe_state))
+    lower_difficulty_state["bosses"][0]["challenges"][0]["id"] = 8000401
+    lower_difficulty_decision = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "difficulty-independent-recipe",
+                    "when": {"eligibleTrialsAny": [8000401]},
+                    "action": {
+                        "type": "executeTrialRecipe",
+                        "trialIds": [8000401],
+                    },
+                }
+            ]
+        },
+        lower_difficulty_state,
+    )
+    assert lower_difficulty_decision is not None
+    assert lower_difficulty_decision.trial_id == 8000401
+    assert "恐惧下技能伤害" in lower_difficulty_decision.rule
+
+    missing_provider_state = json.loads(json.dumps(recipe_state))
+    missing_provider_state["bosses"][0]["effects"] = []
+    missing_provider_decision = evaluate(
+        {
+            "rules": [
+                recipe_config["rules"][0],
+                {
+                    "name": "missing-provider-default",
+                    "when": {"activeHeroTypeId": [8890, 8896]},
+                    "action": {
+                        "type": "defaultSkillPriority",
+                        "prioritySkills": [
+                            {
+                                "skillTypeId": 88962,
+                                "skillSlot": 2,
+                                "target": {"type": "self"},
+                            }
+                        ],
+                    },
+                },
+            ]
+        },
+        missing_provider_state,
+        SkillCapabilityMemory(),
+    )
+    assert missing_provider_decision is not None
+    assert missing_provider_decision.rule == "missing-provider-default"
+    assert missing_provider_decision.skill["typeId"] == 88962
+
+    survival_state = json.loads(json.dumps(recipe_state))
+    survival_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000523,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "progressRatio": 0.0,
+        }
+    ]
+    for hero_id in range(2, 5):
+        survival_state["heroes"].append(
+            {
+                "id": hero_id,
+                "typeId": 12000 + hero_id,
+                "healthPct": 100,
+                "dead": False,
+                "effects": [],
+            }
+        )
+    survival_decision = evaluate(
+        {
+            "rules": [
+                {
+                    "name": "survival-trial-overlay",
+                    "when": {"eligibleTrialsAny": [8000523]},
+                    "action": {
+                        "type": "executeTrialRecipe",
+                        "trialIds": [8000523],
+                    },
+                },
+                {
+                    "name": "survival-hero-default",
+                    "when": {"activeHeroTypeId": [8890, 8896]},
+                    "action": {
+                        "type": "defaultSkillPriority",
+                        "prioritySkills": [
+                            {
+                                "skillTypeId": 88962,
+                                "skillSlot": 2,
+                                "target": {"type": "self"},
+                            }
+                        ],
+                    },
+                },
+            ]
+        },
+        survival_state,
+        SkillCapabilityMemory(),
+    )
+    assert survival_decision is not None
+    assert survival_decision.rule == "survival-hero-default"
+    assert survival_decision.skill["typeId"] == 88962
 
     measured_state = json.loads(json.dumps(recipe_state))
     measured_state["skills"].append(
@@ -993,6 +1662,77 @@ def main() -> int:
     assert fear_decision.skill["typeId"] == 47101
     assert "维持必要效果" in fear_decision.rule
 
+    objective_scoped_state = json.loads(json.dumps(missing_recipe_state))
+    objective_scoped_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000601,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "requiredPrerequisiteTrialIds": [],
+        },
+        {
+            "id": 8000607,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "requiredPrerequisiteTrialIds": [],
+        },
+        {
+            "id": 8000608,
+            "completed": False,
+            "eligibleNow": False,
+            "activeInChain": False,
+            "requiredPrerequisiteTrialIds": [8000607],
+        },
+        {
+            "id": 8000609,
+            "completed": False,
+            "eligibleNow": False,
+            "activeInChain": False,
+            "requiredPrerequisiteTrialIds": [8000607, 8000608],
+        },
+    ]
+    objective_scoped_config = {
+        "objectives": {"mandatoryTrialIds": [8000609]},
+        "rules": [
+            {
+                "name": "selected-trial-overlay",
+                "when": {"activeHeroTypeId": [8890, 8896]},
+                "action": {"type": "executeTrialRecipe"},
+            },
+            {
+                "name": "selected-trial-default",
+                "when": {"activeHeroTypeId": [8890, 8896]},
+                "action": {
+                    "type": "defaultSkillPriority",
+                    "prioritySkills": [
+                        {
+                            "skillTypeId": 88962,
+                            "skillSlot": 2,
+                            "target": {"type": "self"},
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    objective_scoped_decision = evaluate(
+        objective_scoped_config, objective_scoped_state, fear_memory
+    )
+    assert objective_scoped_decision is not None
+    assert objective_scoped_decision.rule == "selected-trial-default"
+    assert objective_scoped_decision.skill["typeId"] == 88962
+
+    explicitly_requested_config = json.loads(json.dumps(objective_scoped_config))
+    explicitly_requested_config["rules"][0]["action"]["trialIds"] = [8000601]
+    explicitly_requested_decision = evaluate(
+        explicitly_requested_config, objective_scoped_state, fear_memory
+    )
+    assert explicitly_requested_decision is not None
+    assert explicitly_requested_decision.skill["typeId"] == 47101
+    assert "恐惧下技能伤害" in explicitly_requested_decision.rule
+
     preparation_state = json.loads(json.dumps(recipe_state))
     preparation_state["chimera"].update(
         {"currentForm": "Ultimate", "turnCount": 3}
@@ -1007,7 +1747,7 @@ def main() -> int:
     preparation_config["rules"][0]["action"]["prepareWithinBossTurns"] = 3
     preparation_decision = evaluate(preparation_config, preparation_state)
     assert preparation_decision is not None
-    assert preparation_decision.skill["slot"] == 1
+    assert preparation_decision.skill["slot"] == 2
     assert "准备" in preparation_decision.rule
     protective_memory = SkillCapabilityMemory()
     learned_protection = json.loads(json.dumps(preparation_state))

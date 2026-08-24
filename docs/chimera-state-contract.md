@@ -14,7 +14,7 @@
 
 生命周期动作 `3` 先调用游戏原生 `CancelChimeraBattle()` 发起服务器退出验证；如果游戏没有直接返回队伍界面，只有验证响应已经写入且不再处于处理中，动作 `2` 才调用 `ExecuteCancelChimeraBattleCmd()` 完成免费重整。两步都要求接管会话、同一战斗界面实例和模型中的区域 13、战斗类型 8、奇美拉预设、Boss 类型及未结束状态同时有效。动作 `4` 只在游戏主线程刷新队伍快照，不开始战斗；控制器据此逐项核对动态取得的原五人 ID、区域和快速战斗状态，再由动作 `1` 关闭并复核自动战斗、创建不同的新战斗实例。正式策略默认以手动模式重试，默认最多 10 次；策略层只有在运行时对必要试炼给出明确的 `possible=false` 时才允许触发，未知状态不会被推断为不可能。
 
-结算界面发布 `battle_ledger`，当前包含伤害、竞赛积分、已完成试炼数和 `disposition=awaiting_user`。代理不调用 `OnSaveResultPressed`、`RestartBattle` 或 `QuickRestartBattle`。
+结算界面发布 `battle_ledger`，包含最终伤害、已完成试炼数、精确的 `completedChallengeIds` 和 `disposition=awaiting_user`。控制器将这些 ID 与战斗期间展开过前置链的必做试炼逐项比较：伤害与试炼全部达成时停留结算页且不保存结果；任一目标未达成且仍有重试额度时，动作 `7` 在同一接管会话和结算实例守卫下调用奇美拉原生重整按钮处理函数 `OnRestartPressed()`，与六头蛇使用相同的按钮语义。返回准备界面后，控制器等待队伍状态稳定，再复核队伍、关闭自动战斗并重新开战。代理始终不会调用快速战斗入口 `OnQuickRestartPressed()`、内部的 `QuickRestartBattle()` 或保存结果的 `OnSaveResultPressed()`。
 
 ## 每回合决策快照
 

@@ -30,11 +30,11 @@ AGENT = next(
         candidate
         for candidate in (
             RESOURCE_ROOT / "agent" / "RaidChimeraAgent.dll",
-            PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll",
+            PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll",
         )
         if candidate.is_file()
     ),
-    PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll",
+    PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll",
 )
 USER_STRATEGY = STRATEGY_STORE
 

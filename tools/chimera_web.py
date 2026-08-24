@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import locale
 import mimetypes
 import os
 import secrets
@@ -23,6 +24,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+
+
+def desktop_log(message: str) -> None:
+    """Write optional diagnostics without breaking a windowed executable."""
+    stream = sys.stdout
+    if stream is None:
+        return
+    try:
+        print(message, file=stream, flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 def enable_per_monitor_dpi_awareness() -> None:
@@ -59,11 +71,25 @@ def _runtime_project_root() -> Path:
     if configured:
         return Path(configured).resolve()
 
-    anchor = (
-        Path(sys.executable).resolve().parent
-        if getattr(sys, "frozen", False)
-        else Path(__file__).resolve().parent
-    )
+    if getattr(sys, "frozen", False):
+        # A one-file PyInstaller application is extracted into a temporary
+        # directory on every launch. User strategies and caches must never be
+        # stored there or beside an EXE that may live in a read-only folder.
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            root = Path(local_app_data) / "WFQ-GAFE" / "RaidBossStrategyStudio"
+        else:
+            root = (
+                Path.home()
+                / "AppData"
+                / "Local"
+                / "WFQ-GAFE"
+                / "RaidBossStrategyStudio"
+            )
+        root.mkdir(parents=True, exist_ok=True)
+        return root.resolve()
+
+    anchor = Path(__file__).resolve().parent
     for candidate in (anchor, *anchor.parents):
         if (
             (candidate / "tools" / "chimera_controller.py").is_file()
@@ -125,6 +151,7 @@ from chimera_runtime import (  # noqa: E402
 from chimera_icons import (  # noqa: E402
     cache_visual_asset,
     discover_game_hydra_heads,
+    ensure_icon_cache,
     game_hero_asset,
     game_reward_asset,
     game_skill_asset,
@@ -244,6 +271,24 @@ def utf8_subprocess_environment() -> dict[str, str]:
     return environment
 
 
+def decode_worker_output(value: bytes | str) -> str:
+    """Decode packaged worker output without destroying legacy CP936 bytes."""
+    if isinstance(value, str):
+        return value
+    encodings = ("utf-8-sig", locale.getpreferredencoding(False), "gb18030")
+    attempted: set[str] = set()
+    for encoding in encodings:
+        normalized = encoding.lower()
+        if normalized in attempted:
+            continue
+        attempted.add(normalized)
+        try:
+            return value.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return value.decode("utf-8", errors="replace")
+
+
 def process_display(item: dict[str, Any]) -> str:
     account = item.get("account")
     pid = int(item["pid"])
@@ -352,7 +397,7 @@ def controller_exit_label(code: int, stop_requested: bool) -> str:
 class ControllerManager:
     def __init__(self) -> None:
         self.lock = threading.RLock()
-        self.process: subprocess.Popen[str] | None = None
+        self.process: subprocess.Popen[Any] | None = None
         self.pid: int | None = None
         self.boss_mode = "chimera"
         self.status = "已停止"
@@ -419,16 +464,19 @@ class ControllerManager:
 
     def _run_injector(self, arguments: list[str], timeout: int) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
+        binary_result = subprocess.run(
             [*worker_command("injector"), "--pid", str(arguments[0]), "--agent", str(AGENT), *arguments[1:]],
             cwd=PROJECT_ROOT,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout,
             creationflags=creation_flags,
             env=utf8_subprocess_environment(),
+        )
+        result = subprocess.CompletedProcess(
+            binary_result.args,
+            binary_result.returncode,
+            decode_worker_output(binary_result.stdout),
+            decode_worker_output(binary_result.stderr),
         )
         payload = json.loads(result.stdout) if result.stdout.strip() else {}
         return result, payload if isinstance(payload, dict) else {}
@@ -515,10 +563,7 @@ class ControllerManager:
                 cwd=PROJECT_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
+                bufsize=0,
                 creationflags=creation_flags,
                 env=utf8_subprocess_environment(),
             )
@@ -529,7 +574,7 @@ class ControllerManager:
             self.append("控制器已启动。", boss_mode)
             assert process.stdout is not None
             for line in process.stdout:
-                self.append(line, boss_mode)
+                self.append(decode_worker_output(line), boss_mode)
             code = process.wait()
             with self.lock:
                 self.status = controller_exit_label(code, self.stop_requested)
@@ -595,6 +640,9 @@ class ControllerManager:
 class ChimeraService:
     def __init__(self) -> None:
         self.lock = threading.RLock()
+        self.visual_preload_lock = threading.RLock()
+        self.visual_preload_global_started = False
+        self.visual_preload_requested_heroes: set[int] = set()
         self.client_lock = threading.RLock()
         self.first_client = threading.Event()
         self.active_clients = 0
@@ -610,6 +658,7 @@ class ChimeraService:
         except OSError:
             self.hero_catalog_mtime_ns = 0
         self.ui_catalog = ensure_ui_catalog_cache()
+        self.status_effect_catalog: list[dict[str, Any]] = []
         self.effect_options = runtime_effect_options([])
         installed_hydra_heads = {
             type_id: kind
@@ -641,15 +690,71 @@ class ChimeraService:
         # Normal preparation updates preserve all slots, including empty ones,
         # so changing a single champion is visible before the team is full.
         self.live_team_cache: dict[tuple[int, str], list[int]] = {}
-        try:
-            self.visual_cache_status = preload_game_visuals(self.hero_catalog)
-            print(
-                f"[assets] cached {self.visual_cache_status['avatars']} hero portraits",
-                flush=True,
-            )
-        except Exception as error:
-            self.visual_cache_status = {"avatars": 0, "skills": 0, "heroes": 0, "rewards": 0}
-            print(f"[assets] portrait preload failed: {error}", flush=True)
+        self.visual_cache_status = {
+            "effects": 0,
+            "avatars": 0,
+            "skills": 0,
+            "heroes": 0,
+            "rewards": 0,
+        }
+        # Decoding every installed portrait can take over a minute on an empty
+        # cache. It is useful work, but it must not delay the first window.
+        self.start_visual_preload()
+
+    def start_visual_preload(self, hero_ids: Any = ()) -> None:
+        requested: set[int] = set()
+        for raw in hero_ids or ():
+            if not isinstance(raw, (int, str)) or isinstance(raw, bool):
+                continue
+            try:
+                value = int(raw)
+            except ValueError:
+                continue
+            if value > 0:
+                requested.add(value)
+        with self.visual_preload_lock:
+            if requested:
+                pending = requested - self.visual_preload_requested_heroes
+                if not pending:
+                    return
+                self.visual_preload_requested_heroes.update(pending)
+            else:
+                if self.visual_preload_global_started:
+                    return
+                self.visual_preload_global_started = True
+                pending = set()
+        catalog = dict(self.hero_catalog)
+
+        def worker() -> None:
+            try:
+                status = preload_game_visuals(catalog, sorted(pending))
+                with self.lock:
+                    self.visual_cache_status = status
+                    self.effect_options = runtime_effect_options(
+                        self.status_effect_catalog
+                    )
+                if pending:
+                    desktop_log(
+                        f"[assets] current team: {status['heroes']} heroes, "
+                        f"{status['skills']} skill icons ready"
+                    )
+                else:
+                    desktop_log(
+                        f"[assets] cached {status['effects']} effect icons and "
+                        f"{status['avatars']} hero portraits"
+                    )
+            except Exception as error:
+                desktop_log(f"[assets] visual preload failed: {error}")
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name=(
+                "raid-team-visual-preload"
+                if pending
+                else "raid-global-visual-preload"
+            ),
+        ).start()
 
     def reload_hero_catalog_if_changed(self) -> None:
         try:
@@ -932,22 +1037,19 @@ class ChimeraService:
                 item["account"] = identify_account(int(item["pid"]))
                 account = item.get("account")
                 if isinstance(account, dict):
-                    print(
+                    desktop_log(
                         f"[account] PID {item['pid']} -> "
-                        f"{account.get('accountName')} ({account.get('userId')})",
-                        flush=True,
+                        f"{account.get('accountName')} ({account.get('userId')})"
                     )
                 else:
-                    print(
-                        f"[account] PID {item['pid']} -> 账户模型尚未就绪",
-                        flush=True,
+                    desktop_log(
+                        f"[account] PID {item['pid']} -> 账户模型尚未就绪"
                     )
             except Exception as error:
                 item["error"] = str(error)
                 item["account"] = latest_account_state(int(item["pid"]))
-                print(
-                    f"[account] PID {item['pid']} 读取失败：{error}",
-                    flush=True,
+                desktop_log(
+                    f"[account] PID {item['pid']} 读取失败：{error}"
                 )
             item["label"] = process_display(item)
             valid[int(item["pid"])] = item
@@ -1207,6 +1309,11 @@ class ChimeraService:
         if isinstance(status_effects, list):
             updated_effects = runtime_effect_options(status_effects)
             with self.lock:
+                self.status_effect_catalog = [
+                    dict(effect)
+                    for effect in status_effects
+                    if isinstance(effect, dict)
+                ]
                 if updated_effects != self.effect_options:
                     self.effect_options = updated_effects
         self.update_hydra_heads(rotation.get("hydraHeads"))
@@ -1472,15 +1579,7 @@ class ChimeraService:
         )
         team = live.get("teamHeroIds") if isinstance(live, dict) else []
         if isinstance(team, list) and team:
-            try:
-                self.visual_cache_status = preload_game_visuals(self.hero_catalog, team)
-                print(
-                    f"[assets] current team: {self.visual_cache_status['heroes']} heroes, "
-                    f"{self.visual_cache_status['skills']} skill icons ready",
-                    flush=True,
-                )
-            except Exception as error:
-                print(f"[assets] team skill preload failed: {error}", flush=True)
+            self.start_visual_preload(team)
         difficulties = self.ui_catalog.get("difficulties", [])
         return {
             "processes": [self.frontend_process(item) for item in sorted(processes, key=lambda value: int(value["pid"]))],
@@ -1594,8 +1693,7 @@ class ChimeraService:
         if kind == "effect" and len(parts) == 1:
             name = parts[0]
             if name.replace("_", "").isalnum():
-                path = PROJECT_ROOT / "cache" / "chimera-icons" / f"{name}.png"
-                return path if path.is_file() else None
+                return ensure_icon_cache().get(name)
         if kind == "reward" and len(parts) == 1:
             identity = parts[0]
             if identity.replace("-", "").isalnum():
@@ -1667,9 +1765,17 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     raise ValueError("缺少账户")
                 pid = int(raw_pid)
                 boss_mode = normalize_mode(query.get("mode", ["chimera"])[0])
+                store = self.server.service.strategy_store()
                 self._json({
                     "state": self.server.service.live_state(pid, boss_mode),
                     "controller": self.server.service.controller.snapshot(boss_mode),
+                    # Keep the profile picker current when a strategy is
+                    # created or imported outside this already-open window.
+                    # The live editor config is deliberately not replaced,
+                    # so unsaved rule edits remain intact.
+                    "strategyProfiles": strategy_profiles_for_mode(
+                        store, boss_mode
+                    ),
                     "heroes": self.server.service.heroes(),
                     "hydraHeads": self.server.service.hydra_heads(),
                     "effects": list(self.server.service.effect_options),
@@ -1860,7 +1966,16 @@ def restore_internal_worker_streams() -> None:
         get_std_handle.argtypes = [ctypes.c_ulong]
         get_std_handle.restype = ctypes.c_void_p
         for attribute, identifier in (("stdout", -11), ("stderr", -12)):
-            if getattr(sys, attribute) is not None:
+            existing = getattr(sys, attribute)
+            if existing is not None:
+                reconfigure = getattr(existing, "reconfigure", None)
+                if callable(reconfigure):
+                    reconfigure(
+                        encoding="utf-8",
+                        errors="backslashreplace",
+                        line_buffering=True,
+                        write_through=True,
+                    )
                 continue
             handle = get_std_handle(identifier & 0xFFFFFFFF)
             if not handle or handle == ctypes.c_void_p(-1).value:
@@ -1875,7 +1990,7 @@ def restore_internal_worker_streams() -> None:
                 closefd=False,
             )
             setattr(sys, attribute, stream)
-    except (OSError, ValueError):
+    except (OSError, TypeError, ValueError):
         pass
 
 
@@ -1921,6 +2036,14 @@ def self_test() -> int:
     for head_type_id in HYDRA_HEAD_TYPE_IDS:
         head_asset = service.asset("head", [str(head_type_id)])
         assert head_asset is not None and head_asset.is_file()
+    # A pristine user-data directory intentionally has no account hero catalog
+    # until the first agent scan. Seed one representative identity so this
+    # assertion tests the bundled fallback rather than pre-existing user data.
+    service.hero_catalog[9170] = {
+        "typeId": 9170,
+        "avatar": "HeroAvatars/9170",
+        "runtimeTypeIds": [9176],
+    }
     thor_asset = service.asset("hero", ["9170"])
     assert thor_asset is not None and thor_asset.is_file()
     thor_runtime_asset = service.asset("hero", ["9176"])
@@ -1942,7 +2065,7 @@ def self_test() -> int:
     assert service.client_count() == 0
     service.shutdown()
     assert service.controller.snapshot()["status"] == "已关闭"
-    print("chimera-web-selftest-ok")
+    desktop_log("chimera-web-selftest-ok")
     return 0
 
 
@@ -1982,7 +2105,7 @@ def main() -> int:
     server_thread.start()
     try:
         if args.no_window:
-            print(url, flush=True)
+            desktop_log(url)
             while True:
                 time.sleep(0.5)
         import webview

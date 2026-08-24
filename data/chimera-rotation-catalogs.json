@@ -6729,6 +6729,2843 @@
           }
         ]
       }
+    },
+    "fnv1a64:b7dc7d3347a4475d": {
+      "firstSeenUtc": "2026-08-22T23:59:08.756437+00:00",
+      "trialDefinitionFingerprint": "fnv1a64:0007383d9a7550b6",
+      "rewards": {
+        "difficulties": [
+          {
+            "difficultyId": 1,
+            "trials": [
+              {
+                "id": 8000101,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000102,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000103,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000104,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000105,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000106,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000107,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000108,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000109,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000110,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000111,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000112,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000113,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000114,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000115,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000116,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000117,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000118,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000119,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000120,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000121,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000122,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000123,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000124,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000125,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000126,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 92,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 8,
+                      "minCount": 1,
+                      "maxCount": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000127,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "difficultyId": 2,
+            "trials": [
+              {
+                "id": 8000201,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000202,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 2,
+                      "type": "Bmi",
+                      "probability": 100,
+                      "minCount": 1,
+                      "maxCount": 1,
+                      "blackMarketItemId": 19001
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000203,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000204,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000205,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000206,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000207,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000208,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000209,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000210,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 88,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 12,
+                      "minCount": 1,
+                      "maxCount": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000211,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000212,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000213,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000214,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000215,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000216,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000217,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000218,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000219,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000220,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000221,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000222,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000223,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000224,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000225,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000226,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000227,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "difficultyId": 3,
+            "trials": [
+              {
+                "id": 8000301,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000302,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 2,
+                      "type": "Bmi",
+                      "probability": 100,
+                      "minCount": 1,
+                      "maxCount": 1,
+                      "blackMarketItemId": 19001
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000303,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000304,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000305,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000306,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000307,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000308,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000309,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000310,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 84,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 16,
+                      "minCount": 1,
+                      "maxCount": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000311,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000312,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000313,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000314,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000315,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000316,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000317,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000318,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000319,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000320,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000321,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000322,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000323,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000324,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000325,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000326,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000327,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "difficultyId": 4,
+            "trials": [
+              {
+                "id": 8000401,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000402,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 2,
+                      "type": "Bmi",
+                      "probability": 100,
+                      "minCount": 1,
+                      "maxCount": 1,
+                      "blackMarketItemId": 19002
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000403,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000404,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000405,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000406,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 12,
+                      "maxCount": 12,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000407,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000408,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000409,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000410,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 76,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 20,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 4,
+                      "minCount": 1,
+                      "maxCount": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000411,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000412,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 11,
+                      "maxCount": 11,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000413,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000414,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000415,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000416,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000417,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000418,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000419,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000420,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000421,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 11,
+                      "maxCount": 11,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000422,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000423,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000424,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 12,
+                      "maxCount": 12,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000425,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000426,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000427,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "difficultyId": 5,
+            "trials": [
+              {
+                "id": 8000501,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000502,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 2,
+                      "type": "Bmi",
+                      "probability": 100,
+                      "minCount": 1,
+                      "maxCount": 1,
+                      "blackMarketItemId": 19003
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000503,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 17,
+                      "maxCount": 17,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000504,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000505,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 12,
+                      "maxCount": 12,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000506,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000507,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 67,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 26,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 7,
+                      "minCount": 1,
+                      "maxCount": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000508,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000509,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000510,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000511,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000512,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 13,
+                      "maxCount": 13,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000513,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000514,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 11,
+                      "maxCount": 11,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000515,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 17,
+                      "maxCount": 17,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000516,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000517,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 2,
+                      "maxCount": 2,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000518,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000519,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000520,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000521,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000522,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000523,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 11,
+                      "maxCount": 11,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000524,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 12,
+                      "maxCount": 12,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000525,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 5,
+                      "maxCount": 5,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000526,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 4,
+                      "maxCount": 4,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000527,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 2,
+                      "maxCount": 2,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "difficultyId": 6,
+            "trials": [
+              {
+                "id": 8000601,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000602,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 2,
+                      "type": "Bmi",
+                      "probability": 100,
+                      "minCount": 1,
+                      "maxCount": 1,
+                      "blackMarketItemId": 19003
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000603,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000604,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000605,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000606,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000607,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000608,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000609,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 7,
+                      "maxCount": 7,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000610,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 51,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 38,
+                      "minCount": 1,
+                      "maxCount": 0
+                    },
+                    {
+                      "typeId": 22,
+                      "type": "RelicStones",
+                      "probability": 11,
+                      "minCount": 1,
+                      "maxCount": 0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000611,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 10,
+                      "maxCount": 10,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000612,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000613,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000614,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000615,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4102,
+                      "resourceType": "RelicCraftMaterial_Chimera_Legendary"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000616,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000617,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000618,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000619,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000620,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000621,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 2,
+                      "type": "Bmi",
+                      "probability": 100,
+                      "minCount": 1,
+                      "maxCount": 1,
+                      "blackMarketItemId": 19004
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000622,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 8,
+                      "maxCount": 8,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000623,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 15,
+                      "maxCount": 15,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000624,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 14,
+                      "maxCount": 14,
+                      "resourceTypeId": 4101,
+                      "resourceType": "RelicCraftMaterial_Chimera_Epic"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000625,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 9,
+                      "maxCount": 9,
+                      "resourceTypeId": 4100,
+                      "resourceType": "RelicCraftMaterial_Chimera_Rare"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000626,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 3,
+                      "maxCount": 3,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              },
+              {
+                "id": 8000627,
+                "reward": {
+                  "rollCount": 1,
+                  "entries": [
+                    {
+                      "typeId": 3,
+                      "type": "Resources",
+                      "probability": 100,
+                      "minCount": 6,
+                      "maxCount": 6,
+                      "resourceTypeId": 4103,
+                      "resourceType": "RelicCraftMaterial_Chimera_Mythical"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
     }
   },
   "attributeRotations": {
@@ -6892,6 +9729,153 @@
           "stageRotationIndex": 2,
           "difficultyId": 5,
           "firstSeenUtc": "2026-08-14T18:47:18.738521+00:00"
+        }
+      ]
+    },
+    "fnv1a64:1cc9b1aa9cc75421": {
+      "firstSeenUtc": "2026-08-22T23:59:08.756437+00:00",
+      "attributes": {
+        "metadata": {
+          "prizeOffset": 8,
+          "prizeOffsetAvailable": true,
+          "turnsBetweenForms": 5,
+          "formSequence": [
+            {
+              "sequenceIndex": 5,
+              "formId": 0,
+              "form": "Ultimate"
+            },
+            {
+              "sequenceIndex": 10,
+              "formId": 1,
+              "form": "Ram"
+            },
+            {
+              "sequenceIndex": 15,
+              "formId": 0,
+              "form": "Ultimate"
+            },
+            {
+              "sequenceIndex": 20,
+              "formId": 2,
+              "form": "Lion"
+            },
+            {
+              "sequenceIndex": 25,
+              "formId": 0,
+              "form": "Ultimate"
+            },
+            {
+              "sequenceIndex": 30,
+              "formId": 3,
+              "form": "Snake"
+            },
+            {
+              "sequenceIndex": 35,
+              "formId": 0,
+              "form": "Ultimate"
+            },
+            {
+              "sequenceIndex": 40,
+              "formId": 1,
+              "form": "Ram"
+            },
+            {
+              "sequenceIndex": 45,
+              "formId": 0,
+              "form": "Ultimate"
+            },
+            {
+              "sequenceIndex": 50,
+              "formId": 2,
+              "form": "Lion"
+            },
+            {
+              "sequenceIndex": 55,
+              "formId": 0,
+              "form": "Ultimate"
+            },
+            {
+              "sequenceIndex": 60,
+              "formId": 3,
+              "form": "Snake"
+            },
+            {
+              "sequenceIndex": 65,
+              "formId": 0,
+              "form": "Ultimate"
+            }
+          ]
+        },
+        "difficulties": [
+          {
+            "difficultyId": 1,
+            "health": 59200000,
+            "stageIds": [
+              13019001,
+              13029001,
+              13039001,
+              13049001
+            ]
+          },
+          {
+            "difficultyId": 2,
+            "health": 140000000,
+            "stageIds": [
+              13019002,
+              13029002,
+              13039002,
+              13049002
+            ]
+          },
+          {
+            "difficultyId": 3,
+            "health": 290900000,
+            "stageIds": [
+              13019003,
+              13029003,
+              13039003,
+              13049003
+            ]
+          },
+          {
+            "difficultyId": 4,
+            "health": 513100000,
+            "stageIds": [
+              13019004,
+              13029004,
+              13039004,
+              13049004
+            ]
+          },
+          {
+            "difficultyId": 5,
+            "health": 1195000000,
+            "stageIds": [
+              13019005,
+              13029005,
+              13039005,
+              13049005
+            ]
+          },
+          {
+            "difficultyId": 6,
+            "health": 1610000000,
+            "stageIds": [
+              13019006,
+              13029006,
+              13039006,
+              13049006
+            ]
+          }
+        ]
+      },
+      "observations": [
+        {
+          "stageId": 13039006,
+          "stageRotationIndex": 2,
+          "difficultyId": 6,
+          "firstSeenUtc": "2026-08-22T23:59:08.756437+00:00"
         }
       ]
     }

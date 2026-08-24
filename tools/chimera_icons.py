@@ -33,7 +33,23 @@ _GAME_AVATAR_CACHE_CHECKED = False
 _GAME_SKILL_CACHE_CHECKED: set[int] = set()
 _GAME_REWARD_CACHE_CHECKED = False
 _GAME_BUILD_MEMORY: Path | None = None
+_ICON_CACHE_LOCK = threading.RLock()
 tk: Any = None
+
+
+def _record_asset_extraction_error(stage: str, source: Path, error: Exception) -> None:
+    """Persist compact first-run diagnostics when a packaged decoder is incomplete."""
+    try:
+        ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = ASSET_CACHE_DIR / "asset-extraction-errors.log"
+        if path.is_file() and path.stat().st_size >= 64 * 1024:
+            return
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"{stage}\t{source}\t{type(error).__name__}: {error}\n"
+            )
+    except OSError:
+        pass
 
 
 def game_build_directory() -> Path | None:
@@ -170,7 +186,7 @@ EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
     {"token": "370", "icon": "Shield2", "label": "神器套装护盾", "group": "增益"},
     {"token": "410", "icon": "ReflectDamage", "label": "反射伤害 15%", "group": "增益"},
     {"token": "411", "icon": "ReflectDamage2", "label": "反射伤害 30%", "group": "增益"},
-    {"token": "460", "icon": "LifeDrainOnDamage", "label": "吸血 10%", "group": "增益"},
+    {"token": "460", "icon": "LifeDrainOnDamage", "label": "血液榨取", "group": "减益"},
     {"token": "480", "icon": "Invisible", "label": "隐身", "group": "增益"},
     {"token": "481", "icon": "Invisible2", "label": "完美隐身", "group": "增益"},
     {"token": "510", "icon": "ReduceDamageTaken", "label": "减少承受伤害 15%", "group": "增益"},
@@ -179,7 +195,7 @@ EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
     {"token": "640", "icon": "MirrorDamage", "label": "伤害转移", "group": "增益"},
     {"token": "710", "icon": "StatusIncreaseResistance", "label": "增加抗性 25%", "group": "增益"},
     {"token": "711", "icon": "StatusIncreaseResistance2", "label": "增加抗性 50%", "group": "增益"},
-    {"token": "840", "icon": "Negator", "label": "拦截 / 否定效果", "group": "特殊"},
+    {"token": "840", "icon": "Negator", "label": "拦截", "group": "增益"},
     {"token": "860", "icon": "HuntersMark", "label": "猎人印记", "group": "特殊"},
     {"token": "870", "icon": "Inspiration", "label": "激励", "group": "特殊"},
     {"token": "910", "icon": "Duel", "label": "对决目标", "group": "奇美拉"},
@@ -189,6 +205,61 @@ EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
 )
 
 EFFECT_BY_TOKEN = {item["token"]: item for item in EFFECT_OPTIONS}
+
+# Match the names shown by RAID while retaining the numeric strength in the
+# editor, because weak and strong variants are distinct strategy conditions.
+GAME_EFFECT_LABELS_EN: dict[str, str] = {
+    "10": "Stun", "20": "Freeze", "30": "Sleep", "40": "Provoke",
+    "50": "Counterattack", "60": "Block Damage",
+    "70": "Heal Reduction (100%)", "71": "Heal Reduction (50%)",
+    "80": "Poison (5%)", "81": "Poison (2.5%)",
+    "90": "Continuous Heal (7.5%)", "91": "Continuous Heal (15%)",
+    "100": "Block Debuffs", "110": "Block Buffs",
+    "120": "Increase ATK (25%)", "121": "Increase ATK (50%)",
+    "130": "Decrease ATK (25%)", "131": "Decrease ATK (50%)",
+    "140": "Increase DEF (30%)", "141": "Increase DEF (60%)",
+    "150": "Decrease DEF (30%)", "151": "Decrease DEF (60%)",
+    "160": "Increase SPD (15%)", "161": "Increase SPD (30%)",
+    "170": "Decrease SPD (15%)", "171": "Decrease SPD (30%)",
+    "220": "Increase ACC (25%)", "221": "Increase ACC (50%)",
+    "230": "Decrease ACC (25%)", "231": "Decrease ACC (50%)",
+    "240": "Increase C. RATE (15%)", "241": "Increase C. RATE (30%)",
+    "250": "Decrease C. RATE (15%)", "251": "Decrease C. RATE (30%)",
+    "260": "Increase C. DMG (15%)", "261": "Increase C. DMG (30%)",
+    "270": "Decrease C. DMG (15%)", "271": "Decrease C. DMG (25%)",
+    "280": "Shield", "290": "Block Active Skills", "300": "Revive on Death",
+    "310": "Ally Protection (50%)", "311": "Ally Protection (25%)",
+    "320": "Unkillable", "350": "Weaken (25%)", "351": "Weaken (15%)",
+    "360": "Block Revive", "370": "Shield (Artifact Set)",
+    "410": "Reflect Damage (15%)", "411": "Reflect Damage (30%)",
+    "460": "Leech", "470": "HP Burn", "480": "Veil",
+    "481": "Perfect Veil", "490": "Fear", "491": "True Fear",
+    "500": "Poison Sensitivity (25%)", "501": "Poison Sensitivity (50%)",
+    "510": "Strengthen (15%)", "511": "Strengthen (25%)",
+    "620": "Stone Skin", "640": "Pain Link",
+    "710": "Increase RES (25%)", "711": "Increase RES (50%)",
+    "720": "Decrease RES (25%)", "721": "Decrease RES (50%)",
+    "740": "Smite", "770": "Sheep", "840": "Intercept",
+    "860": "Hunter's Mark", "870": "Inspiration",
+    "910": "Duel Target", "920": "Duel Initiator",
+    "930": "Necrosis Source", "940": "Necrosis",
+}
+
+GAME_EFFECT_LABELS_ZH: dict[str, str] = {
+    "40": "嘲讽", "60": "阻挡伤害",
+    "70": "治疗量降低（100%）", "71": "治疗量降低（50%）",
+    "100": "阻挡减益", "110": "阻挡增益",
+    "290": "阻挡主动技能", "300": "死亡后复活",
+    "310": "盟友保护（50%）", "311": "盟友保护（25%）",
+    "320": "不死", "350": "虚弱（25%）", "351": "虚弱（15%）",
+    "360": "阻挡复活", "370": "护盾（神器套装）",
+    "460": "血液榨取", "470": "生命值燃烧",
+    "480": "隐身", "481": "完美隐身",
+    "500": "中毒敏感度（25%）", "501": "中毒敏感度（50%）",
+    "510": "强化（15%）", "511": "强化（25%）",
+    "640": "苦痛连接", "740": "重击", "770": "变羊",
+    "840": "拦截", "860": "猎人印记", "870": "激励",
+}
 
 # Runtime names come from SharedModel.Battle.Effects.StatusEffectTypeId.  The
 # game owns the numeric IDs; these labels only make the native names friendlier.
@@ -270,12 +341,52 @@ RUNTIME_EFFECT_LABELS: dict[str, str] = {
     "VoidAbyss": "虚空深渊",
 }
 
+RUNTIME_EFFECT_LABELS_EN: dict[str, str] = {
+    "AoEContinuousDamage": "AoE Continuous Damage",
+    "BlockPassiveSkills": "Block Passive Skills",
+    "BloodRage": "Blood Rage", "BoneShield": "Bone Shield",
+    "BoneShield20": "Bone Shield (20%)", "BoneShield30": "Bone Shield (30%)",
+    "Brutality": "Brutality", "Brutality2": "Brutality",
+    "Brutality075": "Brutality (7.5%)", "Brutality15": "Brutality (15%)",
+    "Chewing": "Chewing", "Chrono": "Chrono", "Cocoon": "Cocoon",
+    "CrabShell": "Crab Shell", "DamageCounter": "Damage Counter",
+    "DelayedDamage": "Delayed Damage", "Digestion": "Digestion",
+    "Devoured": "Devoured", "ElectricMark": "Electric Mark",
+    "Eclipse": "Eclipse", "Enfeeble": "Enfeeble", "Enrage": "Enrage",
+    "Ensnare": "Ensnare", "Ensnare2": "Ensnare",
+    "Ensnare50": "Ensnare (50%)", "Ensnare100": "Ensnare (100%)",
+    "Entangle": "Entangle", "Fatigue": "Fatigue",
+    "Fortify": "Fortify", "Fortify2": "Fortify",
+    "Fortify15": "Fortify (15%)", "Fortify25": "Fortify (25%)",
+    "GoldenArmor": "Golden Armor", "Grabbed": "Grabbed",
+    "GreaterSeal": "Greater Seal", "HitCounterShield": "Hit Counter Shield",
+    "HungerCounter": "Hunger Counter", "HydraHitCounter": "Hydra Hit Counter",
+    "HydraNeckIncreaseDamageTaken": "Exposed Neck",
+    "IncreaseCritResistance": "Increase Critical Resistance",
+    "IncreaseMaxHp": "Increase MAX HP", "IncreaseStamina": "Increase Turn Meter",
+    "Infest": "Infest", "LightOrbs": "Light Orbs",
+    "LesserSeal": "Lesser Seal", "MagmaShield": "Magma Shield",
+    "Mark": "Mark", "MarkOfDeath": "Mark of Death",
+    "MarkOfMadness": "Mark of Madness", "NewbieDefence": "New Player Protection",
+    "Nullifier": "Nullifier", "OnGuard": "On Guard",
+    "Petrification": "Petrification", "PoisonCloud": "Poison Cloud",
+    "Rage": "Rage", "ReduceStamina": "Decrease Turn Meter",
+    "ReflectiveStoneSkin": "Reflective Stone Skin", "Seal": "Seal",
+    "Seal2": "Greater Seal", "SkyWrath": "Sky Wrath",
+    "SleepCounter": "Sleep Counter", "SoulCounter": "Soul Counter",
+    "StatusBanish": "Banish", "SwapHealth": "Swap HP", "Syphon": "Syphon",
+    "Taunt": "Taunt", "Thunder": "Thunder",
+    "ThunderStunApplier": "Thunder Stun", "TimeBomb": "Bomb",
+    "VoidAbyss": "Void Abyss", "Negator": "Intercept",
+    "HuntersMark": "Hunter's Mark", "Inspiration": "Inspiration",
+}
+
 RUNTIME_DEBUFF_EFFECTS = {
     "AoEContinuousDamage", "BlockPassiveSkills", "Chewing", "DelayedDamage",
     "Digestion", "Devoured", "ElectricMark", "Enfeeble", "Ensnare", "Ensnare2",
     "Ensnare50", "Ensnare100", "Entangle", "Fatigue", "Grabbed", "GreaterSeal",
     "Infest", "LesserSeal", "Mark", "MarkOfDeath", "MarkOfMadness", "Petrification",
-    "PoisonCloud", "ReduceStamina", "Seal", "Seal2", "StatusBanish", "Taunt",
+    "PoisonCloud", "ReduceStamina", "Seal", "Seal2", "StatusBanish",
     "ThunderStunApplier", "TimeBomb", "VoidAbyss",
 }
 RUNTIME_BUFF_EFFECTS = {
@@ -285,7 +396,7 @@ RUNTIME_BUFF_EFFECTS = {
     "Fortify", "Fortify2", "Fortify15", "Fortify25", "GoldenArmor", "HitCounterShield",
     "IncreaseCritResistance", "IncreaseMaxHp", "IncreaseStamina", "LightOrbs",
     "MagmaShield", "NewbieDefence", "OnGuard", "Rage", "ReflectiveStoneSkin",
-    "SkyWrath", "Thunder",
+    "SkyWrath", "Thunder", "Taunt", "Negator", "Inspiration",
 }
 
 RUNTIME_EFFECT_ICONS: dict[str, str] = {
@@ -316,7 +427,6 @@ RUNTIME_EFFECT_ICONS: dict[str, str] = {
 }
 
 
-@lru_cache(maxsize=1)
 def native_effect_icon_names() -> frozenset[str]:
     try:
         payload = json.loads((CACHE_DIR / "manifest.json").read_text(encoding="utf-8"))
@@ -332,14 +442,32 @@ def _readable_effect_name(name: str) -> str:
     return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name).replace("_", " ")
 
 
-def runtime_effect_options(status_effects: Any) -> list[dict[str, str]]:
+def runtime_effect_options(status_effects: Any) -> list[dict[str, Any]]:
     """Merge the complete live StatusEffectTypeId enum with curated labels."""
-    options = [dict(option) for option in EFFECT_OPTIONS]
-    seen = {option["token"] for option in options}
+    status_rows = status_effects if isinstance(status_effects, list) else []
+    live_names = {
+        str(raw["id"]): str(raw["name"])
+        for raw in status_rows
+        if isinstance(raw, dict)
+        and isinstance(raw.get("id"), int)
+        and isinstance(raw.get("name"), str)
+    }
     icons = native_effect_icon_names()
+    options: list[dict[str, Any]] = []
+    for raw_option in EFFECT_OPTIONS:
+        option: dict[str, Any] = dict(raw_option)
+        token = option["token"]
+        option["label"] = GAME_EFFECT_LABELS_ZH.get(token, option["label"])
+        option["labelEn"] = GAME_EFFECT_LABELS_EN.get(
+            token, _readable_effect_name(option["icon"])
+        )
+        option["nativeName"] = live_names.get(token, "")
+        option["iconReady"] = option["icon"] in icons
+        options.append(option)
+    seen = {option["token"] for option in options}
     if not isinstance(status_effects, list):
         return options
-    additions: list[dict[str, str]] = []
+    additions: list[dict[str, Any]] = []
     for raw in status_effects:
         if not isinstance(raw, dict):
             continue
@@ -360,7 +488,10 @@ def runtime_effect_options(status_effects: Any) -> list[dict[str, str]]:
             "token": str(effect_id),
             "icon": icon,
             "label": RUNTIME_EFFECT_LABELS.get(name, _readable_effect_name(name)),
+            "labelEn": RUNTIME_EFFECT_LABELS_EN.get(name, _readable_effect_name(name)),
             "group": group,
+            "nativeName": name,
+            "iconReady": icon in icons,
         })
         seen.add(str(effect_id))
     additions.sort(key=lambda option: (option["group"], option["label"], int(option["token"])))
@@ -773,7 +904,8 @@ def ensure_game_avatar_cache() -> dict[str, Path]:
                     filename = f"native-hero-{base_name}.png"
                     sprite.image.save(ASSET_CACHE_DIR / filename)
                     avatars[base_name] = filename
-            except Exception:
+            except Exception as error:
+                _record_asset_extraction_error("avatar", source, error)
                 continue
         manifest["avatarExtractorVersion"] = 2
         manifest["avatarSources"] = fingerprint
@@ -892,7 +1024,8 @@ def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
                     filename = f"native-skill-{base_id}-f{form}-s{slot}.png"
                     sprite.image.save(ASSET_CACHE_DIR / filename)
                     skills[key] = filename
-            except Exception:
+            except Exception as error:
+                _record_asset_extraction_error("skill", source, error)
                 continue
         skill_sources[str(base_id)] = fingerprint
         manifest["skillSources"] = skill_sources
@@ -977,8 +1110,8 @@ def ensure_game_reward_cache() -> dict[str, Path]:
                 filename = f"native-reward-{_safe_name(name)}.png"
                 sprite.image.save(ASSET_CACHE_DIR / filename)
                 reward_sprites[name] = filename
-        except Exception:
-            pass
+        except Exception as error:
+            _record_asset_extraction_error("reward", source, error)
         manifest["rewardSources"] = fingerprint
         manifest["rewardSprites"] = reward_sprites
         _write_game_asset_manifest(manifest)
@@ -1033,7 +1166,8 @@ def game_skill_asset(hero_id: Any, hero: Any, skill: Any) -> Path | None:
 def preload_game_visuals(
     catalog: dict[int, dict[str, Any]], hero_ids: Any = (),
 ) -> dict[str, int]:
-    """Warm portraits globally and skills for the current five-hero team."""
+    """Warm native effect icons, portraits, rewards, and current-team skills."""
+    effects = ensure_icon_cache()
     avatars = ensure_game_avatar_cache()
     rewards = ensure_game_reward_cache()
     skill_count = 0
@@ -1060,6 +1194,7 @@ def preload_game_visuals(
         visited.add(base_id)
         skill_count += len(ensure_game_skill_cache(base_id))
     return {
+        "effects": len(effects),
         "avatars": len(avatars),
         "skills": skill_count,
         "heroes": len(visited),
@@ -1080,7 +1215,7 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._") or "icon"
 
 
-def ensure_icon_cache() -> dict[str, Path]:
+def _ensure_icon_cache_unlocked() -> dict[str, Path]:
     """Extract native UI sprites once. A source fingerprint prevents repeated writes."""
     sources = [value for value in (_latest_bundle("StatusEffectIcons"), _latest_bundle("Challenges")) if value]
     fingerprint = [
@@ -1123,7 +1258,8 @@ def ensure_icon_cache() -> dict[str, Path]:
                 filename = _safe_name(name) + ".png"
                 sprite.image.save(CACHE_DIR / filename)
                 icons[name] = filename
-        except Exception:
+        except Exception as error:
+            _record_asset_extraction_error("effect-icons", source, error)
             continue
     if not icons:
         return cached_icons
@@ -1132,6 +1268,12 @@ def ensure_icon_cache() -> dict[str, Path]:
         encoding="utf-8",
     )
     return {key: CACHE_DIR / filename for key, filename in icons.items()}
+
+
+def ensure_icon_cache() -> dict[str, Path]:
+    """Extract effect icons once, serializing concurrent startup/API requests."""
+    with _ICON_CACHE_LOCK:
+        return _ensure_icon_cache_unlocked()
 
 
 class ChimeraIconRepository:

@@ -44,6 +44,7 @@ FIXED_CHIMERA_FORM_CYCLE = (
     "Ultimate",
     "Snake",
 )
+CANONICAL_TRIAL_RECIPE_DIFFICULTY_ID = 5
 COMMAND_ACK_TIMEOUT_SECONDS = 3.0
 COMMAND_CONFIRM_TIMEOUT_SECONDS = 45.0
 LIFECYCLE_START_BATTLE = 1
@@ -52,6 +53,7 @@ LIFECYCLE_PREPARE_FREE_REGROUP = 3
 LIFECYCLE_REFRESH_TEAM_SELECTION = 4
 LIFECYCLE_SELECT_HEROES = 5
 LIFECYCLE_RESTART_HYDRA_RESULT = 6
+LIFECYCLE_RESTART_CHIMERA_RESULT = 7
 LIFECYCLE_START_NONCE = 0x80000001
 LIFECYCLE_FREE_REGROUP_NONCE = 0x80000002
 LIFECYCLE_PREPARE_FREE_REGROUP_NONCE = 0x80000100
@@ -77,7 +79,7 @@ DEFAULT_ROTATION_ARCHIVE = RESOURCE_ROOT / "data" / "chimera-rotation-catalogs.j
 DEFAULT_CAPABILITY_CACHE = RESOURCE_ROOT / "data" / "chimera-skill-capabilities.json"
 DEFAULT_TRIAL_RECIPES = RESOURCE_ROOT / "data" / "chimera-trial-recipes.json"
 CURRENT_AGENT = (
-    PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll"
+    PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll"
 )
 _ARCHIVED_ROTATION_OBSERVATIONS: set[tuple[Any, ...]] = set()
 _INITIAL_SKILL_NAMES = {
@@ -89,6 +91,22 @@ _INITIAL_SKILL_NAMES = {
     and isinstance(skill.get("typeId"), int)
     and not is_unresolved_skill_name(skill.get("name"))
 }
+
+
+def configure_text_streams() -> None:
+    """Emit controller logs as UTF-8 even inside a frozen Windows worker."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(
+                    encoding="utf-8",
+                    errors="backslashreplace",
+                    line_buffering=True,
+                    write_through=True,
+                )
+            except (OSError, TypeError, ValueError):
+                pass
 SUPPORTED_CONDITION_KEYS = frozenset(
     {
         "form",
@@ -232,6 +250,74 @@ def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
             raise ValueError(f"{condition_path} 的最小冷却不能大于最大冷却")
 
 
+def validate_default_skill_policy(policy: Any, *, path: str) -> None:
+    if not isinstance(policy, dict):
+        raise ValueError(f"{path} 必须是对象")
+    priority_skills = policy.get("prioritySkills")
+    if not isinstance(priority_skills, list):
+        raise ValueError(f"{path}.prioritySkills 必须是数组")
+    seen_skill_ids: set[int] = set()
+    for index, entry in enumerate(priority_skills):
+        entry_path = f"{path}.prioritySkills[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{entry_path} 必须是对象")
+        skill_type_id = entry.get("skillTypeId")
+        if (
+            not isinstance(skill_type_id, int)
+            or isinstance(skill_type_id, bool)
+            or skill_type_id <= 0
+            or skill_type_id in seen_skill_ids
+        ):
+            raise ValueError(f"{entry_path}.skillTypeId 必须是互不重复的正整数")
+        seen_skill_ids.add(skill_type_id)
+        if entry.get("skillSlot") is not None and (
+            not isinstance(entry["skillSlot"], int)
+            or isinstance(entry["skillSlot"], bool)
+            or entry["skillSlot"] <= 0
+        ):
+            raise ValueError(f"{entry_path}.skillSlot 必须是正整数")
+        if entry.get("isTransform") is not None and not isinstance(
+            entry["isTransform"], bool
+        ):
+            raise ValueError(f"{entry_path}.isTransform 必须是布尔值")
+    first_turn_skill = policy.get("firstTurnSkill")
+    if first_turn_skill is not None:
+        first_turn_path = f"{path}.firstTurnSkill"
+        if not isinstance(first_turn_skill, dict):
+            raise ValueError(f"{first_turn_path} 必须是对象")
+        skill_type_id = first_turn_skill.get("skillTypeId")
+        if (
+            not isinstance(skill_type_id, int)
+            or isinstance(skill_type_id, bool)
+            or skill_type_id <= 0
+        ):
+            raise ValueError(f"{first_turn_path}.skillTypeId 必须是正整数")
+        if first_turn_skill.get("skillSlot") is not None and (
+            not isinstance(first_turn_skill["skillSlot"], int)
+            or isinstance(first_turn_skill["skillSlot"], bool)
+            or first_turn_skill["skillSlot"] <= 0
+        ):
+            raise ValueError(f"{first_turn_path}.skillSlot 必须是正整数")
+        if first_turn_skill.get("isTransform") is not None and not isinstance(
+            first_turn_skill["isTransform"], bool
+        ):
+            raise ValueError(f"{first_turn_path}.isTransform 必须是布尔值")
+    blocked = policy.get("blockedSkillTypeIds", [])
+    if (
+        not isinstance(blocked, list)
+        or any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            for value in blocked
+        )
+        or len(blocked) != len(set(blocked))
+    ):
+        raise ValueError(
+            f"{path}.blockedSkillTypeIds 必须是互不重复的正整数数组"
+        )
+
+
 def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
     if not isinstance(node, dict):
         raise ValueError(f"{path} 必须是对象")
@@ -292,69 +378,20 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
             raise ValueError(f"{path}.action.toFormIndex 只允许 0 或 1")
         return
     if action_type == "defaultSkillPriority":
-        priority_skills = action.get("prioritySkills")
-        if not isinstance(priority_skills, list):
-            raise ValueError(f"{path}.action.prioritySkills 必须是数组")
-        seen_skill_ids: set[int] = set()
-        for index, entry in enumerate(priority_skills):
-            entry_path = f"{path}.action.prioritySkills[{index}]"
-            if not isinstance(entry, dict):
-                raise ValueError(f"{entry_path} 必须是对象")
-            skill_type_id = entry.get("skillTypeId")
-            if (
-                not isinstance(skill_type_id, int)
-                or isinstance(skill_type_id, bool)
-                or skill_type_id <= 0
-                or skill_type_id in seen_skill_ids
-            ):
-                raise ValueError(f"{entry_path}.skillTypeId 必须是互不重复的正整数")
-            seen_skill_ids.add(skill_type_id)
-            if entry.get("skillSlot") is not None and (
-                not isinstance(entry["skillSlot"], int)
-                or isinstance(entry["skillSlot"], bool)
-                or entry["skillSlot"] <= 0
-            ):
-                raise ValueError(f"{entry_path}.skillSlot 必须是正整数")
-            if entry.get("isTransform") is not None and not isinstance(
-                entry["isTransform"], bool
-            ):
-                raise ValueError(f"{entry_path}.isTransform 必须是布尔值")
-        first_turn_skill = action.get("firstTurnSkill")
-        if first_turn_skill is not None:
-            first_turn_path = f"{path}.action.firstTurnSkill"
-            if not isinstance(first_turn_skill, dict):
-                raise ValueError(f"{first_turn_path} 必须是对象")
-            skill_type_id = first_turn_skill.get("skillTypeId")
-            if (
-                not isinstance(skill_type_id, int)
-                or isinstance(skill_type_id, bool)
-                or skill_type_id <= 0
-            ):
-                raise ValueError(f"{first_turn_path}.skillTypeId 必须是正整数")
-            if first_turn_skill.get("skillSlot") is not None and (
-                not isinstance(first_turn_skill["skillSlot"], int)
-                or isinstance(first_turn_skill["skillSlot"], bool)
-                or first_turn_skill["skillSlot"] <= 0
-            ):
-                raise ValueError(f"{first_turn_path}.skillSlot 必须是正整数")
-            if first_turn_skill.get("isTransform") is not None and not isinstance(
-                first_turn_skill["isTransform"], bool
-            ):
-                raise ValueError(f"{first_turn_path}.isTransform 必须是布尔值")
-        blocked = action.get("blockedSkillTypeIds", [])
-        if (
-            not isinstance(blocked, list)
-            or any(
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value <= 0
-                for value in blocked
-            )
-            or len(blocked) != len(set(blocked))
-        ):
-            raise ValueError(
-                f"{path}.action.blockedSkillTypeIds 必须是互不重复的正整数数组"
-            )
+        validate_default_skill_policy(action, path=f"{path}.action")
+        form_policies = action.get("formPolicies")
+        if form_policies is not None:
+            if not isinstance(form_policies, dict) or not form_policies:
+                raise ValueError(f"{path}.action.formPolicies 必须是非空对象")
+            supported_forms = {"Ultimate", "Ram", "Lion", "Snake"}
+            for form, policy in form_policies.items():
+                if form not in supported_forms:
+                    raise ValueError(
+                        f"{path}.action.formPolicies 包含未知奇美拉形态：{form}"
+                    )
+                validate_default_skill_policy(
+                    policy, path=f"{path}.action.formPolicies.{form}"
+                )
         if action.get("reserveStrictRuleSkills", True) is not True:
             raise ValueError(
                 f"{path}.action.reserveStrictRuleSkills 当前必须为 true"
@@ -1292,6 +1329,59 @@ def hydra_head_is_devouring(entity: dict[str, Any]) -> bool:
     )
 
 
+def hydra_devouring_head_ids(state: dict[str, Any]) -> set[int]:
+    """Return authoritative Hydra head actor IDs that currently hold a hero.
+
+    A long Hydra battle keeps old head UI contexts in the client dictionary.
+    Once that dictionary outgrows the agent snapshot, a newly spawned head can
+    be present in a skill's legal target IDs before it is present in ``bosses``.
+    The Devoured effect on the victim still identifies its producer (the head)
+    and is therefore the most stable link for rescue targeting.
+    """
+    result: set[int] = set()
+    for boss in state_entities(state, "bosses"):
+        actor_id = boss.get("id")
+        if (
+            isinstance(actor_id, int)
+            and not isinstance(actor_id, bool)
+            and actor_id >= 0
+            and hydra_head_is_devouring(boss)
+        ):
+            result.add(actor_id)
+    for hero in state_entities(state, "heroes"):
+        for effect in hero.get("effects", []):
+            if not isinstance(effect, dict):
+                continue
+            if effect.get("effectKind") != "Devoured" and effect.get(
+                "effectKindId"
+            ) != 9024:
+                continue
+            producer_id = effect.get("producerId")
+            if (
+                isinstance(producer_id, int)
+                and not isinstance(producer_id, bool)
+                and producer_id >= 0
+            ):
+                result.add(producer_id)
+    return result
+
+
+def hydra_devouring_target_label(
+    state: dict[str, Any], actor_id: int, fallback: str
+) -> str:
+    for hero in state_entities(state, "heroes"):
+        for effect in hero.get("effects", []):
+            if not isinstance(effect, dict) or effect.get("producerId") != actor_id:
+                continue
+            if effect.get("effectKind") == "Devoured" or effect.get(
+                "effectKindId"
+            ) == 9024:
+                victim = hero.get("name")
+                if isinstance(victim, str) and victim:
+                    return f"正在吞噬·{victim}"
+    return fallback
+
+
 def hydra_target_sort_key(entity: dict[str, Any]) -> tuple[float, int]:
     health = entity.get("healthPct")
     actor_id = entity.get("id")
@@ -1494,13 +1584,26 @@ def state_for_rule_target(
         bosses = [boss for boss in bosses if boss.get("id") in valid_target_ids]
     selected: dict[str, Any] | None = None
     if selector_type == "devouringHead":
+        devouring_ids = hydra_devouring_head_ids(state)
         selected = next(
             (
                 boss for boss in bosses
-                if hydra_head_is_devouring(boss)
+                if hydra_head_is_devouring(boss) or boss.get("id") in devouring_ids
             ),
             None,
         )
+        if selected is None:
+            unresolved_ids = sorted(
+                devouring_ids & valid_target_ids
+                if valid_target_ids
+                else devouring_ids
+            )
+            if unresolved_ids:
+                selected = {
+                    "id": unresolved_ids[0],
+                    "isDevouring": True,
+                    "effects": [],
+                }
     elif selector_type == "exposedNeck":
         selected = next(
             (
@@ -1535,6 +1638,11 @@ def state_for_rule_target(
         return state
     scoped = dict(state)
     scoped["_conditionBossId"] = selected["id"]
+    if not any(
+        boss.get("id") == selected["id"]
+        for boss in state_entities(state, "bosses")
+    ):
+        scoped["bosses"] = [*state_entities(state, "bosses"), selected]
     return scoped
 
 
@@ -1566,9 +1674,10 @@ def configured_trial_ids(value: Any) -> tuple[int, ...]:
     return tuple(result)
 
 
-def evaluate_objectives(
+def objective_trial_ids(
     config: dict[str, Any], state: dict[str, Any]
-) -> ObjectiveReport:
+) -> tuple[int, ...]:
+    """Return selected mandatory trials in prerequisite-first order."""
     objectives = config.get("objectives", {})
     if not isinstance(objectives, dict):
         objectives = {}
@@ -1594,7 +1703,17 @@ def evaluate_objectives(
 
     for configured_id in configured_mandatory_ids:
         add_trial_with_prerequisites(configured_id)
-    mandatory_ids = tuple(mandatory_order)
+    return tuple(mandatory_order)
+
+
+def evaluate_objectives(
+    config: dict[str, Any], state: dict[str, Any]
+) -> ObjectiveReport:
+    objectives = config.get("objectives", {})
+    if not isinstance(objectives, dict):
+        objectives = {}
+    statuses = trial_status_by_id(state)
+    mandatory_ids = objective_trial_ids(config, state)
     completed = tuple(
         trial_id
         for trial_id in mandatory_ids
@@ -1708,6 +1827,64 @@ def effect_count(entity: dict[str, Any] | None) -> int:
     if entity is None:
         return 0
     return sum(isinstance(effect, dict) for effect in entity.get("effects", []))
+
+
+# The agent exposes the game's effect-kind ID for live effects. RAID keeps
+# ordinary buffs in the 2xxx range and debuffs in the 3xxx range. Type-ID
+# fallbacks cover saved capability data and older captures that did not retain
+# the kind ID correctly.
+BUFF_EFFECT_TYPE_IDS = frozenset(
+    {
+        50, 60, 91, 100, 120, 121, 140, 141, 160, 161, 220, 221, 240,
+        241, 260, 261, 280, 310, 320, 370, 410, 411, 480, 481, 511, 600,
+        610, 620, 650, 670, 710, 711, 760, 780, 840, 870, 880, 991,
+    }
+)
+DEBUFF_EFFECT_TYPE_IDS = frozenset(
+    {
+        10, 20, 30, 40, 70, 80, 81, 110, 130, 131, 150, 151, 170, 171,
+        230, 231, 250, 251, 270, 271, 290, 350, 351, 431, 440, 460, 470,
+        490, 491, 500, 630, 640, 720, 721, 740, 860, 930, 940,
+    }
+)
+
+
+def effect_polarity(effect: dict[str, Any] | None) -> str | None:
+    if not isinstance(effect, dict):
+        return None
+    effect_kind_id = effect.get("effectKindId")
+    if isinstance(effect_kind_id, int) and not isinstance(effect_kind_id, bool):
+        if 2_000 <= effect_kind_id < 3_000:
+            return "buff"
+        if 3_000 <= effect_kind_id < 4_000:
+            return "debuff"
+    effect_type_id = effect.get("effectTypeId")
+    if isinstance(effect_type_id, int) and not isinstance(effect_type_id, bool):
+        if effect_type_id in BUFF_EFFECT_TYPE_IDS:
+            return "buff"
+        if effect_type_id in DEBUFF_EFFECT_TYPE_IDS:
+            return "debuff"
+    return None
+
+
+def buff_count(entity: dict[str, Any] | None) -> int:
+    if entity is None:
+        return 0
+    return sum(
+        effect_polarity(effect) == "buff"
+        for effect in entity.get("effects", [])
+        if isinstance(effect, dict)
+    )
+
+
+def debuff_count(entity: dict[str, Any] | None) -> int:
+    if entity is None:
+        return 0
+    return sum(
+        effect_polarity(effect) == "debuff"
+        for effect in entity.get("effects", [])
+        if isinstance(effect, dict)
+    )
 
 
 def current_stage_rotation_index(state: dict[str, Any]) -> int | None:
@@ -2208,11 +2385,13 @@ def matches(when: dict[str, Any], state: dict[str, Any]) -> bool:
         trial_id
         for trial_id, trial in trials.items()
         if trial.get("activeInChain") is True
+        and trial.get("completed") is not True
     }
     eligible_ids = {
         trial_id
         for trial_id, trial in trials.items()
         if trial.get("eligibleNow") is True
+        and trial.get("completed") is not True
     }
     locked_ids = {
         trial_id
@@ -2310,9 +2489,15 @@ def select_target(
     skill: dict[str, Any],
     state: dict[str, Any],
 ) -> tuple[int, str] | None:
-    valid = {
-        value for value in skill.get("validTargetIds", []) if isinstance(value, int)
-    }
+    valid_ordered: list[int] = []
+    for value in skill.get("validTargetIds", []):
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value not in valid_ordered
+        ):
+            valid_ordered.append(value)
+    valid = set(valid_ordered)
     if not valid:
         return None
     if isinstance(selector, str):
@@ -2325,6 +2510,36 @@ def select_target(
     bosses = state_entities(state, "bosses")
     active_hero_id = state.get("activeHeroId")
     chimera_id = state.get("chimera", {}).get("id")
+    devouring_head_ids = hydra_devouring_head_ids(state)
+
+    def unresolved_hydra_target() -> tuple[int, str] | None:
+        """Trust the current SkillData target window over a stale boss cache.
+
+        Hydra replaces heads with new battle actors throughout a long fight.  An
+        older/bounded boss UI snapshot can therefore contain only historical
+        actors while GetAcceptableTargets already returns the four current head
+        IDs.  Those IDs are the authoritative legality check used by the game,
+        so a generic/automatic target may safely use one even before its head
+        metadata reaches the snapshot.
+        """
+        hydra = state.get("hydra")
+        if state.get("bossMode") != "hydra" and not (
+            isinstance(hydra, dict) and hydra.get("active") is True
+        ):
+            return None
+        hero_ids = {
+            item.get("id")
+            for item in heroes
+            if isinstance(item.get("id"), int)
+            and not isinstance(item.get("id"), bool)
+        }
+        for target_id in valid_ordered:
+            if target_id not in hero_ids:
+                return (
+                    target_id,
+                    f"六头蛇目标 {target_id}（蛇头快照未同步，已按技能合法目标选择）",
+                )
+        return None
 
     if selector_type == "auto":
         dead_candidates = [
@@ -2347,12 +2562,24 @@ def select_target(
             for item in bosses
             if item.get("id") in valid and item.get("dead") is not True
         ]
+        unresolved_devouring_ids = sorted(
+            target_id
+            for target_id in devouring_head_ids
+            if target_id in valid
+            and not any(item.get("id") == target_id for item in valid_bosses)
+        )
+        if unresolved_devouring_ids:
+            target_id = unresolved_devouring_ids[0]
+            return target_id, hydra_devouring_target_label(
+                state, target_id, f"正在吞噬的蛇头 {target_id}"
+            )
         if valid_bosses:
             target = next(
                 (
                     item
                     for item in valid_bosses
                     if hydra_head_is_devouring(item)
+                    or item.get("id") in devouring_head_ids
                 ),
                 None,
             )
@@ -2372,14 +2599,21 @@ def select_target(
                     if isinstance(item.get("healthPct"), (int, float))
                     else 101,
                 )
-            return target["id"], target.get("name", "Boss")
+            target_label = target.get("name", "Boss")
+            if target.get("id") in devouring_head_ids:
+                target_label = hydra_devouring_target_label(
+                    state,
+                    target["id"],
+                    f"正在吞噬·{target_label}",
+                )
+            return target["id"], target_label
         candidates = [
             item
             for item in heroes
             if item.get("id") in valid and not item.get("dead", False)
         ]
         if not candidates:
-            return None
+            return unresolved_hydra_target()
         target = min(
             candidates,
             key=lambda item: item.get("healthPct")
@@ -2391,7 +2625,11 @@ def select_target(
         if isinstance(chimera_id, int) and chimera_id in valid:
             return chimera_id, "奇美拉"
         boss = next((item for item in bosses if item.get("id") in valid), None)
-        return (boss["id"], boss.get("name", "Boss")) if boss else None
+        return (
+            (boss["id"], boss.get("name", "Boss"))
+            if boss
+            else unresolved_hydra_target()
+        )
     if selector_type in {
         "lowestHpBoss",
         "devouringHead",
@@ -2409,7 +2647,15 @@ def select_target(
                 item
                 for item in candidates
                 if hydra_head_is_devouring(item)
+                or item.get("id") in devouring_head_ids
             ]
+            if not candidates:
+                unresolved_ids = sorted(devouring_head_ids & valid)
+                if unresolved_ids:
+                    target_id = unresolved_ids[0]
+                    return target_id, hydra_devouring_target_label(
+                        state, target_id, f"正在吞噬的蛇头 {target_id}"
+                    )
         elif selector_type == "exposedNeck":
             candidates = [
                 item
@@ -2430,7 +2676,14 @@ def select_target(
             if selector_type in {"hydraHeadPriority", "hydraHeadSlot"}
             else min(candidates, key=hydra_target_sort_key)
         )
-        return target["id"], target.get("name", f"蛇头 {target['id']}")
+        target_label = target.get("name", f"蛇头 {target['id']}")
+        if selector_type == "devouringHead":
+            target_label = hydra_devouring_target_label(
+                state,
+                target["id"],
+                f"正在吞噬·{target_label}",
+            )
+        return target["id"], target_label
     if selector_type == "self":
         return (
             (active_hero_id, "自己")
@@ -2610,6 +2863,138 @@ def turn_key(state: dict[str, Any]) -> tuple[Any, ...]:
         state.get("activeHeroFormIndex"),
         state.get("activeHeroSkillsUpdateCounter"),
     )
+
+
+def hero_action_window_key(state: dict[str, Any]) -> tuple[Any, ...]:
+    """Identify one hero action window without volatile skill refresh counters."""
+    battle = state.get("battle", {})
+    return (
+        state.get("pid"),
+        battle.get("round"),
+        battle.get("turn"),
+        battle.get("playerTurnCount"),
+        state.get("activeHeroId"),
+        state.get("activeHeroTurnCount"),
+        state.get("activeHeroFormIndex"),
+    )
+
+
+def annotate_chimera_form_first_turn(
+    state: dict[str, Any], runtime_state: dict[str, Any]
+) -> None:
+    """Mark the active hero's first observed action in each Chimera form phase.
+
+    The game only exposes a battle-wide personal turn counter. This tracker
+    follows real form transitions and remembers which heroes have completed an
+    action window in the current phase. A controller attached mid-phase stays
+    conservative until the next form transition, so resuming cannot replay an
+    opener in the middle of a phase.
+    """
+    chimera = state.get("chimera", {})
+    battle = state.get("battle", {})
+    current_form = canonical_chimera_form(
+        chimera.get("currentForm") if isinstance(chimera, dict) else None
+    )
+    active_hero_id = state.get("activeHeroId")
+    if (
+        not isinstance(current_form, str)
+        or not isinstance(active_hero_id, int)
+        or isinstance(active_hero_id, bool)
+    ):
+        state["_chimeraFormHeroFirstTurn"] = False
+        return
+
+    chimera_turn = chimera.get("turnCount") if isinstance(chimera, dict) else None
+    player_turn = battle.get("playerTurnCount") if isinstance(battle, dict) else None
+    hero_turn = state.get("activeHeroTurnCount")
+    tracker = runtime_state.get("chimeraFormTurnTracker")
+
+    def at_battle_opening() -> bool:
+        return (
+            isinstance(player_turn, int)
+            and not isinstance(player_turn, bool)
+            and player_turn in {0, 1}
+            and isinstance(hero_turn, int)
+            and not isinstance(hero_turn, bool)
+            and hero_turn in {0, 1}
+            and (
+                not isinstance(chimera_turn, int)
+                or isinstance(chimera_turn, bool)
+                or chimera_turn in {0, 1}
+            )
+        )
+
+    reset_battle = False
+    if isinstance(tracker, dict):
+        previous_chimera_turn = tracker.get("lastChimeraTurn")
+        previous_player_turn = tracker.get("lastPlayerTurn")
+        reset_battle = (
+            isinstance(chimera_turn, int)
+            and not isinstance(chimera_turn, bool)
+            and isinstance(previous_chimera_turn, int)
+            and not isinstance(previous_chimera_turn, bool)
+            and chimera_turn < previous_chimera_turn
+        ) or (
+            isinstance(player_turn, int)
+            and not isinstance(player_turn, bool)
+            and isinstance(previous_player_turn, int)
+            and not isinstance(previous_player_turn, bool)
+            and player_turn < previous_player_turn
+            and at_battle_opening()
+        )
+
+    if not isinstance(tracker, dict) or reset_battle:
+        tracker = {
+            "form": current_form,
+            "armed": at_battle_opening(),
+            "seenHeroIds": set(),
+            "pendingHeroId": None,
+            "pendingWindow": None,
+        }
+        runtime_state["chimeraFormTurnTracker"] = tracker
+    elif tracker.get("form") != current_form:
+        tracker.update(
+            {
+                "form": current_form,
+                "armed": True,
+                "seenHeroIds": set(),
+                "pendingHeroId": None,
+                "pendingWindow": None,
+            }
+        )
+
+    seen = tracker.get("seenHeroIds")
+    if not isinstance(seen, set):
+        seen = (
+            {
+                value
+                for value in seen
+                if isinstance(value, int) and not isinstance(value, bool)
+            }
+            if isinstance(seen, (list, tuple, set))
+            else set()
+        )
+        tracker["seenHeroIds"] = seen
+
+    current_window = hero_action_window_key(state)
+    pending_hero_id = tracker.get("pendingHeroId")
+    pending_window = tracker.get("pendingWindow")
+    if (
+        isinstance(pending_hero_id, int)
+        and not isinstance(pending_hero_id, bool)
+        and pending_window is not None
+        and pending_window != current_window
+    ):
+        seen.add(pending_hero_id)
+
+    state["_chimeraFormHeroFirstTurn"] = bool(
+        tracker.get("armed") is True and active_hero_id not in seen
+    )
+    state["_chimeraFormPhase"] = current_form
+    tracker["pendingHeroId"] = active_hero_id
+    tracker["pendingWindow"] = current_window
+    tracker["lastChimeraTurn"] = chimera_turn
+    tracker["lastPlayerTurn"] = player_turn
 
 
 def wait_for_turn_advance(
@@ -3020,7 +3405,7 @@ def free_regroup_and_retry_manual(
         session_id=session_id,
         nonce=nonce,
     )
-    wait_for_lifecycle_screen(
+    regrouped_selection = wait_for_lifecycle_screen(
         ipc, session_id, "team_selection", timeout_seconds=30.0
     )
     refreshed = refresh_team_selection(
@@ -3084,11 +3469,53 @@ def free_regroup_and_retry_manual(
     new_battle = wait_for_lifecycle_screen(
         ipc, session_id, "battle", timeout_seconds=30.0
     )
-    new_context = (new_battle.get("battle") or {}).get("context")
+    new_battle_state = new_battle.get("battle") or {}
+    new_context = new_battle_state.get("context")
     if not isinstance(new_context, int) or new_context <= 0:
         raise RuntimeError("重新开战后未取得新战斗实例")
-    if new_context == old_context:
-        raise RuntimeError("重新开战仍为旧战斗实例，已停止接管")
+    if new_battle_state.get("bossMode") not in {None, "chimera"}:
+        raise RuntimeError("重新开战后进入的不是奇美拉战斗")
+    restarted_hero_ids = [
+        value
+        for value in new_battle_state.get("heroIds", [])
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+    restarted_hero_type_ids = [
+        value
+        for value in new_battle_state.get("heroTypeIds", [])
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+    if restarted_hero_ids and restarted_hero_ids != expected_hero_ids:
+        raise RuntimeError("重新开战后的五人队伍与重整前不一致")
+    if (
+        expected_hero_type_ids
+        and restarted_hero_type_ids
+        and restarted_hero_type_ids != expected_hero_type_ids
+    ):
+        raise RuntimeError("重新开战后的英雄身份或顺序与重整前不一致")
+
+    # ClientBattleViewContext is a reusable UI object.  The game can keep the
+    # same address when a free regroup goes battle -> team selection -> battle,
+    # so pointer inequality is not a valid new-battle requirement.  The fully
+    # observed team-selection transition above is the authoritative boundary.
+    # When lifecycle ordering metadata is available, also reject an old battle
+    # snapshot that predates that boundary.
+    selection_sequence = regrouped_selection.get("sequence")
+    battle_sequence = new_battle.get("sequence")
+    if (
+        isinstance(selection_sequence, int)
+        and isinstance(battle_sequence, int)
+        and battle_sequence <= selection_sequence
+    ):
+        raise RuntimeError("重新开战后读取到了重整前的旧战斗状态")
+    selection_tick = regrouped_selection.get("observedAtTick")
+    battle_tick = new_battle.get("observedAtTick")
+    if (
+        isinstance(selection_tick, int)
+        and isinstance(battle_tick, int)
+        and battle_tick < selection_tick
+    ):
+        raise RuntimeError("重新开战后的状态时间早于队伍重整")
     print(
         "必要试炼已不可完成；免费重整后已核对原五人队伍，"
         "关闭自动战斗并以手动模式进入下一次尝试。",
@@ -3116,26 +3543,31 @@ def free_regroup_and_stop(
     )
 
 
-def restart_hydra_from_result(
+def _restart_from_result(
     ipc: AgentIpc,
     *,
     pid: int,
     agent: Path,
     session_id: int,
     nonce: int,
+    boss_mode: str,
+    action: int,
     desired_hero_ids: list[int] | None,
     desired_hero_type_ids: list[int] | None,
 ) -> bool:
+    mode = normalize_mode(boss_mode)
+    label = mode_spec(mode)["label"]
+    team_size = mode_spec(mode)["teamSize"]
     lifecycle = ipc.lifecycle() or {}
     result_state = lifecycle.get("result") or {}
     context = result_state.get("context") if isinstance(result_state, dict) else None
     if (
         lifecycle.get("screen") != "result"
-        or result_state.get("bossMode") != "hydra"
+        or result_state.get("bossMode") != mode
         or not isinstance(context, int)
         or context <= 0
     ):
-        raise RuntimeError("六头蛇结算实例已经变化，未执行自动重整")
+        raise RuntimeError(f"{label}结算实例已经变化，未执行自动重整")
 
     restart_nonce = lifecycle_nonce(nonce, 400)
     queued = queue_lifecycle_command(
@@ -3143,11 +3575,11 @@ def restart_hydra_from_result(
         agent,
         session_id=session_id,
         context=context,
-        action=LIFECYCLE_RESTART_HYDRA_RESULT,
+        action=action,
         nonce=restart_nonce,
     )
     if not queued.get("queued"):
-        raise RuntimeError(f"代理拒绝六头蛇自动重整请求：{queued}")
+        raise RuntimeError(f"代理拒绝{label}自动重整请求：{queued}")
     acknowledgement = wait_for_command_ack(
         ipc,
         session_id=session_id,
@@ -3156,7 +3588,7 @@ def restart_hydra_from_result(
     )
     if not acknowledgement or acknowledgement.get("status") != "submitted":
         reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
-        raise RuntimeError(f"六头蛇自动重整没有通过安全检查：{reason}")
+        raise RuntimeError(f"{label}自动重整没有通过安全检查：{reason}")
 
     deadline = time.monotonic() + 30.0
     stable_selection_key: tuple[Any, ...] | None = None
@@ -3189,7 +3621,7 @@ def restart_hydra_from_result(
                 stable_since = now
                 time.sleep(0.05)
                 continue
-            # OnRestartPressed performs an asynchronous server-side regroup.
+            # The result button performs an asynchronous server-side regroup.
             # Wait for the returned selection and its current (even partial)
             # roster to remain unchanged before pressing Start.
             if now - stable_since < 2.0:
@@ -3203,37 +3635,83 @@ def restart_hydra_from_result(
                 command_nonce=lifecycle_nonce(nonce, 401),
                 desired_hero_ids=desired_hero_ids,
                 desired_hero_type_ids=desired_hero_type_ids,
-                boss_mode="hydra",
+                boss_mode=mode,
             )
             if started:
                 return True
         elif screen == "battle":
             battle = current.get("battle") or {}
-            if not isinstance(battle, dict) or battle.get("bossMode") != "hydra":
-                raise RuntimeError("自动重整后进入的不是六头蛇战斗，已停止接管")
+            if not isinstance(battle, dict) or battle.get("bossMode") != mode:
+                raise RuntimeError(f"自动重整后进入的不是{label}战斗，已停止接管")
             actual_instances = battle.get("heroIds")
             actual_types = battle.get("heroTypeIds")
             actual_team_is_full = (
                 isinstance(actual_types, list)
-                and len(actual_types) == 6
+                and len(actual_types) == team_size
                 and all(
                     isinstance(value, int)
                     and not isinstance(value, bool)
                     and value > 0
                     for value in actual_types
                 )
-                and len(set(actual_types)) == 6
+                and len(set(actual_types)) == team_size
             )
             if actual_team_is_full and desired_hero_ids and actual_instances != desired_hero_ids:
-                raise RuntimeError("自动重整后的六人队伍与策略组不一致（具体英雄副本）")
+                raise RuntimeError(f"自动重整后的{team_size}人队伍与策略组不一致（具体英雄副本）")
             if actual_team_is_full and desired_hero_type_ids and actual_types != desired_hero_type_ids:
-                raise RuntimeError("自动重整后的六人队伍与策略组不一致（英雄身份或顺序）")
+                raise RuntimeError(f"自动重整后的{team_size}人队伍与策略组不一致（英雄身份或顺序）")
             return True
         time.sleep(0.05)
     current = ipc.lifecycle() or {}
     if current.get("screen") == "team_selection":
         return False
-    raise RuntimeError("六头蛇自动重整后 30 秒内没有进入准备界面或新战斗")
+    raise RuntimeError(f"{label}自动重整后 30 秒内没有进入准备界面或新战斗")
+
+
+def restart_hydra_from_result(
+    ipc: AgentIpc,
+    *,
+    pid: int,
+    agent: Path,
+    session_id: int,
+    nonce: int,
+    desired_hero_ids: list[int] | None,
+    desired_hero_type_ids: list[int] | None,
+) -> bool:
+    return _restart_from_result(
+        ipc,
+        pid=pid,
+        agent=agent,
+        session_id=session_id,
+        nonce=nonce,
+        boss_mode="hydra",
+        action=LIFECYCLE_RESTART_HYDRA_RESULT,
+        desired_hero_ids=desired_hero_ids,
+        desired_hero_type_ids=desired_hero_type_ids,
+    )
+
+
+def restart_chimera_from_result(
+    ipc: AgentIpc,
+    *,
+    pid: int,
+    agent: Path,
+    session_id: int,
+    nonce: int,
+    desired_hero_ids: list[int] | None,
+    desired_hero_type_ids: list[int] | None,
+) -> bool:
+    return _restart_from_result(
+        ipc,
+        pid=pid,
+        agent=agent,
+        session_id=session_id,
+        nonce=nonce,
+        boss_mode="chimera",
+        action=LIFECYCLE_RESTART_CHIMERA_RESULT,
+        desired_hero_ids=desired_hero_ids,
+        desired_hero_type_ids=desired_hero_type_ids,
+    )
 
 
 def result_screen_reached(
@@ -3245,7 +3723,7 @@ def result_screen_reached(
     session_id: int = 0,
     boss_mode: str | None = None,
     execute_requested: bool = False,
-    runtime_state: dict[str, int] | None = None,
+    runtime_state: dict[str, Any] | None = None,
     desired_hero_ids: list[int] | None = None,
     desired_hero_type_ids: list[int] | None = None,
     nonce: int = LIFECYCLE_FREE_REGROUP_NONCE,
@@ -3267,7 +3745,7 @@ def result_screen_reached(
         else None
     )
 
-    if detected_mode != "hydra" or config is None:
+    if config is None:
         print(
             "战斗已结束，已停留在结算画面；"
             f"伤害 {raw_damage if damage is not None else '未知'}，"
@@ -3279,6 +3757,107 @@ def result_screen_reached(
 
     objectives = config.get("objectives") or {}
     minimum_damage = float(objectives.get("minimumDamage", 0))
+    runtime = runtime_state if runtime_state is not None else {}
+
+    if detected_mode == "chimera":
+        last_report = runtime.get("lastObjectiveReport")
+        if not isinstance(last_report, dict):
+            last_report = {}
+        mandatory_ids = configured_trial_ids(
+            last_report.get(
+                "mandatoryTrialIds",
+                objectives.get(
+                    "mandatoryTrials",
+                    objectives.get("mandatoryTrialIds", []),
+                ),
+            )
+        )
+        completed_ids = set(
+            configured_trial_ids(last_report.get("completedTrialIds", []))
+        )
+        completed_ids.update(
+            configured_trial_ids(ledger.get("completedChallengeIds", []))
+        )
+        missing_ids = tuple(
+            trial_id for trial_id in mandatory_ids if trial_id not in completed_ids
+        )
+        damage_met = minimum_damage <= 0 or (
+            damage is not None and damage >= minimum_damage
+        )
+        trials_met = not missing_ids
+        if damage_met and trials_met:
+            print(
+                f"奇美拉全部目标已达成：伤害 {damage:g}/{minimum_damage:g}，"
+                f"必要试炼 {len(mandatory_ids)}/{len(mandatory_ids)}；"
+                "已停留在结算画面并暂停接管，不会自动保存结果。",
+                flush=True,
+            )
+            return True
+
+        behavior = objectives.get(
+            "onObjectivesUnmetAtResult",
+            objectives.get(
+                "onMandatoryTrialImpossible",
+                "free_regroup_and_retry_manual",
+            ),
+        )
+        execute = execute_requested and config.get("mode") == "execute"
+        damage_label = (
+            f"{damage:g}/{minimum_damage:g}"
+            if damage is not None
+            else f"未知/{minimum_damage:g}"
+        )
+        missing_label = (
+            ", ".join(map(str, missing_ids)) if missing_ids else "无"
+        )
+        if behavior != "free_regroup_and_retry_manual" or not execute:
+            print(
+                "奇美拉结算目标未全部达成："
+                f"伤害 {damage_label}，未完成试炼 {missing_label}；"
+                "当前设置不执行自动重整，已停留在结算画面。",
+                flush=True,
+            )
+            return True
+
+        used = int(runtime.get("regroupRetries", 0))
+        maximum = int(objectives.get("maxRegroupRetries", 10))
+        if maximum > 0 and used >= maximum:
+            print(
+                "奇美拉结算目标未全部达成，"
+                f"且已达到自动重整上限 {maximum}；已停留在结算画面。",
+                flush=True,
+            )
+            return True
+        if pid is None or agent is None or session_id <= 0:
+            raise RuntimeError("奇美拉自动重整缺少已验证的控制会话")
+
+        print(
+            "奇美拉结算目标未全部达成："
+            f"伤害 {damage_label}，未完成试炼 {missing_label}；"
+            f"正在执行第 {used + 1} 次免费重整并重新开战。",
+            flush=True,
+        )
+        restarted = restart_chimera_from_result(
+            ipc,
+            pid=pid,
+            agent=agent,
+            session_id=session_id,
+            nonce=nonce,
+            desired_hero_ids=desired_hero_ids,
+            desired_hero_type_ids=desired_hero_type_ids,
+        )
+        runtime["regroupRetries"] = used + 1
+        runtime.pop("lastObjectiveReport", None)
+        if restarted:
+            print("奇美拉已用当前队伍重新进入手动战斗。", flush=True)
+        else:
+            print(
+                "奇美拉已进入准备界面；正在等待当前队伍状态稳定，"
+                "接管保持运行。",
+                flush=True,
+            )
+        return False
+
     if damage is None:
         print(
             "六头蛇战斗已结束，但结算伤害仍不可用；为避免错误重试，"
@@ -3307,7 +3886,6 @@ def result_screen_reached(
         )
         return True
 
-    runtime = runtime_state if runtime_state is not None else {}
     used = int(runtime.get("regroupRetries", 0))
     maximum = int(objectives.get("maxRegroupRetries", 10))
     if maximum > 0 and used >= maximum:
@@ -3473,7 +4051,11 @@ def effect_requirement_target(
 
 
 def effect_target_has_capacity(
-    requirement: dict[str, Any], target_id: int, state: dict[str, Any]
+    requirement: dict[str, Any],
+    target_id: int,
+    state: dict[str, Any],
+    *,
+    capability: dict[str, Any] | None = None,
 ) -> bool:
     entities = state_entities(state, "heroes") + state_entities(state, "bosses")
     target = next((entity for entity in entities if entity.get("id") == target_id), None)
@@ -3482,6 +4064,19 @@ def effect_target_has_capacity(
     for selector in requirement_effect_selectors(requirement):
         if entity_has_effect(target, effect_identity_selector(selector)):
             return True
+    polarity = effect_polarity(capability)
+    if polarity is None:
+        polarities = {
+            value
+            for selector in requirement_effect_selectors(requirement)
+            if (value := effect_polarity(selector)) is not None
+        }
+        if len(polarities) == 1:
+            polarity = next(iter(polarities))
+    if polarity == "buff":
+        return buff_count(target) < 10
+    if polarity == "debuff":
+        return debuff_count(target) < 10
     return effect_count(target) < 10
 
 
@@ -3523,7 +4118,7 @@ def maintain_effects_decision(
                     capability=capability,
                 )
                 if target is None or not effect_target_has_capacity(
-                    requirement, target[0], state
+                    requirement, target[0], state, capability=capability
                 ):
                     continue
                 return Decision(
@@ -3623,10 +4218,75 @@ def load_trial_recipes(
                 or not requirement_effect_selectors(requirement)
             ):
                 raise ValueError(f"trial recipe {trial_id} has an invalid requirement")
+        difficulty_overrides = recipe.get("difficultyOverrides", {})
+        if not isinstance(difficulty_overrides, dict):
+            raise ValueError(
+                f"trial recipe {trial_id} difficultyOverrides must be an object"
+            )
+        for difficulty_id, override in difficulty_overrides.items():
+            if (
+                difficulty_id not in {"1", "2", "3", "4", "5", "6"}
+                or not isinstance(override, dict)
+            ):
+                raise ValueError(
+                    f"trial recipe {trial_id} has an invalid difficulty override"
+                )
+            for field, value in override.items():
+                if field not in {
+                    "minimumBossDebuffs",
+                    "minimumActiveHeroBuffs",
+                    "maximumBossBuffs",
+                    "minimumLivingAllies",
+                } or (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    raise ValueError(
+                        f"trial recipe {trial_id} has invalid {field} for "
+                        f"difficulty {difficulty_id}"
+                    )
         recipes[trial_id] = dict(recipe)
     if path == DEFAULT_TRIAL_RECIPES:
         _TRIAL_RECIPE_CACHE = recipes
     return recipes
+
+
+def canonical_trial_recipe_id(trial_id: int) -> int:
+    """Locate the shared recipe skeleton for a trial ordinal."""
+    offset = trial_id - 8_000_000
+    difficulty_id, ordinal = divmod(offset, 100)
+    if 1 <= difficulty_id <= 6 and 1 <= ordinal <= 27:
+        return (
+            8_000_000
+            + CANONICAL_TRIAL_RECIPE_DIFFICULTY_ID * 100
+            + ordinal
+        )
+    return trial_id
+
+
+def trial_recipe_for_id(
+    recipes: dict[int, dict[str, Any]], trial_id: int
+) -> dict[str, Any] | None:
+    recipe = recipes.get(canonical_trial_recipe_id(trial_id))
+    if recipe is None:
+        return None
+    effective = dict(recipe)
+    offset = trial_id - 8_000_000
+    difficulty_id, ordinal = divmod(offset, 100)
+    if 1 <= difficulty_id <= 6 and 1 <= ordinal <= 27:
+        overrides = recipe.get("difficultyOverrides", {})
+        override = (
+            overrides.get(str(difficulty_id))
+            if isinstance(overrides, dict)
+            else None
+        )
+        if isinstance(override, dict):
+            effective.update(override)
+        effective["trialId"] = trial_id
+        effective["allianceDifficultyId"] = difficulty_id
+    effective.pop("difficultyOverrides", None)
+    return effective
 
 
 def effect_type_identity(effect: dict[str, Any]) -> tuple[str, str]:
@@ -3645,6 +4305,7 @@ def select_ready_boss_damage(
     capability_memory: SkillCapabilityMemory | None = None,
     *,
     trial_id: int | None = None,
+    preferred_skill_type_ids: tuple[int, ...] = (),
 ) -> Decision | None:
     boss = current_boss(state)
     if boss is None or not isinstance(boss.get("id"), int):
@@ -3659,7 +4320,38 @@ def select_ready_boss_damage(
         and skill.get("passive") is not True
         and boss_id in skill.get("validTargetIds", [])
     ]
-    def priority(value: dict[str, Any]) -> tuple[int, float, int]:
+    preferred_rank = {
+        skill_type_id: len(preferred_skill_type_ids) - index
+        for index, skill_type_id in enumerate(preferred_skill_type_ids)
+    }
+
+    def support_utility(value: dict[str, Any]) -> int:
+        skill_type_id = value.get("typeId")
+        if (
+            capability_memory is None
+            or not isinstance(skill_type_id, int)
+            or isinstance(skill_type_id, bool)
+        ):
+            return 0
+        seen: set[tuple[Any, ...]] = set()
+        score = 0
+        for capability in capability_memory.capabilities_for(skill_type_id):
+            identity = (
+                capability.get("targetScope"),
+                capability.get("effectTypeId"),
+                capability.get("effectKindId"),
+                capability.get("effectKind"),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            scope = capability.get("targetScope")
+            # Team-wide buffs and boss debuffs usually contribute more than
+            # their caster's direct hit, especially for support champions.
+            score += 2 if scope in {"ally", "boss"} else 1
+        return score
+
+    def priority(value: dict[str, Any]) -> tuple[int, int, int, int, float, int]:
         skill_type_id = value.get("typeId")
         score = (
             capability_memory.damage_score(skill_type_id, trial_id)
@@ -3668,9 +4360,19 @@ def select_ready_boss_damage(
             and not isinstance(skill_type_id, bool)
             else None
         )
-        # Try each boss-targeting skill once under a valid trial window. After
-        # that bounded exploration, measured damage outranks the slot hint.
+        configured_rank = (
+            preferred_rank.get(skill_type_id, 0)
+            if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool)
+            else 0
+        )
+        # A form-specific default policy is the user's strongest combat signal.
+        # Without one, known team/boss utility outranks direct-hit history;
+        # damage remains the tiebreaker and unknown skills still get bounded
+        # exploration instead of being permanently ignored.
         return (
+            int(configured_rank > 0),
+            configured_rank,
+            support_utility(value),
             1 if score is None else 0,
             float(score or 0),
             int(value.get("slot", 0)),
@@ -3679,8 +4381,14 @@ def select_ready_boss_damage(
     skill = max(candidates, key=priority, default=None)
     if skill is None:
         return None
+    skill_type_id = skill.get("typeId")
+    selection_reason = (
+        "沿用当前形态技能优先级"
+        if isinstance(skill_type_id, int) and preferred_rank.get(skill_type_id, 0) > 0
+        else "综合辅助价值与历史伤害"
+    )
     return Decision(
-        rule=name,
+        rule=f"{name}（{selection_reason}）",
         skill=skill,
         target_id=boss_id,
         target_label=str(boss.get("name", "奇美拉")),
@@ -3727,6 +4435,98 @@ PREPARATION_PROTECTIVE_EFFECT_KINDS = {
     "Unkillable",
     "ReviveOnDeath",
 }
+
+
+def adaptive_combat_decision(
+    name: str,
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory,
+    *,
+    excluded_skill_type_ids: set[int] | None = None,
+) -> Decision | None:
+    """Use a hero's useful ready skills when no trial-specific action applies.
+
+    Explicit default rules remain the primary baseline.  This is the final
+    baseline for an automatic-trial policy without a usable default rule, so it
+    prefers revival, urgent known protection and ordinary cooldown skills over
+    repeatedly falling back to the basic attack.
+    """
+    excluded = excluded_skill_type_ids or set()
+    heroes = state_entities(state, "heroes")
+    dead_hero_ids = {
+        hero.get("id")
+        for hero in heroes
+        if hero.get("dead") is True and isinstance(hero.get("id"), int)
+    }
+    living_health = [
+        float(hero["healthPct"])
+        for hero in heroes
+        if hero.get("dead") is not True
+        and isinstance(hero.get("healthPct"), (int, float))
+        and not isinstance(hero.get("healthPct"), bool)
+    ]
+    team_needs_protection = bool(living_health and min(living_health) <= 50.0)
+    transform = select_transform_skill(state)
+    candidates: list[
+        tuple[tuple[int, int, int, int, float, int], dict[str, Any], tuple[int, str], str]
+    ] = []
+    for skill in state.get("skills", []):
+        if (
+            not isinstance(skill, dict)
+            or skill.get("ready") is not True
+            or skill.get("blocked") is True
+            or skill.get("passive") is True
+        ):
+            continue
+        skill_type_id = skill.get("typeId")
+        if isinstance(skill_type_id, int) and skill_type_id in excluded:
+            continue
+        target = select_target({"type": "auto"}, skill, state)
+        if target is None:
+            continue
+        capabilities = (
+            capability_memory.capabilities_for(skill_type_id)
+            if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool)
+            else []
+        )
+        revives_dead = target[0] in dead_hero_ids
+        protective = team_needs_protection and any(
+            capability.get("targetScope") in {"self", "ally"}
+            and capability.get("effectKind") in PREPARATION_PROTECTIVE_EFFECT_KINDS
+            for capability in capabilities
+        )
+        is_transform = transform is skill
+        slot = int(skill.get("slot", 0))
+        damage_score = (
+            capability_memory.damage_score(skill_type_id)
+            if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool)
+            else None
+        )
+        rank = (
+            int(revives_dead),
+            int(protective),
+            int(not is_transform),
+            int(slot > 1),
+            float(damage_score) if damage_score is not None else -1.0,
+            slot,
+        )
+        reason = (
+            "优先复活阵亡队友"
+            if revives_dead
+            else "队伍低生命，优先使用已知防护技能"
+            if protective
+            else "按常规技能优先级继续战斗"
+        )
+        candidates.append((rank, skill, target, reason))
+    if not candidates:
+        return None
+    _, skill, target, reason = max(candidates, key=lambda item: item[0])
+    return Decision(
+        rule=f"{name}：{reason}",
+        skill=skill,
+        target_id=target[0],
+        target_label=target[1],
+    )
 
 
 def select_upcoming_trial_preparation(
@@ -3792,8 +4592,11 @@ def select_upcoming_trial_preparation(
                 target_id=target[0],
                 target_label=target[1],
             )
-    return select_basic_boss_preparation(
-        f"{name}：保留试炼关键技能", state
+    return adaptive_combat_decision(
+        f"{name}：保留试炼关键技能",
+        state,
+        capability_memory,
+        excluded_skill_type_ids=reserved,
     )
 
 
@@ -3860,7 +4663,7 @@ def new_effect_decision(
                 requirement, skill, state, capability=capability
             )
             if target is None or not effect_target_has_capacity(
-                requirement, target[0], state
+                requirement, target[0], state, capability=capability
             ):
                 continue
             return Decision(
@@ -3915,7 +4718,23 @@ def execute_trial_recipe_decision(
     action: dict[str, Any],
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory,
+    preferred_skill_type_ids: tuple[int, ...] = (),
+    reserved_skill_type_ids: set[int] | None = None,
 ) -> Decision | None:
+    reserved = reserved_skill_type_ids or set()
+    if reserved:
+        # A skill referenced by an explicit strict rule belongs to that rule.
+        # Trial automation may observe effects it already produced, but must not
+        # spend the skill while the strict rule is waiting for its full condition.
+        state = {
+            **state,
+            "skills": [
+                skill
+                for skill in state.get("skills", [])
+                if not isinstance(skill, dict)
+                or skill.get("typeId") not in reserved
+            ],
+        }
     try:
         recipes = load_trial_recipes()
     except (OSError, ValueError, json.JSONDecodeError):
@@ -3940,7 +4759,7 @@ def execute_trial_recipe_decision(
         ):
             for trial_id in requested_ids:
                 trial = trials.get(trial_id, {})
-                recipe = recipes.get(trial_id)
+                recipe = trial_recipe_for_id(recipes, trial_id)
                 if (
                     trial.get("activeInChain") is True
                     and trial.get("completed") is not True
@@ -3961,7 +4780,7 @@ def execute_trial_recipe_decision(
     probe_unknown = action.get("probeUnknownSkills") is True
     probe_transforms = action.get("probeTransforms") is True
     for trial_id in eligible_ids:
-        recipe = recipes.get(trial_id)
+        recipe = trial_recipe_for_id(recipes, trial_id)
         if not recipe or recipe.get("automation") == "manual":
             continue
         recipe_name = str(recipe.get("name", trial_id))
@@ -3989,12 +4808,9 @@ def execute_trial_recipe_decision(
                 effect_requirement_satisfied(requirement, state)
                 for requirement in requirements
             ):
-                waiting = select_basic_boss_preparation(
-                    f"{name} · {recipe_name}：等待效果提供者并保留非一技能",
-                    state,
-                )
-                if waiting is not None:
-                    return waiting
+                # This actor cannot currently supply the trial effect.  Defer
+                # to its explicit/default combat policy instead of consuming
+                # every such turn with a basic attack.
                 continue
 
         boss = current_boss(state)
@@ -4016,10 +4832,13 @@ def execute_trial_recipe_decision(
             for effect in boss.get("effects", [])
         ):
             continue
-        minimum_boss_effects = int(recipe.get("minimumBossEffects", 0))
-        if effect_count(boss) < minimum_boss_effects:
+        maximum_boss_buffs = int(recipe.get("maximumBossBuffs", 10))
+        if boss is not None and buff_count(boss) > maximum_boss_buffs:
+            continue
+        minimum_boss_debuffs = int(recipe.get("minimumBossDebuffs", 0))
+        if debuff_count(boss) < minimum_boss_debuffs:
             decision = new_effect_decision(
-                f"{name} · {recipe_name}：累积Boss效果",
+                f"{name} · {recipe_name}：累积Boss减益",
                 "boss",
                 state,
                 capability_memory,
@@ -4030,10 +4849,10 @@ def execute_trial_recipe_decision(
             if decision is not None:
                 return decision
             continue
-        minimum_active_effects = int(recipe.get("minimumActiveHeroEffects", 0))
-        if effect_count(active) < minimum_active_effects:
+        minimum_active_buffs = int(recipe.get("minimumActiveHeroBuffs", 0))
+        if buff_count(active) < minimum_active_buffs:
             decision = new_effect_decision(
-                f"{name} · {recipe_name}：累积行动者效果",
+                f"{name} · {recipe_name}：累积行动者增益",
                 "activeHero",
                 state,
                 capability_memory,
@@ -4050,13 +4869,22 @@ def execute_trial_recipe_decision(
             continue
 
         goal = recipe.get("actionGoal")
-        if goal in {"damageBoss", "periodicDamage", "applyDistinctEffects"}:
-            return select_ready_boss_damage(
+        if goal == "damageBoss":
+            damage = select_ready_boss_damage(
                 f"{name} · {recipe_name}：满足条件后攻击",
                 state,
                 capability_memory,
                 trial_id=trial_id,
+                preferred_skill_type_ids=preferred_skill_type_ids,
             )
+            if damage is not None:
+                return damage
+            continue
+        if goal in {"periodicDamage", "applyDistinctEffects"}:
+            # Maintenance/count branches above are the meaningful trial work.
+            # Once those conditions are established, let the hero's normal
+            # rotation continue instead of forcing a boss-targeting basic hit.
+            continue
         if goal in {
             "survive", "absorbDamage", "reflectDamage", "resistDebuffs"
         }:
@@ -4070,26 +4898,13 @@ def execute_trial_recipe_decision(
             )
             if defensive is not None:
                 return defensive
-            return select_ready_boss_damage(
-                f"{name} · {recipe_name}：保持战斗推进",
-                state,
-                capability_memory,
-                trial_id=trial_id,
-            )
-    # Trial automation is also a complete per-turn policy.  If no trial needs a
-    # specialised action right now, keep valuable cooldown skills available and
-    # safely advance the battle with the basic attack instead of stalling.
-    fallback = select_basic_boss_preparation(
-        f"{name} · 当前试炼无需专用动作，使用基础技能继续战斗",
-        state,
-    )
-    if fallback is not None:
-        return fallback
-    return select_ready_boss_damage(
-        f"{name} · 当前试炼无需专用动作，使用可执行技能继续战斗",
-        state,
-        capability_memory,
-    )
+            # Survival-style trials advance through the boss response, not by
+            # demanding a player basic attack.  Preserve the configured combat
+            # rotation when no useful defensive effect can be added now.
+            continue
+    # Automatic trials are an overlay, not a complete combat rotation.  Let
+    # later strict/default rules run when this actor cannot advance a trial.
+    return None
 
 
 DEFAULT_POLICY_SCOPE_KEYS = frozenset(
@@ -4099,6 +4914,18 @@ DEFAULT_POLICY_SCOPE_KEYS = frozenset(
         "activeHeroFormIndex",
         "activeHeroIsMetamorph",
         "activeHeroIsTransformed",
+    }
+)
+
+# These conditions determine whether a strict rule belongs to the current
+# trial window at all. Unlike effect/cooldown/timing conditions, a different or
+# completed trial is not something worth reserving a skill for.
+STRICT_RESERVATION_SCOPE_KEYS = DEFAULT_POLICY_SCOPE_KEYS | frozenset(
+    {
+        "activeTrialsAll",
+        "activeTrialsAny",
+        "eligibleTrialsAll",
+        "eligibleTrialsAny",
     }
 )
 
@@ -4115,14 +4942,95 @@ def strict_rule_reserved_skill_ids(
             continue
         when = rule.get("when", {})
         if not isinstance(when, dict) or not matches(
+            {
+                key: value
+                for key, value in when.items()
+                if key in STRICT_RESERVATION_SCOPE_KEYS
+            },
+            state,
+        ):
+            continue
+        # A basic skill has no cooldown to preserve. Reserving an A1 for a
+        # future strict condition can deadlock the actor when every other skill
+        # is cooling down, even though that A1 will still be available in the
+        # intended trigger window.
+        skill_slot = action.get("skillSlot")
+        if skill_slot == 1:
+            continue
+        skill_type_id = action.get("skillTypeId")
+        if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
+            live_skill = next(
+                (
+                    skill
+                    for skill in state.get("skills", [])
+                    if isinstance(skill, dict)
+                    and skill.get("typeId") == skill_type_id
+                ),
+                None,
+            )
+            if isinstance(live_skill, dict) and live_skill.get("slot") == 1:
+                continue
+            reserved.add(skill_type_id)
+    return reserved
+
+
+def default_skill_policy_for_state(
+    action: dict[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    """Overlay the current Chimera form's default skill policy when present."""
+    form_policies = action.get("formPolicies")
+    current_form = canonical_chimera_form(
+        state.get("chimera", {}).get("currentForm")
+    )
+    if not isinstance(form_policies, dict) or not isinstance(current_form, str):
+        return action
+    form_policy = form_policies.get(current_form)
+    if not isinstance(form_policy, dict):
+        return action
+    effective = {**action, **form_policy}
+    # The top-level policy mirrors Ultimate for backwards compatibility.
+    # An opener is not an inheritable default: omitting it from Ram/Lion/Snake
+    # explicitly means that form has no first-turn action.
+    if "firstTurnSkill" not in form_policy:
+        effective.pop("firstTurnSkill", None)
+    effective.pop("formPolicies", None)
+    effective["type"] = "defaultSkillPriority"
+    return effective
+
+
+def default_combat_skill_priority(
+    rules: list[Any], state: dict[str, Any]
+) -> tuple[int, ...]:
+    """Return the active hero's configured priority for the current form."""
+    result: list[int] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        action = rule.get("action")
+        if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
+            continue
+        when = rule.get("when", {})
+        if not isinstance(when, dict) or not matches(
             {key: value for key, value in when.items() if key in DEFAULT_POLICY_SCOPE_KEYS},
             state,
         ):
             continue
-        skill_type_id = action.get("skillTypeId")
-        if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
-            reserved.add(skill_type_id)
-    return reserved
+        effective = default_skill_policy_for_state(action, state)
+        blocked = {
+            value
+            for value in effective.get("blockedSkillTypeIds", [])
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        for entry in effective.get("prioritySkills", []):
+            skill_type_id = entry.get("skillTypeId") if isinstance(entry, dict) else None
+            if (
+                isinstance(skill_type_id, int)
+                and not isinstance(skill_type_id, bool)
+                and skill_type_id not in blocked
+                and skill_type_id not in result
+            ):
+                result.append(skill_type_id)
+    return tuple(result)
 
 
 def default_skill_priority_decision(
@@ -4131,6 +5039,7 @@ def default_skill_priority_decision(
     state: dict[str, Any],
     reserved_skill_type_ids: set[int] | None = None,
 ) -> Decision | None:
+    action = default_skill_policy_for_state(action, state)
     blocked = {
         value
         for value in action.get("blockedSkillTypeIds", [])
@@ -4182,38 +5091,51 @@ def default_skill_entry_decision(
         if isinstance(target_selector, dict)
         else target_selector
     )
+    used_automatic_fallback = False
     if target is None and selector_type != "auto":
         target = select_target({"type": "auto"}, skill, state)
+        used_automatic_fallback = target is not None
     if target is None:
         return None
+    target_label = target[1]
+    if used_automatic_fallback:
+        target_label = f"{target_label}（优先目标不可用，已自动选择）"
     return Decision(
         rule=name,
         skill=skill,
         target_id=target[0],
-        target_label=target[1],
+        target_label=target_label,
     )
 
 
 def first_turn_default_decision(
     rules: list[Any], state: dict[str, Any]
 ) -> Decision | None:
-    """Run a hero's explicit opener before strict and normal default rules."""
-    # Battle models do not use one universal origin here: some modes publish
-    # the first action window as TurnCount 0, while others have already
-    # advanced it to 1. The hero's second personal turn starts at 2.
-    hero_turn_count = state.get("activeHeroTurnCount")
-    if (
-        not isinstance(hero_turn_count, int)
-        or isinstance(hero_turn_count, bool)
-        or hero_turn_count not in {0, 1}
-    ):
-        return None
+    """Run an explicit opener before strict and normal default rules."""
+    is_chimera = ACTIVE_BOSS_MODE == "chimera" and isinstance(
+        state.get("chimera"), dict
+    )
+    form_first_turn = state.get("_chimeraFormHeroFirstTurn")
+    if is_chimera and isinstance(form_first_turn, bool):
+        if not form_first_turn:
+            return None
+    else:
+        # Hydra keeps its battle-wide opener. The fallback also supports direct
+        # strategy evaluation when no live form tracker has annotated the state.
+        hero_turn_count = state.get("activeHeroTurnCount")
+        if (
+            not isinstance(hero_turn_count, int)
+            or isinstance(hero_turn_count, bool)
+            or hero_turn_count not in {0, 1}
+        ):
+            return None
     for rule in rules:
         if not isinstance(rule, dict):
             continue
         action = rule.get("action")
         if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
             continue
+        action = default_skill_policy_for_state(action, state)
         entry = action.get("firstTurnSkill")
         if not isinstance(entry, dict):
             continue
@@ -4223,8 +5145,17 @@ def first_turn_default_decision(
             state,
         ):
             continue
+        current_form = canonical_chimera_form(
+            state.get("_chimeraFormPhase")
+            or state.get("chimera", {}).get("currentForm")
+        )
+        opener_label = (
+            f"{current_form or '当前'}形态首回合技能"
+            if is_chimera
+            else "首回合技能"
+        )
         decision = default_skill_entry_decision(
-            f"{rule.get('name', '默认技能顺序')} · 首回合技能",
+            f"{rule.get('name', '默认技能顺序')} · {opener_label}",
             entry,
             state,
         )
@@ -4239,6 +5170,8 @@ def decision_from_action(
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory | None = None,
     reserved_skill_type_ids: set[int] | None = None,
+    automatic_trial_ids: tuple[int, ...] = (),
+    preferred_skill_type_ids: tuple[int, ...] = (),
 ) -> Decision | None:
     action_type = action.get("type")
     if action_type == "defaultSkillPriority":
@@ -4248,7 +5181,17 @@ def decision_from_action(
     if action_type == "executeTrialRecipe":
         memory = capability_memory or SkillCapabilityMemory()
         memory.observe_state(state)
-        return execute_trial_recipe_decision(name, action, state, memory)
+        scoped_action = action
+        if "trialIds" not in action and automatic_trial_ids:
+            scoped_action = {**action, "trialIds": list(automatic_trial_ids)}
+        return execute_trial_recipe_decision(
+            name,
+            scoped_action,
+            state,
+            memory,
+            preferred_skill_type_ids,
+            reserved_skill_type_ids,
+        )
     if action_type == "maintainEffects":
         memory = capability_memory or SkillCapabilityMemory()
         memory.observe_state(state)
@@ -4291,6 +5234,8 @@ def evaluate_strategy_node(
     depth: int = 0,
     capability_memory: SkillCapabilityMemory | None = None,
     reserved_skill_type_ids: set[int] | None = None,
+    automatic_trial_ids: tuple[int, ...] = (),
+    preferred_skill_type_ids: tuple[int, ...] = (),
 ) -> Decision | None:
     if depth > 32 or not isinstance(node, dict):
         return None
@@ -4306,6 +5251,8 @@ def evaluate_strategy_node(
                 depth=depth + 1,
                 capability_memory=capability_memory,
                 reserved_skill_type_ids=reserved_skill_type_ids,
+                automatic_trial_ids=automatic_trial_ids,
+                preferred_skill_type_ids=preferred_skill_type_ids,
             )
             if decision is not None:
                 return decision
@@ -4318,6 +5265,8 @@ def evaluate_strategy_node(
             depth=depth + 1,
             capability_memory=capability_memory,
             reserved_skill_type_ids=reserved_skill_type_ids,
+            automatic_trial_ids=automatic_trial_ids,
+            preferred_skill_type_ids=preferred_skill_type_ids,
         )
     if node_type == "pause":
         return None
@@ -4354,6 +5303,8 @@ def evaluate_strategy_node(
         state,
         capability_memory,
         reserved_skill_type_ids,
+        automatic_trial_ids,
+        preferred_skill_type_ids,
     )
 
 
@@ -4362,28 +5313,75 @@ def evaluate(
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory | None = None,
 ) -> Decision | None:
+    automatic_trial_ids = objective_trial_ids(config, state)
     rules = config.get("rules", [])
     if isinstance(rules, list):
         first_turn = first_turn_default_decision(rules, state)
         if first_turn is not None:
             return first_turn
+    preferred_skill_type_ids = (
+        default_combat_skill_priority(rules, state)
+        if isinstance(rules, list)
+        else ()
+    )
     tree = config.get("strategyTree")
     if isinstance(tree, dict):
         return evaluate_strategy_node(
-            tree, state, capability_memory=capability_memory
+            tree,
+            state,
+            capability_memory=capability_memory,
+            automatic_trial_ids=automatic_trial_ids,
+            preferred_skill_type_ids=preferred_skill_type_ids,
         )
     if not isinstance(rules, list):
         return None
+    reserved = strict_rule_reserved_skill_ids(rules, state)
+
+    # Explicit cast/transform/effect rules are strict regardless of where the
+    # editor happens to display an automatic-trial rule. Preserve their mutual
+    # order, but always evaluate them before trial automation.
     for rule in rules:
         action = rule.get("action") if isinstance(rule, dict) else None
-        if isinstance(action, dict) and action.get("type") == "defaultSkillPriority":
+        action_type = action.get("type") if isinstance(action, dict) else None
+        if action_type in {"defaultSkillPriority", "executeTrialRecipe"}:
             continue
         decision = evaluate_strategy_node(
-            rule, state, capability_memory=capability_memory
+            rule,
+            state,
+            capability_memory=capability_memory,
+            reserved_skill_type_ids=reserved,
+            automatic_trial_ids=automatic_trial_ids,
+            preferred_skill_type_ids=preferred_skill_type_ids,
         )
         if decision is not None:
             return decision
-    reserved = strict_rule_reserved_skill_ids(rules, state)
+
+    matched_trial_policy_name: str | None = None
+    for rule in rules:
+        action = rule.get("action") if isinstance(rule, dict) else None
+        if not isinstance(action, dict) or action.get("type") != "executeTrialRecipe":
+            continue
+        if (
+            matched_trial_policy_name is None
+            and isinstance(rule, dict)
+        ):
+            when = rule.get("when", {})
+            scoped_state = state_for_rule_target(state, action)
+            if isinstance(when, dict) and matches(when, scoped_state):
+                matched_trial_policy_name = str(
+                    rule.get("name", "按当前试炼自动决策")
+                )
+        decision = evaluate_strategy_node(
+            rule,
+            state,
+            capability_memory=capability_memory,
+            reserved_skill_type_ids=reserved,
+            automatic_trial_ids=automatic_trial_ids,
+            preferred_skill_type_ids=preferred_skill_type_ids,
+        )
+        if decision is not None:
+            return decision
+
     for rule in rules:
         action = rule.get("action") if isinstance(rule, dict) else None
         if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
@@ -4393,9 +5391,20 @@ def evaluate(
             state,
             capability_memory=capability_memory,
             reserved_skill_type_ids=reserved,
+            automatic_trial_ids=automatic_trial_ids,
+            preferred_skill_type_ids=preferred_skill_type_ids,
         )
         if decision is not None:
             return decision
+    if matched_trial_policy_name is not None:
+        memory = capability_memory or SkillCapabilityMemory()
+        memory.observe_state(state)
+        return adaptive_combat_decision(
+            f"{matched_trial_policy_name} · 当前无可执行试炼专用动作",
+            state,
+            memory,
+            excluded_skill_type_ids=reserved,
+        )
     return None
 
 
@@ -4459,7 +5468,7 @@ def process_state(
     execute_requested: bool,
     nonce: int,
     ignore_freshness: bool = False,
-    runtime_state: dict[str, int] | None = None,
+    runtime_state: dict[str, Any] | None = None,
     capability_memory: SkillCapabilityMemory | None = None,
 ) -> bool:
     require_takeover_active(ipc, session_id)
@@ -4476,6 +5485,14 @@ def process_state(
         print(f"暂停：{reason}", flush=True)
         return False
     objective_report = evaluate_objectives(config, state)
+    if runtime_state is not None and ACTIVE_BOSS_MODE == "chimera":
+        runtime_state["lastObjectiveReport"] = {
+            "mandatoryTrialIds": list(objective_report.mandatory_trial_ids),
+            "completedTrialIds": list(objective_report.completed_trial_ids),
+            "missingTrialIds": list(objective_report.missing_trial_ids),
+            "currentDamage": objective_report.current_damage,
+            "minimumDamage": objective_report.minimum_damage,
+        }
     if (
         objective_report.mandatory_trial_ids
         or objective_report.minimum_damage > 0
@@ -4546,6 +5563,10 @@ def process_state(
         else:
             print(f"未知的必要试炼失败处理方式：{behavior}", flush=True)
         return False
+    if ACTIVE_BOSS_MODE == "chimera":
+        annotate_chimera_form_first_turn(
+            state, runtime_state if runtime_state is not None else {}
+        )
     decision = evaluate(config, state, capability_memory)
     active_hero_label = str(
         state.get("activeHeroName")
@@ -4574,9 +5595,14 @@ def process_state(
         f"使用“{skill_label}”，目标“{decision.target_label}”；"
     )
     if decision.rule.endswith("首回合技能"):
-        action_summary += (
-            f"英雄个人首回合（游戏计数 {state.get('activeHeroTurnCount', '?')}）；"
-        )
+        if ACTIVE_BOSS_MODE == "chimera":
+            action_summary += (
+                f"英雄在 {state.get('_chimeraFormPhase', '当前')} 形态的第一次行动；"
+            )
+        else:
+            action_summary += (
+                f"英雄个人首回合（游戏计数 {state.get('activeHeroTurnCount', '?')}）；"
+            )
     if ACTIVE_BOSS_MODE == "hydra":
         hydra = state.get("hydra", {})
         hydra_turn = (
@@ -4740,6 +5766,7 @@ def process_state(
 
 def main() -> int:
     global _PAUSE_EVENT, ACTIVE_BOSS_MODE
+    configure_text_streams()
     parser = argparse.ArgumentParser(description="奇美拉策略控制器")
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
@@ -4762,7 +5789,7 @@ def main() -> int:
         help="选择共享控制器中的联盟 Boss 模式",
     )
     parser.add_argument(
-        "--agent", type=Path, default=Path("build/agent-1231/Release/RaidChimeraAgent.dll")
+        "--agent", type=Path, default=Path("build/agent-1236/Release/RaidChimeraAgent.dll")
     )
     parser.add_argument(
         "--rotation-archive",
@@ -4882,7 +5909,7 @@ def main() -> int:
                 "账户变化会立即停止接管。",
                 flush=True,
             )
-            runtime_state: dict[str, int] = {"regroupRetries": 0}
+            runtime_state: dict[str, Any] = {"regroupRetries": 0}
             rotation_archive = args.rotation_archive.resolve()
             last_rotation_archive_key = archive_rotation_catalog_if_changed(
                 ipc, rotation_archive

@@ -55,7 +55,7 @@ from raid_processes import attach_windows, is_supported_raid_executable, raid_pr
 
 CONTROLLER = PROJECT_ROOT / "tools" / "chimera_controller.py"
 INJECTOR = PROJECT_ROOT / "tools" / "inject_probe.py"
-AGENT = PROJECT_ROOT / "build" / "agent-1231" / "Release" / "RaidChimeraAgent.dll"
+AGENT = PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll"
 DEFAULT_STRATEGY = PROJECT_ROOT / "config" / "chimera-strategy.a1-test.json"
 USER_STRATEGY = PROJECT_ROOT / "config" / "chimera-strategy.user.json"
 
