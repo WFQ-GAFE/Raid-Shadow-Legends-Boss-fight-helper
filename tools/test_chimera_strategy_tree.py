@@ -25,9 +25,11 @@ from chimera_controller import (
     recoverable_command_rejection,
     matches,
     next_chimera_form,
+    pending_mythic_followup_decision,
     process_state,
     require_takeover_active,
     safety_reason,
+    select_target,
     turns_until_form_change,
     trial_recipe_for_id,
     validate_strategy_config,
@@ -994,6 +996,90 @@ def main() -> int:
     )
     assert not matches({"effectConditionsMode": "any"}, state)
     assert not matches({"effectConditionsMode": "xor", "effectConditions": [{}]}, state)
+    nested_condition = {
+        "conditionTree": {
+            "type": "group",
+            "operator": "any",
+            "children": [
+                {
+                    "type": "group",
+                    "operator": "all",
+                    "children": [
+                        {
+                            "type": "effect",
+                            "target": "boss",
+                            "presence": "has",
+                            "effect": {"kind": "Fear"},
+                        },
+                        {
+                            "type": "effect",
+                            "target": "ally",
+                            "heroTypeId": 12345,
+                            "presence": "has",
+                            "effect": {"kind": "Shield"},
+                        },
+                    ],
+                },
+                {
+                    "type": "effect",
+                    "target": "boss",
+                    "presence": "has",
+                    "effect": {"kind": "Stun"},
+                },
+            ],
+        }
+    }
+    assert matches(nested_condition, state)
+    nested_condition["conditionTree"]["children"][0]["negate"] = True
+    assert not matches(nested_condition, state)
+    nested_condition["conditionTree"]["children"][1]["negate"] = True
+    assert matches(nested_condition, state)
+    validate_strategy_config(
+        {
+            "mode": "execute",
+            "rules": [
+                {
+                    "name": "nested-condition",
+                    "when": nested_condition,
+                    "action": {
+                        "type": "cast",
+                        "skillSlot": 1,
+                        "target": {"type": "boss"},
+                    },
+                }
+            ],
+        }
+    )
+
+    dead_target_state = copy.deepcopy(state)
+    dead_target_state["heroes"][1].update({"dead": True, "teamPosition": 2})
+    strict_dead_skill = {"validTargetIds": [1]}
+    assert select_target(
+        {"type": "allyHeroTypeId", "heroTypeId": 12345},
+        strict_dead_skill,
+        dead_target_state,
+    ) is None
+    assert select_target(
+        {"type": "allyPosition", "position": 2},
+        strict_dead_skill,
+        dead_target_state,
+    ) is None
+    revive_target = select_target(
+        {"type": "auto"}, strict_dead_skill, dead_target_state
+    )
+    assert revive_target is not None and revive_target[0] == 1
+    dead_boss_state = copy.deepcopy(state)
+    dead_boss_state["bossMode"] = "hydra"
+    dead_boss_state["hydra"] = {
+        "active": True,
+        "devouringHeadIds": [5],
+    }
+    dead_boss_state["bosses"][0]["dead"] = True
+    assert select_target(
+        {"type": "devouringHead"},
+        {"validTargetIds": [5]},
+        dead_boss_state,
+    ) is None
 
     learned_state = json.loads(json.dumps(state))
     learned_state["skills"].append(
@@ -1096,6 +1182,44 @@ def main() -> int:
         assert loaded_decision is not None
         assert loaded_decision.skill["typeId"] == 104303
 
+        seed_path = Path(directory) / "bundled-seed.json"
+        overlay_path = Path(directory) / "persistent-overlay.json"
+        seed_path.write_text(
+            json.dumps(
+                {
+                    "skills": {
+                        "111": [
+                            {
+                                "targetScope": "boss",
+                                "effectTypeId": 131,
+                                "effectKind": "StatusReduceAttack",
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        overlay_path.write_text(
+            json.dumps(
+                {
+                    "skills": {
+                        "222": [
+                            {
+                                "targetScope": "ally",
+                                "effectTypeId": 280,
+                                "effectKind": "Shield",
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        merged_memory = SkillCapabilityMemory.load(overlay_path, seed_path)
+        assert merged_memory.capabilities_for(111)[0]["effectTypeId"] == 131
+        assert merged_memory.capabilities_for(222)[0]["effectTypeId"] == 280
+
     recipes = load_trial_recipes()
     assert len(recipes) == 27
     assert recipes[8000501]["automation"] == "automatic"
@@ -1108,6 +1232,171 @@ def main() -> int:
     assert ultimate_nightmare_snake_wing["trialId"] == 8000621
     assert ultimate_nightmare_snake_wing["allianceDifficultyId"] == 6
     assert ultimate_nightmare_snake_wing["minimumBossDebuffs"] == 10
+
+    distinct_progress_state = copy.deepcopy(state)
+    distinct_progress_state["chimera"]["currentForm"] = "Ram"
+    distinct_progress_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000604,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "current": 6,
+            "target": 7,
+        }
+    ]
+    distinct_progress_state["heroes"][0]["effects"] = [
+        {
+            "effectTypeId": 220,
+            "effectKindId": 2106,
+            "effectKind": "StatusIncreaseAccuracy",
+            "turnsLeft": 2,
+        }
+    ]
+    distinct_progress_state["bosses"][0]["effects"] = [
+        {
+            "effectTypeId": effect_type_id,
+            "effectKindId": 3100 + index,
+            "effectKind": f"Debuff{index}",
+            "turnsLeft": 2,
+        }
+        for index, effect_type_id in enumerate((10, 20, 30, 40, 70, 80), 1)
+    ]
+    distinct_progress_state["skills"].append(
+        {
+            "slot": 3,
+            "skillId": 2,
+            "typeId": 99041,
+            "ready": True,
+            "blocked": False,
+            "passive": False,
+            "validTargetIds": [5],
+        }
+    )
+    distinct_memory = SkillCapabilityMemory()
+    for effect_type_id in (110, 131, 151):
+        distinct_memory._remember(
+            99041,
+            {
+                "targetScope": "boss",
+                "effectTypeId": effect_type_id,
+                "effectKindId": 3101,
+            },
+        )
+    trial_overlay = {
+        "rules": [
+            {
+                "name": "team-trial-planner",
+                "when": {},
+                "action": {
+                    "type": "executeTrialRecipe",
+                    "trialIds": [8000604],
+                },
+            }
+        ]
+    }
+    distinct_progress_decision = evaluate(
+        trial_overlay, distinct_progress_state, distinct_memory
+    )
+    assert distinct_progress_decision is not None
+    assert distinct_progress_decision.skill["typeId"] == 99041
+    assert distinct_progress_decision.trial_id == 8000604
+    assert "6/7" in distinct_progress_decision.rule
+
+    forbidden_effect_state = copy.deepcopy(distinct_progress_state)
+    forbidden_effect_state["chimera"]["currentForm"] = "Snake"
+    forbidden_effect_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000621,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "current": 8,
+            "target": 10,
+        }
+    ]
+    forbidden_effect_state["bosses"][0]["effects"] = forbidden_effect_state[
+        "bosses"
+    ][0]["effects"][:8]
+    forbidden_effect_state["skills"] = [
+        {
+            "slot": 2,
+            "skillId": 1,
+            "typeId": 99042,
+            "ready": True,
+            "blocked": False,
+            "passive": False,
+            "validTargetIds": [5],
+        },
+        {
+            "slot": 3,
+            "skillId": 2,
+            "typeId": 99043,
+            "ready": True,
+            "blocked": False,
+            "passive": False,
+            "validTargetIds": [5],
+        },
+    ]
+    forbidden_memory = SkillCapabilityMemory()
+    for effect_type_id in (110, 151, 290):
+        forbidden_memory._remember(
+            99042,
+            {
+                "targetScope": "boss",
+                "effectTypeId": effect_type_id,
+                "effectKindId": 3101,
+            },
+        )
+    forbidden_memory._remember(
+        99043,
+        {
+            "targetScope": "boss",
+            "effectTypeId": 350,
+            "effectKindId": 3105,
+        },
+    )
+    forbidden_trial_overlay = copy.deepcopy(trial_overlay)
+    forbidden_trial_overlay["rules"][0]["action"]["trialIds"] = [8000621]
+    forbidden_decision = evaluate(
+        forbidden_trial_overlay, forbidden_effect_state, forbidden_memory
+    )
+    assert forbidden_decision is not None
+    assert forbidden_decision.skill["typeId"] == 99043
+    assert forbidden_decision.trial_id == 8000621
+
+    ally_attack_state = copy.deepcopy(state)
+    ally_attack_state["chimera"]["currentForm"] = "Lion"
+    ally_attack_state["bosses"][0]["challenges"] = [
+        {
+            "id": 8000615,
+            "completed": False,
+            "eligibleNow": True,
+            "activeInChain": True,
+            "current": 0,
+            "target": 1,
+        }
+    ]
+    ally_attack_state["skills"] = [
+        {
+            "slot": 3,
+            "skillId": 2,
+            "typeId": 82503,
+            "name": "Mikage ally attack",
+            "ready": True,
+            "blocked": False,
+            "passive": False,
+            "validTargetIds": [0],
+        }
+    ]
+    ally_attack_overlay = copy.deepcopy(trial_overlay)
+    ally_attack_overlay["rules"][0]["action"]["trialIds"] = [8000615]
+    ally_attack_decision = evaluate(
+        ally_attack_overlay, ally_attack_state, SkillCapabilityMemory()
+    )
+    assert ally_attack_decision is not None
+    assert ally_attack_decision.skill["typeId"] == 82503
+    assert ally_attack_decision.trial_id == 8000615
     mixed_effect_target = {
         "effects": [
             *[
@@ -1721,8 +2010,8 @@ def main() -> int:
         objective_scoped_config, objective_scoped_state, fear_memory
     )
     assert objective_scoped_decision is not None
-    assert objective_scoped_decision.rule == "selected-trial-default"
     assert objective_scoped_decision.skill["typeId"] == 88962
+    assert "保留试炼" in objective_scoped_decision.rule
 
     explicitly_requested_config = json.loads(json.dumps(objective_scoped_config))
     explicitly_requested_config["rules"][0]["action"]["trialIds"] = [8000601]
@@ -1931,6 +2220,104 @@ def main() -> int:
     )
     assert transformed_cast is not None
     assert transformed_cast.skill["typeId"] == 99993
+    cross_form_rule = {
+        "rules": [
+            {
+                "name": "alternate-form-a3",
+                "when": {
+                    "activeHeroTypeId": 8896,
+                    "activeHeroFormIndex": 1,
+                },
+                "action": {
+                    "type": "cast",
+                    "skillTypeId": 99993,
+                    "skillSlot": 3,
+                    "target": "boss",
+                },
+            },
+            {
+                "name": "same-form-fallback",
+                "when": {"activeHeroTypeId": 8896},
+                "action": {
+                    "type": "cast",
+                    "skillTypeId": 88961,
+                    "skillSlot": 1,
+                    "target": "boss",
+                },
+            },
+        ]
+    }
+    cross_form_switch = evaluate(cross_form_rule, state)
+    assert cross_form_switch is not None
+    assert cross_form_switch.skill["typeId"] == 88964
+    assert cross_form_switch.mythic_followup_rule == "alternate-form-a3"
+    assert cross_form_switch.mythic_followup_action == {
+        "type": "cast",
+        "skillTypeId": 99993,
+        "skillSlot": 3,
+        "target": "boss",
+        "formIndex": 1,
+    }
+    unavailable_switch_state = copy.deepcopy(state)
+    unavailable_switch_state["skills"][2]["ready"] = False
+    unavailable_switch_state["skills"][2]["validTargetIds"] = []
+    skipped_cross_form = evaluate(cross_form_rule, unavailable_switch_state)
+    assert skipped_cross_form is not None
+    assert skipped_cross_form.rule == "same-form-fallback"
+    assert skipped_cross_form.skill["typeId"] == 88961
+    cross_form_default = {
+        "rules": [
+            {
+                "name": "mythical-default",
+                "when": {"activeHeroTypeId": 8896},
+                "action": {
+                    "type": "defaultSkillPriority",
+                    "prioritySkills": [
+                        {
+                            "skillTypeId": 99993,
+                            "skillSlot": 3,
+                            "formIndex": 1,
+                            "target": {"type": "boss"},
+                        },
+                        {
+                            "skillTypeId": 88961,
+                            "skillSlot": 1,
+                            "formIndex": 0,
+                            "target": {"type": "boss"},
+                        },
+                    ],
+                    "blockedSkillTypeIds": [],
+                    "reserveStrictRuleSkills": True,
+                },
+            }
+        ]
+    }
+    default_form_switch = evaluate(cross_form_default, state)
+    assert default_form_switch is not None
+    assert default_form_switch.skill["typeId"] == 88964
+    default_without_switch = evaluate(cross_form_default, unavailable_switch_state)
+    assert default_without_switch is not None
+    assert default_without_switch.skill["typeId"] == 88961
+    followup_runtime = {
+        "mythicSkillFollowup": {
+            "activeHeroId": transformed_state["activeHeroId"],
+            "formIndex": 1,
+            "rule": "alternate-form-a3",
+            "action": {
+                "type": "cast",
+                "skillTypeId": 99993,
+                "skillSlot": 3,
+                "formIndex": 1,
+                "target": "boss",
+            },
+        }
+    }
+    followup = pending_mythic_followup_decision(
+        followup_runtime, transformed_state
+    )
+    assert followup is not None
+    assert followup.skill["typeId"] == 99993
+    assert followup.consumes_mythic_followup
     config = {
         "objectives": {
             "mandatoryTrialIds": [8000501, 8000502],

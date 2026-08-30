@@ -231,6 +231,7 @@ select option { color: #e9f0f5; background: #102033; }
   cursor: pointer;
 }
 .trial-trigger:hover, .trial-trigger.has-selection { border-color: var(--line-strong); }
+.trial-trigger:disabled { opacity: .5; cursor: not-allowed; }
 .trial-trigger-icon { width: 40px; height: 40px; display: grid; place-items: center; color: var(--teal); border-radius: 10px; background: rgba(85, 211, 192, .1); }
 .trial-trigger > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
 .trial-trigger small { color: var(--muted); font-size: 10px; }
@@ -634,6 +635,32 @@ select option { color: #e9f0f5; background: #102033; }
 .effect-condition-empty > span { display: grid; gap: 3px; }
 .effect-condition-empty strong { color: #b9c8d2; font-size: 10px; }
 .effect-condition-empty small { color: var(--muted); font-size: 8px; }
+.condition-tree-builder > .effect-condition-heading { margin-bottom: 10px; }
+.condition-tree-group { min-width: 0; padding: 9px; border: 1px solid rgba(49, 81, 106, .72); border-radius: 11px; background: rgba(8, 22, 35, .48); }
+.condition-tree-group.root { padding: 0; border: 0; background: transparent; }
+.condition-tree-group:not(.root) { margin-left: 14px; border-left: 3px solid rgba(85, 211, 192, .24); }
+.condition-tree-group.negated, .condition-tree-leaf.negated { border-color: rgba(228, 189, 105, .48); background: rgba(228, 189, 105, .055); }
+.condition-tree-group-heading { min-width: 0; display: flex; align-items: end; flex-wrap: wrap; gap: 7px; margin-bottom: 8px; }
+.condition-tree-path { align-self: center; margin-right: auto; color: #c7d8e3; font-size: 11px; font-weight: 750; }
+.condition-tree-add-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.condition-tree-add-actions .button { min-height: 34px; padding: 0 9px; }
+.condition-add-menu { position: relative; }
+.condition-add-menu > summary { list-style: none; cursor: pointer; }
+.condition-add-menu > summary::-webkit-details-marker { display: none; }
+.condition-add-menu[open] > summary { color: var(--teal); border-color: var(--line-strong); }
+.condition-add-menu-popover { width: 290px; position: absolute; z-index: 40; right: 0; bottom: calc(100% + 5px); display: grid; gap: 5px; padding: 7px; border: 1px solid #31516a; border-radius: 10px; background: #0a1724; box-shadow: 0 14px 35px rgba(0, 0, 0, .48); }
+.condition-add-menu-popover > button { min-width: 0; display: grid; grid-template-columns: 24px minmax(0, 1fr); align-items: center; gap: 8px; padding: 8px; text-align: left; color: #bfd0da; border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; }
+.condition-add-menu-popover > button:hover { color: #e1fff9; border-color: var(--line-strong); background: rgba(85, 211, 192, .08); }
+.condition-add-menu-popover > button > span { min-width: 0; display: grid; gap: 2px; }
+.condition-add-menu-popover strong { font-size: 11px; }
+.condition-add-menu-popover small { color: var(--muted); font-size: 9px; }
+.condition-negate { min-height: 34px; padding: 0 9px; color: #9db0bd; border: 1px solid var(--line); border-radius: 8px; background: rgba(6, 16, 27, .55); cursor: pointer; font-size: 9px; font-weight: 700; }
+.condition-negate.active { color: #ffe3a4; border-color: rgba(228, 189, 105, .5); background: rgba(228, 189, 105, .11); }
+.condition-tree-children { min-width: 0; display: grid; gap: 8px; }
+.condition-leaf-actions { display: grid; grid-template-columns: repeat(2, 40px); align-items: center; gap: 5px; }
+.condition-leaf-actions .condition-negate { width: 40px; min-height: 34px; padding: 0; font-size: 8px; }
+.effect-condition-row.condition-tree-leaf { grid-template-columns: 34px minmax(170px, .9fr) 126px minmax(210px, 1.25fr) 96px 96px 85px; }
+.cooldown-condition-row.condition-tree-leaf { grid-template-columns: 34px 34px minmax(150px, .8fr) 34px minmax(190px, 1fr) 96px 96px 85px; }
 .advanced-conditions { border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .35); }
 .advanced-conditions summary { padding: 10px 11px; color: #c4d1da; cursor: pointer; font-size: 10px; }
 .advanced-conditions summary small { color: var(--muted); font-size: 9px; }
@@ -770,6 +797,13 @@ body { font-size: 14px; }
 .effect-turn-field span { font-size: 10px; }
 .effect-turn-field input { height: 38px; font-size: 12px; }
 .effect-condition-delete { width: 40px; height: 42px; }
+.condition-tree-path { font-size: 13px; }
+.condition-negate { min-height: 42px; font-size: 11px; }
+.condition-tree-add-actions .button { min-height: 42px; }
+.condition-leaf-actions { grid-template-columns: repeat(2, 40px); }
+.condition-leaf-actions .condition-negate { min-height: 42px; font-size: 9px; }
+.effect-condition-row.condition-tree-leaf { grid-template-columns: 38px minmax(190px, .9fr) 142px minmax(240px, 1.25fr) 106px 106px 85px; }
+.cooldown-condition-row.condition-tree-leaf { grid-template-columns: 38px 40px minmax(180px, .8fr) 40px minmax(220px, 1fr) 106px 106px 85px; }
 .advanced-conditions summary { font-size: 13px; }
 .advanced-conditions summary small { font-size: 11px; }
 .chip { min-height: 36px; font-size: 12px; }

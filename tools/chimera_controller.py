@@ -76,7 +76,8 @@ PROJECT_ROOT = Path(
 ).resolve()
 RESOURCE_ROOT = Path(os.environ.get("CHIMERA_RESOURCE_ROOT", PROJECT_ROOT)).resolve()
 DEFAULT_ROTATION_ARCHIVE = RESOURCE_ROOT / "data" / "chimera-rotation-catalogs.json"
-DEFAULT_CAPABILITY_CACHE = RESOURCE_ROOT / "data" / "chimera-skill-capabilities.json"
+DEFAULT_CAPABILITY_SEED = RESOURCE_ROOT / "data" / "chimera-skill-capabilities.json"
+DEFAULT_CAPABILITY_CACHE = PROJECT_ROOT / "cache" / "chimera-skill-capabilities.json"
 DEFAULT_TRIAL_RECIPES = RESOURCE_ROOT / "data" / "chimera-trial-recipes.json"
 CURRENT_AGENT = (
     PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll"
@@ -90,6 +91,13 @@ _INITIAL_SKILL_NAMES = {
     if isinstance(skill, dict)
     and isinstance(skill.get("typeId"), int)
     and not is_unresolved_skill_name(skill.get("name"))
+}
+_INITIAL_SKILL_DESCRIPTIONS = {
+    int(skill["typeId"]): str(skill.get("description") or "")
+    for hero in load_hero_catalog({}).values()
+    if isinstance(hero, dict)
+    for skill in hero.get("skills", [])
+    if isinstance(skill, dict) and isinstance(skill.get("typeId"), int)
 }
 
 
@@ -172,6 +180,7 @@ SUPPORTED_CONDITION_KEYS = frozenset(
         "effectConditionsMode",
         "skillCooldownConditions",
         "skillCooldownConditionsMode",
+        "conditionTree",
         "allyEffectSlotsAtLeast",
         "allyEffectSlotsAtMost",
         "completedTrialsAll",
@@ -192,6 +201,103 @@ SUPPORTED_CONDITION_KEYS = frozenset(
 )
 
 
+MAX_CONDITION_TREE_DEPTH = 8
+MAX_CONDITION_TREE_NODES = 64
+
+
+def validate_effect_condition(condition: Any, *, path: str) -> None:
+    if not isinstance(condition, dict):
+        raise ValueError(f"{path} 必须是对象")
+    if condition.get("target") not in {
+        "boss", "bossPriority", "bossAny", "bossAll", "ally"
+    }:
+        raise ValueError(f"{path}.target 不受支持")
+    if condition.get("presence") not in {"has", "missing"}:
+        raise ValueError(f"{path}.presence 不受支持")
+    if not isinstance(condition.get("effect"), dict) or not condition["effect"]:
+        raise ValueError(f"{path}.effect 必须指定具体效果")
+    if condition.get("target") == "ally":
+        hero_type_id = condition.get("heroTypeId")
+        if (
+            not isinstance(hero_type_id, int)
+            or isinstance(hero_type_id, bool)
+            or hero_type_id <= 0
+        ):
+            raise ValueError(f"{path}.heroTypeId 必须是正整数")
+
+
+def validate_skill_cooldown_condition(condition: Any, *, path: str) -> None:
+    if not isinstance(condition, dict):
+        raise ValueError(f"{path} 必须是对象")
+    for key in ("heroTypeId", "skillTypeId"):
+        value = condition.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise ValueError(f"{path}.{key} 必须是正整数")
+    lower = condition.get("turnsAtLeast")
+    upper = condition.get("turnsAtMost")
+    if lower is None and upper is None:
+        raise ValueError(f"{path} 至少需要一个冷却回合范围")
+    for key, value in (("turnsAtLeast", lower), ("turnsAtMost", upper)):
+        if value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise ValueError(f"{path}.{key} 必须是非负整数")
+    if isinstance(lower, int) and isinstance(upper, int) and lower > upper:
+        raise ValueError(f"{path} 的最小冷却不能大于最大冷却")
+
+
+def validate_condition_tree(
+    node: Any,
+    *,
+    path: str,
+    depth: int = 0,
+    counter: list[int] | None = None,
+) -> None:
+    """Validate the bounded boolean tree used by the visual condition editor."""
+    if counter is None:
+        counter = [0]
+    counter[0] += 1
+    if counter[0] > MAX_CONDITION_TREE_NODES:
+        raise ValueError(
+            f"{path} 最多包含 {MAX_CONDITION_TREE_NODES} 个条件或逻辑组"
+        )
+    if depth > MAX_CONDITION_TREE_DEPTH:
+        raise ValueError(f"{path} 的嵌套层级过深")
+    if not isinstance(node, dict):
+        raise ValueError(f"{path} 必须是对象")
+    node_type = node.get("type")
+    negate = node.get("negate")
+    if negate is not None and not isinstance(negate, bool):
+        raise ValueError(f"{path}.negate 必须是布尔值")
+    if node_type == "group":
+        if node.get("operator") not in {"all", "any"}:
+            raise ValueError(f"{path}.operator 只允许 all 或 any")
+        children = node.get("children")
+        if not isinstance(children, list) or not children:
+            raise ValueError(f"{path}.children 必须是非空数组")
+        for index, child in enumerate(children):
+            validate_condition_tree(
+                child,
+                path=f"{path}.children[{index}]",
+                depth=depth + 1,
+                counter=counter,
+            )
+        return
+    if node_type == "effect":
+        validate_effect_condition(node, path=path)
+        return
+    if node_type == "skillCooldown":
+        validate_skill_cooldown_condition(node, path=path)
+        return
+    raise ValueError(f"{path}.type 不受支持")
+
+
 def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
     for mode_key, conditions_key in (
         ("effectConditionsMode", "effectConditions"),
@@ -207,47 +313,20 @@ def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
         if not isinstance(effect_conditions, list) or not effect_conditions:
             raise ValueError(f"{path}.effectConditions 必须是非空数组")
         for index, condition in enumerate(effect_conditions):
-            condition_path = f"{path}.effectConditions[{index}]"
-            if not isinstance(condition, dict):
-                raise ValueError(f"{condition_path} 必须是对象")
-            if condition.get("target") not in {
-                "boss", "bossPriority", "bossAny", "bossAll", "ally"
-            }:
-                raise ValueError(f"{condition_path}.target 不受支持")
-            if condition.get("presence") not in {"has", "missing"}:
-                raise ValueError(f"{condition_path}.presence 不受支持")
-            if not isinstance(condition.get("effect"), dict) or not condition["effect"]:
-                raise ValueError(f"{condition_path}.effect 必须指定具体效果")
+            validate_effect_condition(
+                condition, path=f"{path}.effectConditions[{index}]"
+            )
     cooldown_conditions = when.get("skillCooldownConditions")
-    if cooldown_conditions is None:
-        return
-    if not isinstance(cooldown_conditions, list) or not cooldown_conditions:
-        raise ValueError(f"{path}.skillCooldownConditions 必须是非空数组")
-    for index, condition in enumerate(cooldown_conditions):
-        condition_path = f"{path}.skillCooldownConditions[{index}]"
-        if not isinstance(condition, dict):
-            raise ValueError(f"{condition_path} 必须是对象")
-        for key in ("heroTypeId", "skillTypeId"):
-            value = condition.get(key)
-            if (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value <= 0
-            ):
-                raise ValueError(f"{condition_path}.{key} 必须是正整数")
-        lower = condition.get("turnsAtLeast")
-        upper = condition.get("turnsAtMost")
-        if lower is None and upper is None:
-            raise ValueError(f"{condition_path} 至少需要一个冷却回合范围")
-        for key, value in (("turnsAtLeast", lower), ("turnsAtMost", upper)):
-            if value is not None and (
-                not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
-            ):
-                raise ValueError(f"{condition_path}.{key} 必须是非负整数")
-        if isinstance(lower, int) and isinstance(upper, int) and lower > upper:
-            raise ValueError(f"{condition_path} 的最小冷却不能大于最大冷却")
+    if cooldown_conditions is not None:
+        if not isinstance(cooldown_conditions, list) or not cooldown_conditions:
+            raise ValueError(f"{path}.skillCooldownConditions 必须是非空数组")
+        for index, condition in enumerate(cooldown_conditions):
+            validate_skill_cooldown_condition(
+                condition, path=f"{path}.skillCooldownConditions[{index}]"
+            )
+    condition_tree = when.get("conditionTree")
+    if condition_tree is not None:
+        validate_condition_tree(condition_tree, path=f"{path}.conditionTree")
 
 
 def validate_default_skill_policy(policy: Any, *, path: str) -> None:
@@ -280,6 +359,8 @@ def validate_default_skill_policy(policy: Any, *, path: str) -> None:
             entry["isTransform"], bool
         ):
             raise ValueError(f"{entry_path}.isTransform 必须是布尔值")
+        if entry.get("formIndex") not in {None, 0, 1}:
+            raise ValueError(f"{entry_path}.formIndex 只允许 0 或 1")
     first_turn_skill = policy.get("firstTurnSkill")
     if first_turn_skill is not None:
         first_turn_path = f"{path}.firstTurnSkill"
@@ -302,6 +383,8 @@ def validate_default_skill_policy(policy: Any, *, path: str) -> None:
             first_turn_skill["isTransform"], bool
         ):
             raise ValueError(f"{first_turn_path}.isTransform 必须是布尔值")
+        if first_turn_skill.get("formIndex") not in {None, 0, 1}:
+            raise ValueError(f"{first_turn_path}.formIndex 只允许 0 或 1")
     blocked = policy.get("blockedSkillTypeIds", [])
     if (
         not isinstance(blocked, list)
@@ -445,6 +528,8 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
         return
     if action_type != "cast":
         raise ValueError(f"{path}.action.type 不受支持")
+    if action.get("formIndex") not in {None, 0, 1}:
+        raise ValueError(f"{path}.action.formIndex 只允许 0 或 1")
     if "skillSlot" not in action and "skillTypeId" not in action:
         raise ValueError(f"{path}.action 缺少技能")
     if "target" not in action:
@@ -489,6 +574,10 @@ class Decision:
     target_label: str
     capability_probe: bool = False
     trial_id: int | None = None
+    mythic_followup_rule: str | None = None
+    mythic_followup_action: dict[str, Any] | None = None
+    mythic_followup_form_index: int | None = None
+    consumes_mythic_followup: bool = False
 
 
 class SkillCapabilityMemory:
@@ -501,27 +590,40 @@ class SkillCapabilityMemory:
         self.dirty = False
 
     @classmethod
-    def load(cls, path: Path) -> "SkillCapabilityMemory":
+    def load(
+        cls,
+        path: Path,
+        seed_path: Path | None = None,
+    ) -> "SkillCapabilityMemory":
         memory = cls()
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            return memory
-        skills = payload.get("skills") if isinstance(payload, dict) else None
-        if not isinstance(skills, dict):
-            return memory
-        for raw_skill_type_id, raw_capabilities in skills.items():
+        sources: list[Path] = []
+        for source in (seed_path, path):
+            if source is not None and source not in sources:
+                sources.append(source)
+        for source in sources:
             try:
-                skill_type_id = int(raw_skill_type_id)
-            except (TypeError, ValueError):
+                payload = json.loads(source.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
                 continue
-            if skill_type_id <= 0 or not isinstance(raw_capabilities, list):
+            skills = payload.get("skills") if isinstance(payload, dict) else None
+            if isinstance(skills, dict):
+                for raw_skill_type_id, raw_capabilities in skills.items():
+                    try:
+                        skill_type_id = int(raw_skill_type_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if skill_type_id <= 0 or not isinstance(raw_capabilities, list):
+                        continue
+                    for capability in raw_capabilities:
+                        if isinstance(capability, dict):
+                            memory._remember(
+                                skill_type_id, capability, mark_dirty=False
+                            )
+            performance = (
+                payload.get("performance") if isinstance(payload, dict) else None
+            )
+            if not isinstance(performance, dict):
                 continue
-            for capability in raw_capabilities:
-                if isinstance(capability, dict):
-                    memory._remember(skill_type_id, capability, mark_dirty=False)
-        performance = payload.get("performance") if isinstance(payload, dict) else None
-        if isinstance(performance, dict):
             for raw_skill_type_id, raw_statistics in performance.items():
                 try:
                     skill_type_id = int(raw_skill_type_id)
@@ -921,7 +1023,6 @@ def validate_strategy_config(
         trial_ids = configured_trial_ids(raw_trial_ids)
         if len(trial_ids) != len(raw_trial_items):
             raise ValueError("必要试炼 ID 必须是互不重复的正整数")
-
     minimum_damage = objectives.get("minimumDamage", 0)
     if (
         not isinstance(minimum_damage, (int, float))
@@ -1955,7 +2056,8 @@ def selected_ally(
         (
             hero
             for hero in heroes
-            if (actor_id is None or hero.get("id") == actor_id)
+            if hero.get("dead") is not True
+            and (actor_id is None or hero.get("id") == actor_id)
             and (hero_type_id is None or hero.get("typeId") == hero_type_id)
         ),
         None,
@@ -2085,6 +2187,153 @@ def select_transform_skill(
         )
     ]
     return max(candidates, key=lambda skill: skill["slot"], default=None)
+
+
+def configured_skill_form_index(action: Any) -> int | None:
+    """Return the Mythical form that owns a configured non-transform skill."""
+    if not isinstance(action, dict):
+        return None
+    value = action.get("formIndex")
+    return (
+        value
+        if isinstance(value, int)
+        and not isinstance(value, bool)
+        and value in {0, 1}
+        else None
+    )
+
+
+def automatic_mythic_form_switch_decision(
+    name: str,
+    configured_action: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    desired_form_index: int | None = None,
+) -> Decision | None:
+    """Switch forms once before a configured skill that belongs to the other form."""
+    desired_form = (
+        desired_form_index
+        if desired_form_index in {0, 1}
+        else configured_skill_form_index(configured_action)
+    )
+    current_form = state.get("activeHeroFormIndex")
+    if (
+        desired_form not in {0, 1}
+        or current_form not in {0, 1}
+        or current_form == desired_form
+        or state.get("activeHeroIsMetamorph") is not True
+        or state.get("_mythicAutoFormSwitchBlocked") is True
+    ):
+        return None
+    transform_skill = select_transform_skill(state)
+    if transform_skill is None:
+        return None
+    target = select_target({"type": "self"}, transform_skill, state)
+    if target is None:
+        return None
+    followup_action = {
+        **configured_action,
+        "type": "cast",
+        "formIndex": desired_form,
+    }
+    form_label = "变形形态" if desired_form == 1 else "原始形态"
+    return Decision(
+        rule=f"{name} · 自动切换至{form_label}",
+        skill=transform_skill,
+        target_id=target[0],
+        target_label=target[1],
+        mythic_followup_rule=name,
+        mythic_followup_action=followup_action,
+        mythic_followup_form_index=desired_form,
+    )
+
+
+def pending_mythic_followup_decision(
+    runtime_state: dict[str, Any], state: dict[str, Any]
+) -> Decision | None:
+    """Finish the configured skill immediately after an automatic form switch."""
+    intent = runtime_state.get("mythicSkillFollowup")
+    if not isinstance(intent, dict):
+        return None
+    active_hero_id = state.get("activeHeroId")
+    if active_hero_id != intent.get("activeHeroId"):
+        runtime_state.pop("mythicSkillFollowup", None)
+        return None
+    desired_form = intent.get("formIndex")
+    if state.get("activeHeroFormIndex") != desired_form:
+        runtime_state.pop("mythicSkillFollowup", None)
+        state["_mythicAutoFormSwitchBlocked"] = True
+        return None
+    action = intent.get("action")
+    name = intent.get("rule")
+    if not isinstance(action, dict) or not isinstance(name, str):
+        runtime_state.pop("mythicSkillFollowup", None)
+        return None
+    decision = decision_from_action(name, action, state)
+    if decision is None:
+        # The inactive form's cooldown/targets are not visible until after the
+        # switch. If the requested skill is still unusable, abandon this one
+        # attempt and let same-form/later rules continue without ping-ponging.
+        runtime_state.pop("mythicSkillFollowup", None)
+        state["_mythicAutoFormSwitchBlocked"] = True
+        return None
+    return Decision(
+        rule=decision.rule,
+        skill=decision.skill,
+        target_id=decision.target_id,
+        target_label=decision.target_label,
+        capability_probe=decision.capability_probe,
+        trial_id=decision.trial_id,
+        consumes_mythic_followup=True,
+    )
+
+
+def match_condition_tree(
+    node: Any,
+    state: dict[str, Any],
+    *,
+    depth: int = 0,
+    counter: list[int] | None = None,
+) -> bool:
+    """Evaluate a bounded nested AND/OR tree of visual condition leaves."""
+    if counter is None:
+        counter = [0]
+    counter[0] += 1
+    if (
+        counter[0] > MAX_CONDITION_TREE_NODES
+        or depth > MAX_CONDITION_TREE_DEPTH
+        or not isinstance(node, dict)
+    ):
+        return False
+    node_type = node.get("type")
+    matched = False
+    if node_type == "group":
+        operator = node.get("operator")
+        children = node.get("children")
+        if operator not in {"all", "any"} or not isinstance(children, list) or not children:
+            return False
+        results = [
+            match_condition_tree(
+                child,
+                state,
+                depth=depth + 1,
+                counter=counter,
+            )
+            for child in children
+        ]
+        matched = all(results) if operator == "all" else any(results)
+    elif node_type == "effect":
+        matched = match_effect_conditions(
+            [node],
+            current_boss(state),
+            state_entities(state, "bosses"),
+            state_entities(state, "heroes"),
+        )
+    elif node_type == "skillCooldown":
+        matched = match_skill_cooldown_conditions([node], state)
+    else:
+        return False
+    return not matched if node.get("negate") is True else matched
 
 
 def matches(when: dict[str, Any], state: dict[str, Any]) -> bool:
@@ -2345,6 +2594,11 @@ def matches(when: dict[str, Any], state: dict[str, Any]) -> bool:
     ):
         return False
 
+    if "conditionTree" in when and not match_condition_tree(
+        when["conditionTree"], state
+    ):
+        return False
+
     if (
         "effectConditionsMode" in when and "effectConditions" not in when
     ) or (
@@ -2533,8 +2787,14 @@ def select_target(
             if isinstance(item.get("id"), int)
             and not isinstance(item.get("id"), bool)
         }
+        known_boss_ids = {
+            item.get("id")
+            for item in bosses
+            if isinstance(item.get("id"), int)
+            and not isinstance(item.get("id"), bool)
+        }
         for target_id in valid_ordered:
-            if target_id not in hero_ids:
+            if target_id not in hero_ids and target_id not in known_boss_ids:
                 return (
                     target_id,
                     f"六头蛇目标 {target_id}（蛇头快照未同步，已按技能合法目标选择）",
@@ -2623,8 +2883,25 @@ def select_target(
         return target["id"], target.get("name", str(target["id"]))
     if selector_type == "boss":
         if isinstance(chimera_id, int) and chimera_id in valid:
-            return chimera_id, "奇美拉"
-        boss = next((item for item in bosses if item.get("id") in valid), None)
+            chimera = next(
+                (
+                    item
+                    for item in bosses
+                    if item.get("id") == chimera_id
+                    and item.get("dead") is not True
+                ),
+                None,
+            )
+            if chimera is not None:
+                return chimera_id, "奇美拉"
+        boss = next(
+            (
+                item
+                for item in bosses
+                if item.get("id") in valid and item.get("dead") is not True
+            ),
+            None,
+        )
         return (
             (boss["id"], boss.get("name", "Boss"))
             if boss
@@ -2650,7 +2927,17 @@ def select_target(
                 or item.get("id") in devouring_head_ids
             ]
             if not candidates:
-                unresolved_ids = sorted(devouring_head_ids & valid)
+                known_boss_ids = {
+                    item.get("id")
+                    for item in bosses
+                    if isinstance(item.get("id"), int)
+                    and not isinstance(item.get("id"), bool)
+                }
+                unresolved_ids = sorted(
+                    target_id
+                    for target_id in devouring_head_ids & valid
+                    if target_id not in known_boss_ids
+                )
                 if unresolved_ids:
                     target_id = unresolved_ids[0]
                     return target_id, hydra_devouring_target_label(
@@ -2685,9 +2972,16 @@ def select_target(
             )
         return target["id"], target_label
     if selector_type == "self":
+        active = next(
+            (item for item in heroes if item.get("id") == active_hero_id),
+            None,
+        )
         return (
             (active_hero_id, "自己")
-            if isinstance(active_hero_id, int) and active_hero_id in valid
+            if isinstance(active_hero_id, int)
+            and active_hero_id in valid
+            and active is not None
+            and active.get("dead") is not True
             else None
         )
     if selector_type == "allyHeroTypeId":
@@ -2696,7 +2990,9 @@ def select_target(
             (
                 item
                 for item in heroes
-                if item.get("typeId") == wanted and item.get("id") in valid
+                if item.get("typeId") == wanted
+                and item.get("id") in valid
+                and item.get("dead") is not True
             ),
             None,
         )
@@ -2709,7 +3005,9 @@ def select_target(
             (
                 item
                 for item in heroes
-                if item.get("teamPosition") == position and item.get("id") in valid
+                if item.get("teamPosition") == position
+                and item.get("id") in valid
+                and item.get("dead") is not True
             ),
             None,
         )
@@ -4022,10 +4320,17 @@ def effect_requirement_target(
     if scope == "boss":
         return select_target({"type": "boss"}, skill, state)
     active_hero_id = state.get("activeHeroId")
-    if capability is not None and capability.get("targetScope") == "self":
-        return select_target({"type": "self"}, skill, state)
-    if scope == "activeHero":
-        return select_target({"type": "self"}, skill, state)
+    # An effect recipient is not necessarily the command target. Many Chimera
+    # skills attack the boss and then buff the whole team (or debuff the boss
+    # after targeting self). Prefer self when legal, otherwise use the game's
+    # authoritative automatic target set instead of rejecting such providers.
+    if isinstance(active_hero_id, int) and active_hero_id in valid:
+        self_target = select_target({"type": "self"}, skill, state)
+        if self_target is not None:
+            return self_target
+    automatic = select_target({"type": "auto"}, skill, state)
+    if automatic is not None:
+        return automatic
     heroes = [
         hero
         for hero in state_entities(state, "heroes")
@@ -4057,12 +4362,20 @@ def effect_target_has_capacity(
     *,
     capability: dict[str, Any] | None = None,
 ) -> bool:
-    entities = state_entities(state, "heroes") + state_entities(state, "bosses")
-    target = next((entity for entity in entities if entity.get("id") == target_id), None)
-    if target is None:
+    recipients = effect_requirement_entities(requirement, state)
+    if not recipients:
+        entities = state_entities(state, "heroes") + state_entities(state, "bosses")
+        fallback = next(
+            (entity for entity in entities if entity.get("id") == target_id), None
+        )
+        recipients = [fallback] if fallback is not None else []
+    if not recipients:
         return False
     for selector in requirement_effect_selectors(requirement):
-        if entity_has_effect(target, effect_identity_selector(selector)):
+        if any(
+            entity_has_effect(recipient, effect_identity_selector(selector))
+            for recipient in recipients
+        ):
             return True
     polarity = effect_polarity(capability)
     if polarity is None:
@@ -4074,10 +4387,98 @@ def effect_target_has_capacity(
         if len(polarities) == 1:
             polarity = next(iter(polarities))
     if polarity == "buff":
-        return buff_count(target) < 10
+        return any(buff_count(recipient) < 10 for recipient in recipients)
     if polarity == "debuff":
-        return debuff_count(target) < 10
-    return effect_count(target) < 10
+        return any(debuff_count(recipient) < 10 for recipient in recipients)
+    return any(effect_count(recipient) < 10 for recipient in recipients)
+
+
+KNOWN_SKILL_MECHANICS: dict[int, frozenset[str]] = {
+    # Lady Mikage: both attacks explicitly call one/all allies into the hit.
+    82501: frozenset({"allyAttack"}),
+    82503: frozenset({"allyAttack"}),
+}
+
+
+def skill_mechanics(skill: dict[str, Any]) -> set[str]:
+    skill_type_id = skill.get("typeId")
+    result = set(
+        KNOWN_SKILL_MECHANICS.get(skill_type_id, frozenset())
+        if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool)
+        else ()
+    )
+    description = str(
+        skill.get("description")
+        or (
+            _INITIAL_SKILL_DESCRIPTIONS.get(skill_type_id, "")
+            if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool)
+            else ""
+        )
+    ).casefold()
+    compact = " ".join(description.replace("<", " <").split())
+    if any(
+        token in compact
+        for token in (
+            "组队攻击",
+            "一起攻击",
+            "加入战斗",
+            "join the attack",
+            "team up",
+            "ally attack",
+        )
+    ):
+        result.add("allyAttack")
+    if "反击" in compact or "counterattack" in compact:
+        result.add("counterattack")
+    if any(
+        token in compact
+        for token in ("敌人最大生命值", "enemy max hp", "enemy's max hp")
+    ):
+        result.add("enemyMaxHpDamage")
+    if any(token in compact for token in ("复活所有", "复活多名", "revives all")):
+        result.add("multiTargetRevive")
+    if any(token in compact for token in ("反弹伤害", "reflect damage")):
+        result.add("reflectDamage")
+    if "苦痛连接" in compact or "pain link" in compact:
+        result.add("painLink")
+    return result
+
+
+def skill_has_forbidden_effect(
+    skill_type_id: int,
+    capability_memory: SkillCapabilityMemory,
+    forbidden_effect_type_ids: set[int],
+) -> bool:
+    return bool(
+        forbidden_effect_type_ids
+        and any(
+            capability.get("effectTypeId") in forbidden_effect_type_ids
+            for capability in capability_memory.capabilities_for(skill_type_id)
+        )
+    )
+
+
+def skill_violates_trial_recipe(
+    skill: dict[str, Any],
+    recipe: dict[str, Any],
+    capability_memory: SkillCapabilityMemory,
+) -> bool:
+    skill_type_id = skill.get("typeId")
+    if not isinstance(skill_type_id, int) or isinstance(skill_type_id, bool):
+        return True
+    forbidden = {
+        value
+        for value in recipe.get("forbiddenBossEffectTypeIds", [])
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
+    if skill_has_forbidden_effect(skill_type_id, capability_memory, forbidden):
+        return True
+    mechanics = skill_mechanics(skill)
+    required = set(recipe.get("requiredMechanics", []))
+    return bool(
+        ("excludeEnemyMaxHpDamage" in required and "enemyMaxHpDamage" in mechanics)
+        or ("excludeCounterattack" in required and "counterattack" in mechanics)
+    )
 
 
 def maintain_effects_decision(
@@ -4085,6 +4486,10 @@ def maintain_effects_decision(
     action: dict[str, Any],
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory,
+    *,
+    forbidden_effect_type_ids: set[int] | None = None,
+    excluded_skill_type_ids: set[int] | None = None,
+    trial_id: int | None = None,
 ) -> Decision | None:
     requirements = [
         requirement
@@ -4094,6 +4499,8 @@ def maintain_effects_decision(
     ]
     if not requirements:
         return None
+    forbidden = forbidden_effect_type_ids or set()
+    excluded = excluded_skill_type_ids or set()
     ready_skills = [
         skill
         for skill in state.get("skills", [])
@@ -4102,6 +4509,10 @@ def maintain_effects_decision(
         and skill.get("blocked") is not True
         and skill.get("passive") is not True
         and isinstance(skill.get("typeId"), int)
+        and skill.get("typeId") not in excluded
+        and not skill_has_forbidden_effect(
+            int(skill["typeId"]), capability_memory, forbidden
+        )
     ]
 
     # Known providers always take priority over exploration.
@@ -4126,6 +4537,7 @@ def maintain_effects_decision(
                     skill=skill,
                     target_id=target[0],
                     target_label=target[1],
+                    trial_id=trial_id,
                 )
 
     if action.get("probeUnknownSkills") is not True:
@@ -4166,6 +4578,7 @@ def maintain_effects_decision(
                 target_id=target[0],
                 target_label=target[1],
                 capability_probe=True,
+                trial_id=trial_id,
             )
     return None
 
@@ -4306,11 +4719,14 @@ def select_ready_boss_damage(
     *,
     trial_id: int | None = None,
     preferred_skill_type_ids: tuple[int, ...] = (),
+    recipe: dict[str, Any] | None = None,
+    excluded_skill_type_ids: set[int] | None = None,
 ) -> Decision | None:
     boss = current_boss(state)
     if boss is None or not isinstance(boss.get("id"), int):
         return None
     boss_id = int(boss["id"])
+    excluded = excluded_skill_type_ids or set()
     candidates = [
         skill
         for skill in state.get("skills", [])
@@ -4319,6 +4735,14 @@ def select_ready_boss_damage(
         and skill.get("blocked") is not True
         and skill.get("passive") is not True
         and boss_id in skill.get("validTargetIds", [])
+        and skill.get("typeId") not in excluded
+        and (
+            recipe is None
+            or capability_memory is None
+            or not skill_violates_trial_recipe(
+                skill, recipe, capability_memory
+            )
+        )
     ]
     preferred_rank = {
         skill_type_id: len(preferred_skill_type_ids) - index
@@ -4607,10 +5031,13 @@ def new_effect_decision(
     capability_memory: SkillCapabilityMemory,
     *,
     forbidden_effect_type_ids: set[int] | None = None,
+    excluded_skill_type_ids: set[int] | None = None,
     probe_unknown_skills: bool = False,
     probe_transforms: bool = False,
+    trial_id: int | None = None,
 ) -> Decision | None:
     forbidden = forbidden_effect_type_ids or set()
+    excluded = excluded_skill_type_ids or set()
     if scope == "boss":
         target_entities = [current_boss(state)]
     else:
@@ -4633,6 +5060,10 @@ def new_effect_decision(
         and skill.get("blocked") is not True
         and skill.get("passive") is not True
         and isinstance(skill.get("typeId"), int)
+        and skill.get("typeId") not in excluded
+        and not skill_has_forbidden_effect(
+            int(skill["typeId"]), capability_memory, forbidden
+        )
     ]
     for skill in sorted(
         ready_skills, key=lambda value: int(value.get("slot", 0)), reverse=True
@@ -4671,6 +5102,7 @@ def new_effect_decision(
                 skill=skill,
                 target_id=target[0],
                 target_label=target[1],
+                trial_id=trial_id,
             )
 
     if not probe_unknown_skills:
@@ -4709,8 +5141,332 @@ def new_effect_decision(
             target_id=target[0],
             target_label=target[1],
             capability_probe=True,
+            trial_id=trial_id,
         )
     return None
+
+
+def trial_progress_values(trial: dict[str, Any]) -> tuple[float | None, float | None]:
+    current = trial.get("current")
+    target = trial.get("target")
+    return (
+        float(current)
+        if isinstance(current, (int, float)) and not isinstance(current, bool)
+        else None,
+        float(target)
+        if isinstance(target, (int, float)) and not isinstance(target, bool)
+        else None,
+    )
+
+
+def trial_progress_text(trial: dict[str, Any]) -> str:
+    current, target = trial_progress_values(trial)
+    if current is not None and target is not None and target > 0:
+        if trial.get("basedOnDamage") is True or target >= 1000:
+            return f"{current:g}/{target:g}"
+        return f"{int(round(current))}/{int(round(target))}"
+    ratio = trial.get("progressRatio")
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        return f"{max(0.0, min(float(ratio), 1.0)) * 100:.0f}%"
+    return "等待游戏计数"
+
+
+def trial_used_skill_type_ids(
+    planner_state: dict[str, Any] | None,
+    trial_id: int,
+) -> set[int]:
+    if not isinstance(planner_state, dict):
+        return set()
+    raw = planner_state.get("trialContributors", {}).get(str(trial_id), [])
+    return {
+        value
+        for value in raw
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+
+
+def distinct_effect_progress_decision(
+    name: str,
+    scope: str,
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory,
+    *,
+    trial_id: int,
+    forbidden_effect_type_ids: set[int] | None = None,
+    excluded_skill_type_ids: set[int] | None = None,
+    used_skill_type_ids: set[int] | None = None,
+) -> Decision | None:
+    """Prefer the ready skill that can add the most still-useful identities."""
+    forbidden = forbidden_effect_type_ids or set()
+    excluded = excluded_skill_type_ids or set()
+    used = used_skill_type_ids or set()
+    targets = (
+        [current_boss(state)]
+        if scope == "boss"
+        else effect_requirement_entities(
+            {"scope": "activeHero" if scope == "activeHero" else "anyAlly"},
+            state,
+        )
+    )
+    present = {
+        effect_type_identity(effect)
+        for entity in targets
+        if isinstance(entity, dict)
+        for effect in entity.get("effects", [])
+        if isinstance(effect, dict)
+    }
+    candidates: list[
+        tuple[tuple[int, int, int, float, int], dict[str, Any], tuple[int, str]]
+    ] = []
+    for skill in state.get("skills", []):
+        if (
+            not isinstance(skill, dict)
+            or skill.get("ready") is not True
+            or skill.get("blocked") is True
+            or skill.get("passive") is True
+            or not isinstance(skill.get("typeId"), int)
+        ):
+            continue
+        skill_type_id = int(skill["typeId"])
+        if skill_type_id in excluded or skill_has_forbidden_effect(
+            skill_type_id, capability_memory, forbidden
+        ):
+            continue
+        capabilities = [
+            capability
+            for capability in capability_memory.capabilities_for(skill_type_id)
+            if (
+                scope == "boss"
+                and capability.get("targetScope") == "boss"
+                and effect_polarity(capability) != "buff"
+            )
+            or (
+                scope != "boss"
+                and capability.get("targetScope") in {"self", "ally"}
+                and effect_polarity(capability) != "debuff"
+            )
+        ]
+        if not capabilities:
+            continue
+        identities = {effect_type_identity(capability) for capability in capabilities}
+        new_identities = identities - present
+        if not new_identities and skill_type_id in used:
+            continue
+        representative = next(
+            (
+                capability
+                for capability in capabilities
+                if effect_type_identity(capability) in new_identities
+            ),
+            capabilities[0],
+        )
+        requirement = {
+            "scope": scope,
+            "effect": effect_identity_selector(representative),
+            "keepTurnsAtLeast": 0,
+        }
+        target = effect_requirement_target(
+            requirement, skill, state, capability=representative
+        )
+        if target is None or not effect_target_has_capacity(
+            requirement, target[0], state, capability=representative
+        ):
+            continue
+        damage = capability_memory.damage_score(skill_type_id, trial_id) or 0.0
+        rank = (
+            int(skill_type_id not in used),
+            len(new_identities),
+            len(identities),
+            float(damage),
+            int(skill.get("slot", 0)),
+        )
+        candidates.append((rank, skill, target))
+    if not candidates:
+        return None
+    _, skill, target = max(candidates, key=lambda item: item[0])
+    return Decision(
+        rule=name,
+        skill=skill,
+        target_id=target[0],
+        target_label=target[1],
+        trial_id=trial_id,
+    )
+
+
+PERIODIC_DAMAGE_EFFECT_KINDS = frozenset(
+    {"ContinuousDamage", "IncreasePoisoning", "FireMark", "ElectricMark"}
+)
+PERIODIC_DAMAGE_EFFECT_TYPE_IDS = frozenset({80, 81, 470, 500})
+
+
+def periodic_damage_skill_decision(
+    name: str,
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory,
+    *,
+    trial_id: int,
+    recipe: dict[str, Any],
+    excluded_skill_type_ids: set[int] | None = None,
+) -> Decision | None:
+    excluded = excluded_skill_type_ids or set()
+    boss = current_boss(state)
+    if boss is None:
+        return None
+    candidates: list[tuple[int, float, int, dict[str, Any], tuple[int, str]]] = []
+    for skill in state.get("skills", []):
+        if (
+            not isinstance(skill, dict)
+            or skill.get("ready") is not True
+            or skill.get("blocked") is True
+            or skill.get("passive") is True
+            or not isinstance(skill.get("typeId"), int)
+        ):
+            continue
+        skill_type_id = int(skill["typeId"])
+        if skill_type_id in excluded or skill_violates_trial_recipe(
+            skill, recipe, capability_memory
+        ):
+            continue
+        periodic = [
+            capability
+            for capability in capability_memory.capabilities_for(skill_type_id)
+            if capability.get("targetScope") == "boss"
+            and (
+                capability.get("effectTypeId") in PERIODIC_DAMAGE_EFFECT_TYPE_IDS
+                or capability.get("effectKind") in PERIODIC_DAMAGE_EFFECT_KINDS
+            )
+        ]
+        if not periodic:
+            continue
+        target = select_target({"type": "boss"}, skill, state)
+        if target is None:
+            continue
+        candidates.append(
+            (
+                len({effect_type_identity(value) for value in periodic}),
+                float(capability_memory.damage_score(skill_type_id, trial_id) or 0),
+                int(skill.get("slot", 0)),
+                skill,
+                target,
+            )
+        )
+    if not candidates:
+        return None
+    _, _, _, skill, target = max(candidates, key=lambda item: item[:3])
+    return Decision(
+        rule=name,
+        skill=skill,
+        target_id=target[0],
+        target_label=target[1],
+        trial_id=trial_id,
+    )
+
+
+def mechanic_trial_decision(
+    name: str,
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory,
+    *,
+    trial_id: int,
+    recipe: dict[str, Any],
+    excluded_skill_type_ids: set[int] | None = None,
+) -> Decision | None:
+    excluded = excluded_skill_type_ids or set()
+    required = set(recipe.get("requiredMechanics", []))
+    wanted: set[str] = set()
+    if "allyAttackDamage" in required:
+        wanted.add("allyAttack")
+    if "counterattackDamage" in required:
+        wanted.add("counterattack")
+    if "multiTargetRevive" in required:
+        wanted.add("multiTargetRevive")
+    if "reflectDamage" in required or "passiveReflect" in required:
+        wanted.add("reflectDamage")
+    if "painLink" in required:
+        wanted.add("painLink")
+    if not wanted:
+        return None
+    for skill in sorted(
+        (item for item in state.get("skills", []) if isinstance(item, dict)),
+        key=lambda item: int(item.get("slot", 0)),
+        reverse=True,
+    ):
+        skill_type_id = skill.get("typeId")
+        if (
+            skill.get("ready") is not True
+            or skill.get("blocked") is True
+            or skill.get("passive") is True
+            or not isinstance(skill_type_id, int)
+            or skill_type_id in excluded
+            or skill_violates_trial_recipe(skill, recipe, capability_memory)
+            or skill_mechanics(skill).isdisjoint(wanted)
+        ):
+            continue
+        target = select_target({"type": "auto"}, skill, state)
+        if target is None:
+            continue
+        return Decision(
+            rule=name,
+            skill=skill,
+            target_id=target[0],
+            target_label=target[1],
+            trial_id=trial_id,
+        )
+    return None
+
+
+def active_provider_skill_ids_for_recipe(
+    recipe: dict[str, Any],
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory,
+) -> set[int]:
+    """Return this actor's non-basic skills that a near-future trial needs."""
+    requirements = [
+        value for value in recipe.get("requirements", []) if isinstance(value, dict)
+    ]
+    goal = recipe.get("actionGoal")
+    required_mechanics = set(recipe.get("requiredMechanics", []))
+    result: set[int] = set()
+    for skill in state.get("skills", []):
+        if (
+            not isinstance(skill, dict)
+            or not isinstance(skill.get("typeId"), int)
+            or int(skill.get("slot", 0)) <= 1
+            or skill.get("passive") is True
+            or skill_violates_trial_recipe(skill, recipe, capability_memory)
+        ):
+            continue
+        skill_type_id = int(skill["typeId"])
+        capabilities = capability_memory.capabilities_for(skill_type_id)
+        supplies_requirement = any(
+            capability_matches_requirement(capability, requirement)
+            for capability in capabilities
+            for requirement in requirements
+        )
+        supplies_count = (
+            int(recipe.get("minimumBossDebuffs", 0)) > 0
+            and any(capability.get("targetScope") == "boss" for capability in capabilities)
+        ) or (
+            int(recipe.get("minimumActiveHeroBuffs", 0)) > 0
+            and any(
+                capability.get("targetScope") in {"self", "ally"}
+                for capability in capabilities
+            )
+        )
+        mechanics = skill_mechanics(skill)
+        supplies_mechanic = bool(
+            ("allyAttackDamage" in required_mechanics and "allyAttack" in mechanics)
+            or ("counterattackDamage" in required_mechanics and "counterattack" in mechanics)
+            or ("multiTargetRevive" in required_mechanics and "multiTargetRevive" in mechanics)
+        )
+        supplies_periodic = goal == "periodicDamage" and any(
+            capability.get("effectKind") in PERIODIC_DAMAGE_EFFECT_KINDS
+            or capability.get("effectTypeId") in PERIODIC_DAMAGE_EFFECT_TYPE_IDS
+            for capability in capabilities
+        )
+        if supplies_requirement or supplies_count or supplies_mechanic or supplies_periodic:
+            result.add(skill_type_id)
+    return result
 
 
 def execute_trial_recipe_decision(
@@ -4720,6 +5476,7 @@ def execute_trial_recipe_decision(
     capability_memory: SkillCapabilityMemory,
     preferred_skill_type_ids: tuple[int, ...] = (),
     reserved_skill_type_ids: set[int] | None = None,
+    planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
     reserved = reserved_skill_type_ids or set()
     if reserved:
@@ -4741,15 +5498,22 @@ def execute_trial_recipe_decision(
         return None
     trials = trial_status_by_id(state)
     requested_ids = configured_trial_ids(action.get("trialIds"))
-    eligible_ids = [
+    live_eligible = [
         trial_id
         for trial_id, trial in trials.items()
         if trial.get("eligibleNow") is True and trial.get("completed") is not True
     ]
-    if requested_ids:
-        eligible_ids = [trial_id for trial_id in requested_ids if trial_id in eligible_ids]
+    live_eligible_set = set(live_eligible)
+    eligible_ids = (
+        [trial_id for trial_id in requested_ids if trial_id in live_eligible_set]
+        if requested_ids
+        else live_eligible
+    )
     if not eligible_ids and requested_ids:
-        prepare_within = int(action.get("prepareWithinBossTurns", 0))
+        # Two boss turns are enough to avoid wasting a key cooldown immediately
+        # before the relevant form, while remaining short enough not to replace
+        # the user's normal rotation through an entire Ultimate phase.
+        prepare_within = int(action.get("prepareWithinBossTurns", 2))
         remaining = turns_until_form_change(state)
         upcoming_form = canonical_chimera_form(next_chimera_form(state))
         if (
@@ -4761,8 +5525,7 @@ def execute_trial_recipe_decision(
                 trial = trials.get(trial_id, {})
                 recipe = trial_recipe_for_id(recipes, trial_id)
                 if (
-                    trial.get("activeInChain") is True
-                    and trial.get("completed") is not True
+                    trial.get("completed") is not True
                     and recipe
                     and canonical_chimera_form(recipe.get("form")) == upcoming_form
                 ):
@@ -4771,19 +5534,63 @@ def execute_trial_recipe_decision(
                         for requirement in recipe.get("requirements", [])
                         if isinstance(requirement, dict)
                     ]
-                    return select_upcoming_trial_preparation(
+                    preparation = maintain_effects_decision(
+                        f"{name} · 为{recipe.get('name', trial_id)}准备：提前建立条件",
+                        {
+                            "requirements": requirements,
+                            "probeUnknownSkills": False,
+                            "probeTransforms": False,
+                        },
+                        state,
+                        capability_memory,
+                        forbidden_effect_type_ids={
+                            value
+                            for value in recipe.get(
+                                "forbiddenBossEffectTypeIds", []
+                            )
+                            if isinstance(value, int)
+                            and not isinstance(value, bool)
+                        },
+                        excluded_skill_type_ids=reserved,
+                        trial_id=trial_id,
+                    )
+                    if preparation is not None:
+                        return preparation
+                    future_reserved = active_provider_skill_ids_for_recipe(
+                        recipe, state, capability_memory
+                    )
+                    if future_reserved:
+                        safe = adaptive_combat_decision(
+                            f"{name} · 保留下一试炼关键技能",
+                            state,
+                            capability_memory,
+                            excluded_skill_type_ids=reserved | future_reserved,
+                        )
+                        if safe is not None:
+                            return safe
+                    general_preparation = select_upcoming_trial_preparation(
                         f"{name} · 为{recipe.get('name', trial_id)}准备",
                         state,
                         capability_memory,
                         requirements,
                     )
+                    if general_preparation is not None:
+                        return general_preparation
+                    break
     probe_unknown = action.get("probeUnknownSkills") is True
     probe_transforms = action.get("probeTransforms") is True
     for trial_id in eligible_ids:
         recipe = trial_recipe_for_id(recipes, trial_id)
-        if not recipe or recipe.get("automation") == "manual":
+        if not recipe:
             continue
         recipe_name = str(recipe.get("name", trial_id))
+        trial = trials.get(trial_id, {})
+        progress_label = trial_progress_text(trial)
+        forbidden = {
+            value
+            for value in recipe.get("forbiddenBossEffectTypeIds", [])
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
         requirements = [
             requirement
             for requirement in recipe.get("requirements", [])
@@ -4801,6 +5608,9 @@ def execute_trial_recipe_decision(
                 maintenance_action,
                 state,
                 capability_memory,
+                forbidden_effect_type_ids=forbidden,
+                excluded_skill_type_ids=reserved,
+                trial_id=trial_id,
             )
             if maintenance is not None:
                 return maintenance
@@ -4808,9 +5618,20 @@ def execute_trial_recipe_decision(
                 effect_requirement_satisfied(requirement, state)
                 for requirement in requirements
             ):
-                # This actor cannot currently supply the trial effect.  Defer
-                # to its explicit/default combat policy instead of consuming
-                # every such turn with a basic attack.
+                # Another enrolled hero may be the provider. Spend this turn
+                # without consuming this actor's own near-future provider.
+                provider_ids = active_provider_skill_ids_for_recipe(
+                    recipe, state, capability_memory
+                )
+                if provider_ids:
+                    safe = adaptive_combat_decision(
+                        f"{name} · {recipe_name}（{progress_label}）：等待队友补齐条件",
+                        state,
+                        capability_memory,
+                        excluded_skill_type_ids=reserved | provider_ids,
+                    )
+                    if safe is not None:
+                        return safe
                 continue
 
         boss = current_boss(state)
@@ -4821,11 +5642,6 @@ def execute_trial_recipe_decision(
             ),
             None,
         )
-        forbidden = {
-            value
-            for value in recipe.get("forbiddenBossEffectTypeIds", [])
-            if isinstance(value, int) and not isinstance(value, bool)
-        }
         if boss is not None and any(
             isinstance(effect, dict)
             and effect.get("effectTypeId") in forbidden
@@ -4835,30 +5651,70 @@ def execute_trial_recipe_decision(
         maximum_boss_buffs = int(recipe.get("maximumBossBuffs", 10))
         if boss is not None and buff_count(boss) > maximum_boss_buffs:
             continue
+        trial_current, trial_target = trial_progress_values(trial)
+        counter_still_open = bool(
+            recipe.get("actionGoal") == "applyDistinctEffects"
+            and trial_current is not None
+            and trial_target is not None
+            and trial_current < trial_target
+        )
         minimum_boss_debuffs = int(recipe.get("minimumBossDebuffs", 0))
-        if debuff_count(boss) < minimum_boss_debuffs:
-            decision = new_effect_decision(
-                f"{name} · {recipe_name}：累积Boss减益",
+        if minimum_boss_debuffs and (
+            debuff_count(boss) < minimum_boss_debuffs or counter_still_open
+        ):
+            decision = distinct_effect_progress_decision(
+                f"{name} · {recipe_name}（{progress_label}）：补充不同Boss减益",
                 "boss",
                 state,
                 capability_memory,
+                trial_id=trial_id,
                 forbidden_effect_type_ids=forbidden,
-                probe_unknown_skills=probe_unknown,
-                probe_transforms=probe_transforms,
+                excluded_skill_type_ids=reserved,
+                used_skill_type_ids=trial_used_skill_type_ids(
+                    planner_state, trial_id
+                ),
             )
+            if decision is None:
+                decision = new_effect_decision(
+                    f"{name} · {recipe_name}（{progress_label}）：探索新Boss减益",
+                    "boss",
+                    state,
+                    capability_memory,
+                    forbidden_effect_type_ids=forbidden,
+                    excluded_skill_type_ids=reserved,
+                    probe_unknown_skills=probe_unknown,
+                    probe_transforms=probe_transforms,
+                    trial_id=trial_id,
+                )
             if decision is not None:
                 return decision
             continue
         minimum_active_buffs = int(recipe.get("minimumActiveHeroBuffs", 0))
-        if buff_count(active) < minimum_active_buffs:
-            decision = new_effect_decision(
-                f"{name} · {recipe_name}：累积行动者增益",
+        if minimum_active_buffs and (
+            buff_count(active) < minimum_active_buffs or counter_still_open
+        ):
+            decision = distinct_effect_progress_decision(
+                f"{name} · {recipe_name}（{progress_label}）：补充不同行动者增益",
                 "activeHero",
                 state,
                 capability_memory,
-                probe_unknown_skills=probe_unknown,
-                probe_transforms=probe_transforms,
+                trial_id=trial_id,
+                excluded_skill_type_ids=reserved,
+                used_skill_type_ids=trial_used_skill_type_ids(
+                    planner_state, trial_id
+                ),
             )
+            if decision is None:
+                decision = new_effect_decision(
+                    f"{name} · {recipe_name}（{progress_label}）：探索新行动者增益",
+                    "activeHero",
+                    state,
+                    capability_memory,
+                    excluded_skill_type_ids=reserved,
+                    probe_unknown_skills=probe_unknown,
+                    probe_transforms=probe_transforms,
+                    trial_id=trial_id,
+                )
             if decision is not None:
                 return decision
             continue
@@ -4871,30 +5727,58 @@ def execute_trial_recipe_decision(
         goal = recipe.get("actionGoal")
         if goal == "damageBoss":
             damage = select_ready_boss_damage(
-                f"{name} · {recipe_name}：满足条件后攻击",
+                f"{name} · {recipe_name}（{progress_label}）：条件完整，推进试炼伤害",
                 state,
                 capability_memory,
                 trial_id=trial_id,
                 preferred_skill_type_ids=preferred_skill_type_ids,
+                recipe=recipe,
+                excluded_skill_type_ids=reserved,
             )
             if damage is not None:
                 return damage
             continue
-        if goal in {"periodicDamage", "applyDistinctEffects"}:
-            # Maintenance/count branches above are the meaningful trial work.
-            # Once those conditions are established, let the hero's normal
-            # rotation continue instead of forcing a boss-targeting basic hit.
+        if goal == "periodicDamage":
+            periodic = periodic_damage_skill_decision(
+                f"{name} · {recipe_name}（{progress_label}）：施加试炼持续伤害",
+                state,
+                capability_memory,
+                trial_id=trial_id,
+                recipe=recipe,
+                excluded_skill_type_ids=reserved,
+            )
+            if periodic is not None:
+                return periodic
+            continue
+        if goal == "applyDistinctEffects":
+            # The authoritative counter may complete only after the game
+            # processes the effect. If no new legal identity exists now, keep
+            # the normal rotation instead of repeating a known duplicate.
+            continue
+        if goal == "manual" or recipe.get("automation") == "manual":
+            mechanic = mechanic_trial_decision(
+                f"{name} · {recipe_name}（{progress_label}）：执行已识别的专用机制",
+                state,
+                capability_memory,
+                trial_id=trial_id,
+                recipe=recipe,
+                excluded_skill_type_ids=reserved,
+            )
+            if mechanic is not None:
+                return mechanic
             continue
         if goal in {
             "survive", "absorbDamage", "reflectDamage", "resistDebuffs"
         }:
             defensive = new_effect_decision(
-                f"{name} · {recipe_name}：补充防护效果",
+                f"{name} · {recipe_name}（{progress_label}）：补充防护效果",
                 "activeHero",
                 state,
                 capability_memory,
+                excluded_skill_type_ids=reserved,
                 probe_unknown_skills=probe_unknown,
                 probe_transforms=probe_transforms,
+                trial_id=trial_id,
             )
             if defensive is not None:
                 return defensive
@@ -4902,8 +5786,41 @@ def execute_trial_recipe_decision(
             # demanding a player basic attack.  Preserve the configured combat
             # rotation when no useful defensive effect can be added now.
             continue
-    # Automatic trials are an overlay, not a complete combat rotation.  Let
-    # later strict/default rules run when this actor cannot advance a trial.
+    # Preserve this actor's providers for the current/next selected chain
+    # milestone. Returning a safe alternative here prevents a later default
+    # rule from putting the only provider on cooldown just before it is needed.
+    reservation_candidates = list(eligible_ids)
+    reservation_candidates.extend(
+        trial_id
+        for trial_id in requested_ids
+        if trial_id not in reservation_candidates
+        and trials.get(trial_id, {}).get("completed") is not True
+    )
+    current_form = canonical_chimera_form(
+        state.get("chimera", {}).get("currentForm")
+    )
+    for trial_id in reservation_candidates:
+        recipe = trial_recipe_for_id(recipes, trial_id)
+        if not recipe:
+            continue
+        recipe_form = canonical_chimera_form(recipe.get("form"))
+        if recipe_form != current_form and trial_id not in eligible_ids:
+            continue
+        provider_ids = active_provider_skill_ids_for_recipe(
+            recipe, state, capability_memory
+        )
+        if not provider_ids:
+            continue
+        safe = adaptive_combat_decision(
+            f"{name} · 保留试炼 {trial_id} 的关键技能",
+            state,
+            capability_memory,
+            excluded_skill_type_ids=reserved | provider_ids,
+        )
+        if safe is not None:
+            return safe
+    # Automatic trials are still an overlay: when this actor has no relevant
+    # provider, its configured default rule remains the combat baseline.
     return None
 
 
@@ -5068,6 +5985,9 @@ def default_skill_entry_decision(
         skill = select_transform_skill(state, entry)
         target_selector: Any = {"type": "self"}
     else:
+        form_switch = automatic_mythic_form_switch_decision(name, entry, state)
+        if form_switch is not None:
+            return form_switch
         skill = select_skill(entry, state)
         target_selector = entry.get("target", {"type": "auto"})
     if skill is None:
@@ -5172,6 +6092,7 @@ def decision_from_action(
     reserved_skill_type_ids: set[int] | None = None,
     automatic_trial_ids: tuple[int, ...] = (),
     preferred_skill_type_ids: tuple[int, ...] = (),
+    planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
     action_type = action.get("type")
     if action_type == "defaultSkillPriority":
@@ -5191,6 +6112,7 @@ def decision_from_action(
             memory,
             preferred_skill_type_ids,
             reserved_skill_type_ids,
+            planner_state,
         )
     if action_type == "maintainEffects":
         memory = capability_memory or SkillCapabilityMemory()
@@ -5236,6 +6158,7 @@ def evaluate_strategy_node(
     reserved_skill_type_ids: set[int] | None = None,
     automatic_trial_ids: tuple[int, ...] = (),
     preferred_skill_type_ids: tuple[int, ...] = (),
+    planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
     if depth > 32 or not isinstance(node, dict):
         return None
@@ -5253,6 +6176,7 @@ def evaluate_strategy_node(
                 reserved_skill_type_ids=reserved_skill_type_ids,
                 automatic_trial_ids=automatic_trial_ids,
                 preferred_skill_type_ids=preferred_skill_type_ids,
+                planner_state=planner_state,
             )
             if decision is not None:
                 return decision
@@ -5267,6 +6191,7 @@ def evaluate_strategy_node(
             reserved_skill_type_ids=reserved_skill_type_ids,
             automatic_trial_ids=automatic_trial_ids,
             preferred_skill_type_ids=preferred_skill_type_ids,
+            planner_state=planner_state,
         )
     if node_type == "pause":
         return None
@@ -5295,7 +6220,37 @@ def evaluate_strategy_node(
         return None
     if node_type == "rule":
         state = state_for_rule_target(state, action)
-        if not matches(node.get("when", {}), state):
+        when = node.get("when", {})
+        if not matches(when, state):
+            desired_form = configured_skill_form_index(action)
+            if (
+                action.get("type") == "cast"
+                and isinstance(when, dict)
+                and desired_form is None
+                and when.get("activeHeroFormIndex") in {0, 1}
+            ):
+                desired_form = when["activeHeroFormIndex"]
+            conditions_without_hero_form = (
+                {
+                    key: value
+                    for key, value in when.items()
+                    if key != "activeHeroFormIndex"
+                }
+                if isinstance(when, dict)
+                else {}
+            )
+            if (
+                action.get("type") == "cast"
+                and desired_form in {0, 1}
+                and state.get("activeHeroFormIndex") != desired_form
+                and matches(conditions_without_hero_form, state)
+            ):
+                return automatic_mythic_form_switch_decision(
+                    str(node.get("name", f"strategy-node-{depth}")),
+                    action,
+                    state,
+                    desired_form_index=desired_form,
+                )
             return None
     return decision_from_action(
         str(node.get("name", f"strategy-node-{depth}")),
@@ -5305,6 +6260,7 @@ def evaluate_strategy_node(
         reserved_skill_type_ids,
         automatic_trial_ids,
         preferred_skill_type_ids,
+        planner_state,
     )
 
 
@@ -5312,6 +6268,7 @@ def evaluate(
     config: dict[str, Any],
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory | None = None,
+    planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
     automatic_trial_ids = objective_trial_ids(config, state)
     rules = config.get("rules", [])
@@ -5332,6 +6289,7 @@ def evaluate(
             capability_memory=capability_memory,
             automatic_trial_ids=automatic_trial_ids,
             preferred_skill_type_ids=preferred_skill_type_ids,
+            planner_state=planner_state,
         )
     if not isinstance(rules, list):
         return None
@@ -5352,6 +6310,7 @@ def evaluate(
             reserved_skill_type_ids=reserved,
             automatic_trial_ids=automatic_trial_ids,
             preferred_skill_type_ids=preferred_skill_type_ids,
+            planner_state=planner_state,
         )
         if decision is not None:
             return decision
@@ -5378,6 +6337,7 @@ def evaluate(
             reserved_skill_type_ids=reserved,
             automatic_trial_ids=automatic_trial_ids,
             preferred_skill_type_ids=preferred_skill_type_ids,
+            planner_state=planner_state,
         )
         if decision is not None:
             return decision
@@ -5393,6 +6353,7 @@ def evaluate(
             reserved_skill_type_ids=reserved,
             automatic_trial_ids=automatic_trial_ids,
             preferred_skill_type_ids=preferred_skill_type_ids,
+            planner_state=planner_state,
         )
         if decision is not None:
             return decision
@@ -5458,6 +6419,98 @@ def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str
     return "已检查 " + "；".join(shown) + suffix
 
 
+def refresh_trial_planner_runtime(
+    runtime_state: dict[str, Any] | None,
+    state: dict[str, Any],
+) -> None:
+    if not isinstance(runtime_state, dict):
+        return
+    pointers = state.get("pointers", {})
+    context = pointers.get("context") if isinstance(pointers, dict) else None
+    turn = state.get("chimera", {}).get("turnCount")
+    previous_context = runtime_state.get("trialPlannerBattleContext")
+    previous_turn = runtime_state.get("trialPlannerLastBossTurn")
+    new_battle = bool(
+        isinstance(context, int)
+        and context > 0
+        and isinstance(previous_context, int)
+        and previous_context > 0
+        and context != previous_context
+    ) or bool(
+        isinstance(turn, int)
+        and isinstance(previous_turn, int)
+        and turn < previous_turn
+    )
+    if new_battle:
+        runtime_state.pop("trialContributors", None)
+    if isinstance(context, int) and context > 0:
+        runtime_state["trialPlannerBattleContext"] = context
+    if isinstance(turn, int):
+        runtime_state["trialPlannerLastBossTurn"] = turn
+
+
+def remember_trial_contributor(
+    runtime_state: dict[str, Any] | None,
+    trial_id: int,
+    skill_type_id: int,
+) -> None:
+    if not isinstance(runtime_state, dict) or trial_id <= 0 or skill_type_id <= 0:
+        return
+    contributors = runtime_state.setdefault("trialContributors", {})
+    if not isinstance(contributors, dict):
+        contributors = {}
+        runtime_state["trialContributors"] = contributors
+    used = contributors.setdefault(str(trial_id), [])
+    if not isinstance(used, list):
+        used = []
+        contributors[str(trial_id)] = used
+    if skill_type_id not in used:
+        used.append(skill_type_id)
+
+
+def request_chimera_regroup_retry(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    agent: Path,
+    ipc: AgentIpc,
+    session_id: int,
+    nonce: int,
+    runtime_state: dict[str, Any] | None,
+) -> None:
+    """Use the single verified in-battle regroup/restart path and budget."""
+    objectives = config.get("objectives", {})
+    objective_config = objectives if isinstance(objectives, dict) else {}
+    runtime = runtime_state if runtime_state is not None else {}
+    used = int(runtime.get("regroupRetries", 0))
+    maximum = int(objective_config.get("maxRegroupRetries", 10))
+    if maximum > 0 and used >= maximum:
+        raise RuntimeError(f"已达到免费重整重试上限 {maximum}，停止接管")
+    free_regroup_and_retry_manual(
+        ipc,
+        pid=int(state["pid"]),
+        agent=agent,
+        session_id=session_id,
+        nonce=nonce,
+        desired_hero_ids=(
+            list(config["team"]["heroInstanceIds"])
+            if isinstance(config.get("team"), dict)
+            and isinstance(config["team"].get("heroInstanceIds"), list)
+            else None
+        ),
+        desired_hero_type_ids=(
+            list(config["team"].get("heroTypeIds", config["team"].get("heroIds")))
+            if isinstance(config.get("team"), dict)
+            and isinstance(
+                config["team"].get("heroTypeIds", config["team"].get("heroIds")),
+                list,
+            )
+            else None
+        ),
+    )
+    runtime["regroupRetries"] = used + 1
+
+
 def process_state(
     config: dict[str, Any],
     state: dict[str, Any],
@@ -5507,7 +6560,6 @@ def process_state(
         )
     if objective_report.mandatory_impossible:
         objectives = config.get("objectives", {})
-        objective_config = objectives if isinstance(objectives, dict) else {}
         behavior = (
             objectives.get(
                 "onMandatoryTrialImpossible", "free_regroup_and_retry_manual"
@@ -5522,33 +6574,15 @@ def process_state(
         )
         execute = execute_requested and config.get("mode") == "execute"
         if behavior == "free_regroup_and_retry_manual" and execute:
-            runtime = runtime_state if runtime_state is not None else {}
-            used = int(runtime.get("regroupRetries", 0))
-            maximum = int(objective_config.get("maxRegroupRetries", 10))
-            if maximum > 0 and used >= maximum:
-                raise RuntimeError(
-                    f"已达到免费重整重试上限 {maximum}，停止接管"
-                )
-            free_regroup_and_retry_manual(
-                ipc,
-                pid=int(state["pid"]),
+            request_chimera_regroup_retry(
+                config,
+                state,
                 agent=agent,
+                ipc=ipc,
                 session_id=session_id,
                 nonce=nonce,
-                desired_hero_ids=(
-                    list(config["team"]["heroInstanceIds"])
-                    if isinstance(config.get("team"), dict)
-                    and isinstance(config["team"].get("heroInstanceIds"), list)
-                    else None
-                ),
-                desired_hero_type_ids=(
-                    list(config["team"].get("heroTypeIds", config["team"].get("heroIds")))
-                    if isinstance(config.get("team"), dict)
-                    and isinstance(config["team"].get("heroTypeIds", config["team"].get("heroIds")), list)
-                    else None
-                ),
+                runtime_state=runtime_state,
             )
-            runtime["regroupRetries"] = used + 1
             return False
         if behavior == "free_regroup_and_stop" and execute:
             free_regroup_and_stop(
@@ -5564,10 +6598,17 @@ def process_state(
             print(f"未知的必要试炼失败处理方式：{behavior}", flush=True)
         return False
     if ACTIVE_BOSS_MODE == "chimera":
+        refresh_trial_planner_runtime(runtime_state, state)
         annotate_chimera_form_first_turn(
             state, runtime_state if runtime_state is not None else {}
         )
-    decision = evaluate(config, state, capability_memory)
+    decision = (
+        pending_mythic_followup_decision(runtime_state, state)
+        if runtime_state is not None
+        else None
+    )
+    if decision is None:
+        decision = evaluate(config, state, capability_memory, runtime_state)
     active_hero_label = str(
         state.get("activeHeroName")
         or (
@@ -5693,6 +6734,20 @@ def process_state(
         raise RuntimeError(
             f"代理拒绝请求：{acknowledgement.get('reason') or acknowledgement.get('status')}"
         )
+    if execute and runtime_state is not None:
+        if (
+            isinstance(decision.mythic_followup_action, dict)
+            and isinstance(decision.mythic_followup_rule, str)
+            and decision.mythic_followup_form_index in {0, 1}
+        ):
+            runtime_state["mythicSkillFollowup"] = {
+                "activeHeroId": state.get("activeHeroId"),
+                "formIndex": decision.mythic_followup_form_index,
+                "rule": decision.mythic_followup_rule,
+                "action": decision.mythic_followup_action,
+            }
+        elif decision.consumes_mythic_followup:
+            runtime_state.pop("mythicSkillFollowup", None)
     if execute and decision.capability_probe and capability_memory is not None:
         skill_type_id = skill.get("typeId")
         if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
@@ -5715,6 +6770,39 @@ def process_state(
                 flush=True,
             )
             return True
+        if isinstance(decision.trial_id, int) and decision.trial_id > 0:
+            before_trial = trial_status_by_id(state).get(decision.trial_id, {})
+            after_trial = trial_status_by_id(advanced).get(decision.trial_id, {})
+            before_current, before_target = trial_progress_values(before_trial)
+            after_current, after_target = trial_progress_values(after_trial)
+            progressed = bool(
+                before_current is not None
+                and after_current is not None
+                and after_current > before_current
+            ) or bool(
+                before_trial.get("completed") is not True
+                and after_trial.get("completed") is True
+            )
+            skill_type_id = skill.get("typeId")
+            if progressed and isinstance(skill_type_id, int):
+                remember_trial_contributor(
+                    runtime_state, decision.trial_id, skill_type_id
+                )
+            if before_current is not None and after_current is not None:
+                target_value = (
+                    after_target
+                    if after_target is not None
+                    else before_target
+                )
+                target_label = (
+                    f"/{target_value:g}" if target_value is not None else ""
+                )
+                print(
+                    f"试炼 {decision.trial_id} 计数："
+                    f"{before_current:g}→{after_current:g}{target_label}"
+                    + ("（本技能已记为有效贡献者）" if progressed else ""),
+                    flush=True,
+                )
         if capability_memory is not None:
             learned = capability_memory.observe_state(advanced)
             if learned:
@@ -5806,6 +6894,12 @@ def main() -> int:
         help="Only rewritten when a new skill-to-effect capability is learned.",
     )
     parser.add_argument(
+        "--capability-seed",
+        type=Path,
+        default=DEFAULT_CAPABILITY_SEED,
+        help="Bundled read-only baseline merged before the persistent learned cache.",
+    )
+    parser.add_argument(
         "--auto-start",
         action="store_true",
         help="在当前 Boss 队伍界面用已选队伍开始首场战斗",
@@ -5853,7 +6947,10 @@ def main() -> int:
     ):
         agent = CURRENT_AGENT.resolve()
     capability_cache = args.capability_cache.resolve()
-    capability_memory = SkillCapabilityMemory.load(capability_cache)
+    capability_memory = SkillCapabilityMemory.load(
+        capability_cache,
+        args.capability_seed.resolve(),
+    )
     mutex = NamedMutex(rf"Local\RaidChimeraController-{args.pid}")
     try:
         mutex.acquire()

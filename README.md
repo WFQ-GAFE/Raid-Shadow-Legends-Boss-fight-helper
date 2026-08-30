@@ -6,9 +6,9 @@ A local Windows strategy editor and battle controller for the Alliance Chimera a
 
 一款面向 **RAID: Shadow Legends** 联盟奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
 
-Current release: **1.0.1**.
+Current release: **1.0.2**.
 
-当前版本：**1.0.1**。
+当前版本：**1.0.2**。
 
 Download the .exe tool in release page.
 
@@ -38,8 +38,8 @@ The application reads live battle state from the selected RAID client, evaluates
   显示英雄头像、技能图标、增益/减益图标以及各战斗专属的 Boss 图标。
 - Keeps Chimera and Hydra strategies, live state, and run logs separate.<br>
   将奇美拉与六头蛇的策略、实时状态和运行日志相互独立保存。
-- Supports strict ordered rules, fallback skill orders, skill cooldown conditions, effect conditions, remaining-turn checks, and preferred targets.<br>
-  支持严格的规则顺序、备用技能顺序、技能冷却条件、效果条件、剩余回合检查和优先目标。
+- Supports strict ordered rules, fallback skill orders, nested AND/OR/NOT condition groups, effect and cooldown checks, remaining-turn checks, and preferred targets.<br>
+  支持严格的规则顺序、备用技能顺序、可嵌套的 AND/OR/NOT 条件组、效果与冷却检查、剩余回合检查和优先目标。
 - Revalidates the account, acting hero, skill readiness, legal targets, battle mode, and current turn on the game thread before executing an action.<br>
   执行动作前，会在游戏线程中再次校验账户、行动英雄、技能就绪状态、合法目标、战斗模式和当前回合。
 - Allows normal manual interaction. A stale action is rejected safely when manual input or turn progression changes the battle state.<br>

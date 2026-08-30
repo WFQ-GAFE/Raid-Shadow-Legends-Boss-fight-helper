@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   Activity,
@@ -380,8 +380,29 @@ type SkillCooldownConditionValue = {
   turnsAtMost: string
 }
 
+type ConditionEffectNode = EffectConditionValue & {
+  type: 'effect'
+  negate: boolean
+}
+
+type ConditionCooldownNode = SkillCooldownConditionValue & {
+  type: 'skillCooldown'
+  negate: boolean
+}
+
+type ConditionGroupNode = {
+  id: string
+  type: 'group'
+  operator: 'all' | 'any'
+  negate: boolean
+  children: ConditionTreeNode[]
+}
+
+type ConditionTreeNode = ConditionEffectNode | ConditionCooldownNode | ConditionGroupNode
+
 let effectConditionSequence = 0
 let skillCooldownConditionSequence = 0
+let conditionGroupSequence = 0
 
 function createEffectCondition(value: Partial<EffectConditionValue> = {}): EffectConditionValue {
   effectConditionSequence += 1
@@ -409,12 +430,118 @@ function createSkillCooldownCondition(value: Partial<SkillCooldownConditionValue
   }
 }
 
+function createConditionEffect(value: Partial<EffectConditionValue> = {}): ConditionEffectNode {
+  return { ...createEffectCondition(value), type: 'effect', negate: false }
+}
+
+function createConditionCooldown(value: Partial<SkillCooldownConditionValue> = {}): ConditionCooldownNode {
+  return { ...createSkillCooldownCondition(value), type: 'skillCooldown', negate: false }
+}
+
+function createConditionGroup(
+  children: ConditionTreeNode[] = [],
+  operator: 'all' | 'any' = 'all',
+): ConditionGroupNode {
+  conditionGroupSequence += 1
+  return {
+    id: `condition-group-${conditionGroupSequence}`,
+    type: 'group',
+    operator,
+    negate: false,
+    children,
+  }
+}
+
+function updateConditionTreeNode(
+  node: ConditionTreeNode,
+  id: string,
+  updater: (current: ConditionTreeNode) => ConditionTreeNode,
+): ConditionTreeNode {
+  if (node.id === id) return updater(node)
+  if (node.type !== 'group') return node
+  return {
+    ...node,
+    children: node.children.map((child) => updateConditionTreeNode(child, id, updater)),
+  }
+}
+
+function removeConditionTreeNode(node: ConditionGroupNode, id: string): ConditionGroupNode {
+  return {
+    ...node,
+    children: node.children
+      .filter((child) => child.id !== id)
+      .map((child) => child.type === 'group' ? removeConditionTreeNode(child, id) : child),
+  }
+}
+
+function conditionLeafCount(node: ConditionTreeNode): number {
+  return node.type === 'group'
+    ? node.children.reduce((sum, child) => sum + conditionLeafCount(child), 0)
+    : 1
+}
+
+function hydrateConditionTree(raw: unknown): ConditionTreeNode | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const value = raw as JsonObject
+  const negate = value.negate === true
+  if (value.type === 'group') {
+    const children = Array.isArray(value.children)
+      ? value.children.flatMap((child) => {
+          const hydrated = hydrateConditionTree(child)
+          return hydrated ? [hydrated] : []
+        })
+      : []
+    if (!children.length) return undefined
+    return { ...createConditionGroup(children, value.operator === 'any' ? 'any' : 'all'), negate }
+  }
+  if (value.type === 'effect') {
+    const target = value.target === 'ally'
+      ? 'ally'
+      : value.target === 'bossAll'
+        ? 'bossAll'
+        : value.target === 'bossAny'
+          ? 'bossAny'
+          : value.target === 'bossPriority'
+            ? 'bossPriority'
+            : 'boss'
+    const effect = value.effect && typeof value.effect === 'object' && !Array.isArray(value.effect)
+      ? value.effect as JsonObject
+      : {}
+    const token = effect.effectTypeId == null ? String(effect.kind ?? '') : String(effect.effectTypeId)
+    if (!token) return undefined
+    return {
+      ...createConditionEffect({
+        target,
+        presence: value.presence === 'missing' ? 'missing' : 'has',
+        heroTypeId: target === 'ally' && typeof value.heroTypeId === 'number' ? String(value.heroTypeId) : '',
+        token,
+        turnsAtLeast: effect.turnsAtLeast == null ? '' : String(effect.turnsAtLeast),
+        turnsAtMost: effect.turnsAtMost == null ? '' : String(effect.turnsAtMost),
+      }),
+      negate,
+    }
+  }
+  if (value.type === 'skillCooldown') {
+    if (typeof value.heroTypeId !== 'number' || typeof value.skillTypeId !== 'number') return undefined
+    return {
+      ...createConditionCooldown({
+        heroTypeId: String(value.heroTypeId),
+        skillTypeId: String(value.skillTypeId),
+        turnsAtLeast: value.turnsAtLeast == null ? '' : String(value.turnsAtLeast),
+        turnsAtMost: value.turnsAtMost == null ? '' : String(value.turnsAtMost),
+      }),
+      negate,
+    }
+  }
+  return undefined
+}
+
 function cleanText(value?: string) {
   return (value ?? '').replace(/<[^>]+>/g, '')
 }
 
 function configuredTrialDifficulty(strategy: Strategy): number | undefined {
-  const trialId = strategy.objectives?.mandatoryTrialIds?.find(
+  const trialId = (strategy.objectives?.mandatoryTrialIds ?? []).find(
     (value) => Number.isInteger(value) && value > 8_000_000,
   )
   if (typeof trialId !== 'number') return undefined
@@ -729,6 +856,23 @@ function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[]
     summarized.add('skillCooldownConditions')
     summarized.add('skillCooldownConditionsMode')
   }
+  if (when.conditionTree && typeof when.conditionTree === 'object' && !Array.isArray(when.conditionTree)) {
+    const describeTree = (raw: unknown): { leaves: number; text: string } => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { leaves: 0, text: '?' }
+      const node = raw as JsonObject
+      const negated = node.negate === true ? 'NOT ' : ''
+      if (node.type === 'group') {
+        const children = Array.isArray(node.children) ? node.children.map(describeTree).filter((child) => child.leaves > 0) : []
+        const joiner = node.operator === 'any' ? ' OR ' : ' AND '
+        return { leaves: children.reduce((sum, child) => sum + child.leaves, 0), text: `${negated}(${children.slice(0, 3).map((child) => child.text).join(joiner)}${children.length > 3 ? '…' : ''})` }
+      }
+      const leafLabel = node.type === 'skillCooldown' ? '冷却' : '效果'
+      return { leaves: 1, text: `${negated}${leafLabel}` }
+    }
+    const described = describeTree(when.conditionTree)
+    if (described.leaves) parts.push(`逻辑条件 ${described.text} · ${described.leaves} 条`)
+    summarized.add('conditionTree')
+  }
   const remaining = Object.keys(when).filter((key) => !ignored.has(key) && !summarized.has(key)).length
   if (remaining) parts.push(`另有 ${remaining} 项条件`)
   return parts.join(' · ') || '行动窗口满足时'
@@ -1033,10 +1177,7 @@ function RuleEditor({
   const [nextForm, setNextForm] = useState('')
   const [eligibleTrialId, setEligibleTrialId] = useState(0)
   const [damageMin, setDamageMin] = useState('')
-  const [effectConditions, setEffectConditions] = useState<EffectConditionValue[]>([])
-  const [effectConditionsMode, setEffectConditionsMode] = useState<'all' | 'any'>('all')
-  const [skillCooldownConditions, setSkillCooldownConditions] = useState<SkillCooldownConditionValue[]>([])
-  const [skillCooldownConditionsMode, setSkillCooldownConditionsMode] = useState<'all' | 'any'>('all')
+  const [conditionTree, setConditionTree] = useState<ConditionGroupNode>(() => createConditionGroup())
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -1159,7 +1300,7 @@ function RuleEditor({
         appendEffectCondition(target, presence, condition.effect, asNumberArray(condition.heroTypeId)[0] ?? fallbackTeamHeroId)
       }
     }
-    setEffectConditionsMode(when.effectConditionsMode === 'any' ? 'any' : 'all')
+    const legacyEffectMode = when.effectConditionsMode === 'any' ? 'any' : 'all'
     delete when.effectConditions
     delete when.effectConditionsMode
 
@@ -1178,7 +1319,6 @@ function RuleEditor({
       appendEffectCondition('ally', presence, request.effect, asNumberArray(request.heroTypeId)[0] ?? fallbackTeamHeroId)
     }
     for (const key of LEGACY_EFFECT_KEYS) delete when[key]
-    setEffectConditions(nextEffectConditions)
     if (Array.isArray(when.skillCooldownConditions)) {
       for (const rawCondition of when.skillCooldownConditions) {
         if (!rawCondition || typeof rawCondition !== 'object' || Array.isArray(rawCondition)) continue
@@ -1194,10 +1334,45 @@ function RuleEditor({
         }))
       }
     }
-    setSkillCooldownConditionsMode(when.skillCooldownConditionsMode === 'any' ? 'any' : 'all')
+    const legacyCooldownMode = when.skillCooldownConditionsMode === 'any' ? 'any' : 'all'
     delete when.skillCooldownConditions
     delete when.skillCooldownConditionsMode
-    setSkillCooldownConditions(nextCooldownConditions)
+    const hydratedTree = hydrateConditionTree(when.conditionTree)
+    delete when.conditionTree
+    if (hydratedTree) {
+      setConditionTree(
+        hydratedTree.type === 'group'
+          ? hydratedTree
+          : createConditionGroup([hydratedTree]),
+      )
+    } else {
+      const legacyChildren: ConditionTreeNode[] = []
+      if (nextEffectConditions.length) {
+        const effectNodes = nextEffectConditions.map((condition) => ({
+          ...condition,
+          type: 'effect' as const,
+          negate: false,
+        }))
+        legacyChildren.push(
+          effectNodes.length === 1
+            ? effectNodes[0]
+            : createConditionGroup(effectNodes, legacyEffectMode),
+        )
+      }
+      if (nextCooldownConditions.length) {
+        const cooldownNodes = nextCooldownConditions.map((condition) => ({
+          ...condition,
+          type: 'skillCooldown' as const,
+          negate: false,
+        }))
+        legacyChildren.push(
+          cooldownNodes.length === 1
+            ? cooldownNodes[0]
+            : createConditionGroup(cooldownNodes, legacyCooldownMode),
+        )
+      }
+      setConditionTree(createConditionGroup(legacyChildren, 'all'))
+    }
     delete when.activeHeroTypeId
     delete when.form
     delete when.activeHeroFormIndex
@@ -1373,6 +1548,73 @@ function RuleEditor({
     }
   }
 
+  function serializeConditionNode(node: ConditionTreeNode): JsonObject {
+    if (node.type === 'group') {
+      if (!node.children.length) throw new Error('逻辑组内至少需要一个条件')
+      return {
+        type: 'group',
+        operator: node.operator,
+        ...(node.negate ? { negate: true } : {}),
+        children: node.children.map(serializeConditionNode),
+      }
+    }
+    if (node.type === 'effect') {
+      if (!node.token) throw new Error('请为每一条效果条件选择具体效果，或删除未完成的条件')
+      const selector: JsonObject = /^\d+$/.test(node.token)
+        ? { effectTypeId: Number(node.token) }
+        : { kind: node.token }
+      const condition: JsonObject = {
+        type: 'effect',
+        target: node.target,
+        presence: node.presence,
+        effect: selector,
+        ...(node.negate ? { negate: true } : {}),
+      }
+      if (node.target === 'ally') {
+        const selectedHeroTypeId = Number(node.heroTypeId)
+        if (!Number.isInteger(selectedHeroTypeId) || selectedHeroTypeId <= 0 || !team.slice(0, teamSize).includes(selectedHeroTypeId)) {
+          throw new Error('英雄效果条件必须从当前准备队伍中选择一名具体英雄')
+        }
+        condition.heroTypeId = selectedHeroTypeId
+      }
+      for (const [turnKey, raw] of (node.presence === 'has' ? [['turnsAtLeast', node.turnsAtLeast], ['turnsAtMost', node.turnsAtMost]] : []) as Array<['turnsAtLeast' | 'turnsAtMost', string]>) {
+        if (!raw.trim()) continue
+        const turns = Number(raw)
+        if (!Number.isInteger(turns) || turns < 0) throw new Error('效果剩余回合必须是非负整数')
+        selector[turnKey] = turns
+      }
+      return condition
+    }
+    const selectedHeroTypeId = Number(node.heroTypeId)
+    const selectedSkillTypeId = Number(node.skillTypeId)
+    const selectedHero = heroByRuntimeId(heroes, selectedHeroTypeId)
+    if (!Number.isInteger(selectedHeroTypeId) || selectedHeroTypeId <= 0 || !team.slice(0, teamSize).includes(selectedHeroTypeId) || !selectedHero) {
+      throw new Error('技能冷却条件必须从当前准备队伍中选择一名具体英雄')
+    }
+    if (!Number.isInteger(selectedSkillTypeId) || !selectedHero.skills.some((skill) => skill.typeId === selectedSkillTypeId)) {
+      throw new Error('请为技能冷却条件选择该英雄的具体技能')
+    }
+    const condition: JsonObject = {
+      type: 'skillCooldown',
+      heroTypeId: selectedHeroTypeId,
+      skillTypeId: selectedSkillTypeId,
+      ...(node.negate ? { negate: true } : {}),
+    }
+    for (const [turnKey, raw] of [['turnsAtLeast', node.turnsAtLeast], ['turnsAtMost', node.turnsAtMost]] as const) {
+      if (!raw.trim()) continue
+      const turns = Number(raw)
+      if (!Number.isInteger(turns) || turns < 0) throw new Error('技能剩余冷却必须是非负整数')
+      condition[turnKey] = turns
+    }
+    if (condition.turnsAtLeast === undefined && condition.turnsAtMost === undefined) {
+      throw new Error('每条技能冷却条件至少填写一个剩余冷却范围')
+    }
+    if (typeof condition.turnsAtLeast === 'number' && typeof condition.turnsAtMost === 'number' && condition.turnsAtLeast > condition.turnsAtMost) {
+      throw new Error('技能冷却条件的最小回合不能大于最大回合')
+    }
+    return condition
+  }
+
   function commit() {
     try {
       const extra = JSON.parse(advanced || '{}')
@@ -1414,68 +1656,8 @@ function RuleEditor({
         if (bossMode === 'chimera' && eligibleTrialId > 0) {
           when.eligibleTrialsAny = [eligibleTrialId]
         }
-        if (effectConditions.length) {
-          const savedConditions: JsonObject[] = []
-          for (const value of effectConditions) {
-            if (!value.token) throw new Error('请为每一条效果条件选择具体效果，或删除未完成的条件')
-            const selector: JsonObject = /^\d+$/.test(value.token)
-              ? { effectTypeId: Number(value.token) }
-              : { kind: value.token }
-            const condition: JsonObject = {
-              target: value.target,
-              presence: value.presence,
-              effect: selector,
-            }
-            if (value.target === 'ally') {
-              const selectedHeroTypeId = Number(value.heroTypeId)
-              if (!Number.isInteger(selectedHeroTypeId) || selectedHeroTypeId <= 0 || !team.slice(0, teamSize).includes(selectedHeroTypeId)) {
-                throw new Error('英雄效果条件必须从当前准备队伍中选择一名具体英雄')
-              }
-              condition.heroTypeId = selectedHeroTypeId
-            }
-            for (const [turnKey, raw] of (value.presence === 'has' ? [['turnsAtLeast', value.turnsAtLeast], ['turnsAtMost', value.turnsAtMost]] : []) as Array<['turnsAtLeast' | 'turnsAtMost', string]>) {
-              if (!raw.trim()) continue
-              const turns = Number(raw)
-              if (!Number.isInteger(turns) || turns < 0) throw new Error('效果剩余回合必须是非负整数')
-              selector[turnKey] = turns
-            }
-            savedConditions.push(condition)
-          }
-          when.effectConditions = savedConditions
-          when.effectConditionsMode = effectConditionsMode
-        }
-        if (skillCooldownConditions.length) {
-          const savedCooldownConditions: JsonObject[] = []
-          for (const value of skillCooldownConditions) {
-            const selectedHeroTypeId = Number(value.heroTypeId)
-            const selectedSkillTypeId = Number(value.skillTypeId)
-            const selectedHero = heroByRuntimeId(heroes, selectedHeroTypeId)
-            if (!Number.isInteger(selectedHeroTypeId) || selectedHeroTypeId <= 0 || !team.slice(0, teamSize).includes(selectedHeroTypeId) || !selectedHero) {
-              throw new Error('技能冷却条件必须从当前准备队伍中选择一名具体英雄')
-            }
-            if (!Number.isInteger(selectedSkillTypeId) || !selectedHero.skills.some((skill) => skill.typeId === selectedSkillTypeId)) {
-              throw new Error('请为技能冷却条件选择该英雄的具体技能')
-            }
-            const condition: JsonObject = {
-              heroTypeId: selectedHeroTypeId,
-              skillTypeId: selectedSkillTypeId,
-            }
-            for (const [turnKey, raw] of [['turnsAtLeast', value.turnsAtLeast], ['turnsAtMost', value.turnsAtMost]] as const) {
-              if (!raw.trim()) continue
-              const turns = Number(raw)
-              if (!Number.isInteger(turns) || turns < 0) throw new Error('技能剩余冷却必须是非负整数')
-              condition[turnKey] = turns
-            }
-            if (condition.turnsAtLeast === undefined && condition.turnsAtMost === undefined) {
-              throw new Error('每条技能冷却条件至少填写一个剩余冷却范围')
-            }
-            if (typeof condition.turnsAtLeast === 'number' && typeof condition.turnsAtMost === 'number' && condition.turnsAtLeast > condition.turnsAtMost) {
-              throw new Error('技能冷却条件的最小回合不能大于最大回合')
-            }
-            savedCooldownConditions.push(condition)
-          }
-          when.skillCooldownConditions = savedCooldownConditions
-          when.skillCooldownConditionsMode = skillCooldownConditionsMode
+        if (conditionTree.children.length) {
+          when.conditionTree = serializeConditionNode(conditionTree)
         }
       }
       const selectedTarget: JsonObject = target === 'allyPosition'
@@ -1514,6 +1696,9 @@ function RuleEditor({
                 type: 'cast',
                 skillSlot: selectedSkill?.slot ?? slot,
                 ...(!allHeroes && selectedSkill?.typeId ? { skillTypeId: selectedSkill.typeId } : {}),
+                ...(!allHeroes && hero?.isMetamorph && typeof selectedSkill?.formIndex === 'number'
+                  ? { formIndex: selectedSkill.formIndex }
+                  : {}),
                 target: target === 'allyHeroTypeId' && initial?.action?.target
                     ? initial.action.target
                     : selectedTarget,
@@ -1538,6 +1723,97 @@ function RuleEditor({
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
+  }
+
+  function mutateConditionNode(
+    id: string,
+    updater: (current: ConditionTreeNode) => ConditionTreeNode,
+  ) {
+    setConditionTree((current) => updateConditionTreeNode(current, id, updater) as ConditionGroupNode)
+  }
+
+  function appendConditionNode(groupId: string, child: ConditionTreeNode) {
+    mutateConditionNode(groupId, (current) => current.type === 'group'
+      ? { ...current, children: [...current.children, child] }
+      : current)
+  }
+
+  function removeConditionNode(id: string) {
+    setConditionTree((current) => removeConditionTreeNode(current, id))
+  }
+
+  function defaultCooldownNode(): ConditionCooldownNode {
+    const heroTypeId = team.slice(0, teamSize).find((value) => value > 0) ?? 0
+    const conditionHero = heroByRuntimeId(heroes, heroTypeId)
+    const conditionSkill = conditionHero?.skills.find((skill) => typeof skill.typeId === 'number')
+    return createConditionCooldown({
+      heroTypeId: heroTypeId ? String(heroTypeId) : '',
+      skillTypeId: conditionSkill?.typeId ? String(conditionSkill.typeId) : '',
+    })
+  }
+
+  function renderConditionNode(
+    node: ConditionTreeNode,
+    depth: number,
+    path: string,
+  ): ReactNode {
+    if (node.type === 'group') {
+      return <div className={`condition-tree-group${depth === 0 ? ' root' : ''}${node.negate ? ' negated' : ''}`} key={node.id}>
+        <div className="condition-tree-group-heading">
+          <span className="condition-tree-path">{depth === 0 ? '整体逻辑' : `逻辑组 ${path}`}</span>
+          <label className="condition-logic-select"><span>组内关系</span><select value={node.operator} onChange={(event) => mutateConditionNode(node.id, (current) => current.type === 'group' ? { ...current, operator: event.target.value === 'any' ? 'any' : 'all' } : current)}><option value="all">全部满足（AND）</option><option value="any">任意满足（OR）</option></select></label>
+          <button type="button" className={node.negate ? 'condition-negate active' : 'condition-negate'} onClick={() => mutateConditionNode(node.id, (current) => ({ ...current, negate: !current.negate }))}>{node.negate ? '已取反 NOT' : '取反 NOT'}</button>
+          <div className="condition-tree-add-actions">
+            <details className="condition-add-menu">
+              <summary className="button ghost"><Plus size={14} />添加条件<ChevronDown size={14} /></summary>
+              <div className="condition-add-menu-popover">
+                <button type="button" onClick={(event) => { appendConditionNode(node.id, createConditionEffect({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })); event.currentTarget.closest('details')?.removeAttribute('open') }}><ShieldCheck size={17} /><span><strong>效果状态</strong><small>增益、减益与剩余回合</small></span></button>
+                <button type="button" onClick={(event) => { appendConditionNode(node.id, defaultCooldownNode()); event.currentTarget.closest('details')?.removeAttribute('open') }}><Zap size={17} /><span><strong>技能冷却</strong><small>指定英雄当前技能的冷却</small></span></button>
+                <button type="button" onClick={(event) => { appendConditionNode(node.id, createConditionGroup([createConditionEffect({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })])); event.currentTarget.closest('details')?.removeAttribute('open') }}><Layers3 size={17} /><span><strong>子逻辑组</strong><small>继续组合 AND、OR 与 NOT</small></span></button>
+              </div>
+            </details>
+          </div>
+          {depth > 0 && <button type="button" className="effect-condition-delete" aria-label={`删除逻辑组 ${path}`} onClick={() => removeConditionNode(node.id)}><Trash2 size={15} /></button>}
+        </div>
+        <div className="condition-tree-children">
+          {node.children.length
+            ? node.children.map((child, index) => renderConditionNode(child, depth + 1, path ? `${path}.${index + 1}` : String(index + 1)))
+            : <div className="effect-condition-empty"><ShieldCheck size={22} /><span><strong>这个逻辑组还没有条件</strong><small>可添加效果、冷却或子逻辑组</small></span></div>}
+        </div>
+      </div>
+    }
+    if (node.type === 'skillCooldown') {
+      const selectedHeroTypeId = Number(node.heroTypeId)
+      const selectedHero = heroByRuntimeId(heroes, selectedHeroTypeId)
+      const selectedCooldownSkill = selectedHero?.skills.find((skill) => skill.typeId === Number(node.skillTypeId))
+      const updateCondition = (changes: Partial<ConditionCooldownNode>) => mutateConditionNode(node.id, (current) => current.type === 'skillCooldown' ? { ...current, ...changes } : current)
+      return <div className={`cooldown-condition-row condition-tree-leaf${node.negate ? ' negated' : ''}`} key={node.id}>
+        <span className="effect-condition-index">{path}</span>
+        <HeroAvatar hero={selectedHero} size="sm" />
+        <label className="field"><span>具体英雄</span><select value={node.heroTypeId} onChange={(event) => { const nextHeroTypeId = Number(event.target.value); const nextHero = heroByRuntimeId(heroes, nextHeroTypeId); const nextSkill = nextHero?.skills.find((skill) => typeof skill.typeId === 'number'); updateCondition({ heroTypeId: event.target.value, skillTypeId: nextSkill?.typeId ? String(nextSkill.typeId) : '' }) }}>{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={typeId}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select></label>
+        <SkillIcon hero={selectedHero} skill={selectedCooldownSkill} slot={selectedCooldownSkill?.slot} />
+        <label className="field"><span>具体技能</span><select value={node.skillTypeId} onChange={(event) => updateCondition({ skillTypeId: event.target.value })}>{(selectedHero?.skills ?? []).filter((skill) => typeof skill.typeId === 'number').map((skill) => <option key={skill.typeId} value={skill.typeId}>{skill.name || `技能 ${skill.slot}`}</option>)}</select></label>
+        <label className="effect-turn-field"><span>冷却 ≥</span><input type="text" inputMode="numeric" value={node.turnsAtLeast} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtLeast: event.target.value })} placeholder="不限" /></label>
+        <label className="effect-turn-field"><span>冷却 ≤</span><input type="text" inputMode="numeric" value={node.turnsAtMost} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtMost: event.target.value })} placeholder="不限" /></label>
+        <div className="condition-leaf-actions"><button type="button" className={node.negate ? 'condition-negate active' : 'condition-negate'} title="对本条件取反" onClick={() => updateCondition({ negate: !node.negate })}>NOT</button><button type="button" className="effect-condition-delete" aria-label={`删除技能冷却条件 ${path}`} onClick={() => removeConditionNode(node.id)}><Trash2 size={15} /></button></div>
+      </div>
+    }
+    const selectedHeroTypeId = Number(node.heroTypeId)
+    const selectedTeamHero = heroByRuntimeId(heroes, selectedHeroTypeId)
+    const savedHeroOutsideTeam = node.target === 'ally' && selectedHeroTypeId > 0 && !team.slice(0, teamSize).includes(selectedHeroTypeId)
+    const updateCondition = (changes: Partial<ConditionEffectNode>) => mutateConditionNode(node.id, (current) => current.type === 'effect' ? { ...current, ...changes } : current)
+    return <div className={`effect-condition-row condition-tree-leaf${node.negate ? ' negated' : ''}`} key={node.id}>
+      <span className="effect-condition-index">{path}</span>
+      <div className="effect-condition-target">
+        {node.target === 'ally' ? <HeroAvatar hero={selectedTeamHero} size="sm" /> : <span className="effect-target-boss"><Crosshair size={16} /></span>}
+        <span><select aria-label={`效果条件 ${path} 的目标`} value={node.target === 'ally' ? `ally:${node.heroTypeId}` : node.target} onChange={(event) => { const [targetType, rawHeroTypeId = ''] = event.target.value.split(':'); const bossTarget = targetType === 'bossAll' || targetType === 'bossAny' || targetType === 'bossPriority' ? targetType : 'boss'; updateCondition({ target: targetType === 'ally' ? 'ally' : bossTarget, heroTypeId: targetType === 'ally' ? rawHeroTypeId : '' }) }}>{bossMode === 'hydra' ? <><option value="bossPriority">规则优先目标蛇头</option><option value="bossAny">任一在场蛇头</option><option value="bossAll">全部在场蛇头</option></> : <option value="boss">奇美拉 Boss</option>}{savedHeroOutsideTeam && <option value={`ally:${node.heroTypeId}`}>已保存英雄 {node.heroTypeId}</option>}{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={`ally:${typeId}`}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select></span>
+      </div>
+      <div className="effect-presence-toggle" role="group" aria-label={`效果条件 ${path} 的状态`}><button type="button" className={node.presence === 'has' ? 'active' : ''} onClick={() => updateCondition({ presence: 'has' })}>必须已有</button><button type="button" className={node.presence === 'missing' ? 'active missing' : ''} onClick={() => updateCondition({ presence: 'missing', turnsAtLeast: '', turnsAtMost: '' })}>必须缺少</button></div>
+      <EffectPicker effects={effects} value={node.token} onValue={(token) => updateCondition({ token })} />
+      <label className="effect-turn-field"><span>剩余 ≥</span><input type="text" inputMode="numeric" value={node.turnsAtLeast} disabled={!node.token || node.presence === 'missing'} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtLeast: event.target.value })} placeholder={node.presence === 'missing' ? '不适用' : '不限'} /></label>
+      <label className="effect-turn-field"><span>剩余 ≤</span><input type="text" inputMode="numeric" value={node.turnsAtMost} disabled={!node.token || node.presence === 'missing'} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtMost: event.target.value })} placeholder={node.presence === 'missing' ? '不适用' : '不限'} /></label>
+      <div className="condition-leaf-actions"><button type="button" className={node.negate ? 'condition-negate active' : 'condition-negate'} title="对本条件取反" onClick={() => updateCondition({ negate: !node.negate })}>NOT</button><button type="button" className="effect-condition-delete" aria-label={`删除效果条件 ${path}`} onClick={() => removeConditionNode(node.id)}><Trash2 size={15} /></button></div>
+    </div>
   }
 
   return (
@@ -1621,7 +1897,7 @@ function RuleEditor({
             {ruleKind === 'strict' && <>
             <div className="action-mode span-2">
               <button type="button" className={actionType === 'cast' || actionType === 'transform' ? 'active' : ''} onClick={() => { setAllHeroes(false); setActionType(selectedSkill?.isTransform ? 'transform' : 'cast') }}><Zap size={16} /><span><strong>指定技能</strong></span></button>
-              {bossMode === 'chimera' && <button type="button" className={actionType === 'executeTrialRecipe' ? 'active' : ''} onClick={() => setActionType('executeTrialRecipe')}><Sparkles size={16} /><span><strong>试炼自动决策</strong></span></button>}
+              {bossMode === 'chimera' && <button type="button" className={actionType === 'executeTrialRecipe' ? 'active' : ''} onClick={() => setActionType('executeTrialRecipe')}><Sparkles size={16} /><span><strong>试炼自动决策</strong><small>按进度协调队伍并保留关键技能</small></span></button>}
               {initial?.action?.type === 'maintainEffects' && <button type="button" className={actionType === 'maintainEffects' ? 'active' : ''} onClick={() => setActionType('maintainEffects')}><ShieldCheck size={16} /><span><strong>维持效果</strong></span></button>}
             </div>
             {(actionType === 'cast' || actionType === 'transform') && <>
@@ -1658,52 +1934,12 @@ function RuleEditor({
                 {bossMode === 'chimera' && <label className="field trial-active-condition"><span>仅当试炼当前激活 <small>已完成、尚未解锁或不在对应形态时忽略此规则</small></span><select value={eligibleTrialId || ''} onChange={(event) => setEligibleTrialId(Number(event.target.value) || 0)}><option value="">不限制试炼状态</option>{eligibleTrialId > 0 && !trials.some((trial) => trial.id === eligibleTrialId) && <option value={eligibleTrialId}>已保存试炼 {eligibleTrialId}</option>}{trials.map((trial) => <option key={trial.id} value={trial.id}>{FORM_LABEL[trial.form ?? ''] ?? trial.form ?? '奇美拉'} · {TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty ?? '试炼'} · {cleanText(trial.description) || `试炼 ${trial.id}`}</option>)}</select></label>}
               </div>
             </fieldset>
-            <fieldset className="effect-condition-builder span-2">
-              <legend>效果与技能冷却条件</legend>
-              <div className="condition-subsection cooldown-condition-subsection">
-              <div className="condition-subsection-title">技能冷却</div>
-              <div className="effect-condition-heading"><span><strong>{skillCooldownConditions.length ? `已添加 ${skillCooldownConditions.length} 条` : '按需添加'}</strong></span><div className="condition-heading-actions"><label className="condition-logic-select"><span>组合</span><select value={skillCooldownConditionsMode} onChange={(event) => setSkillCooldownConditionsMode(event.target.value === 'any' ? 'any' : 'all')}><option value="all">全部满足（并且）</option><option value="any">任意满足（或者）</option></select></label><button type="button" className="button ghost" onClick={() => { const heroTypeId = team.slice(0, teamSize).find((value) => value > 0) ?? 0; const conditionHero = heroByRuntimeId(heroes, heroTypeId); const conditionSkill = conditionHero?.skills.find((skill) => typeof skill.typeId === 'number'); setSkillCooldownConditions((current) => [...current, createSkillCooldownCondition({ heroTypeId: heroTypeId ? String(heroTypeId) : '', skillTypeId: conditionSkill?.typeId ? String(conditionSkill.typeId) : '' })]) }}><Plus size={15} />添加冷却条件</button></div></div>
-              {skillCooldownConditions.length ? <div className="cooldown-condition-list">{skillCooldownConditions.map((condition, index) => {
-                const selectedHeroTypeId = Number(condition.heroTypeId)
-                const selectedHero = heroByRuntimeId(heroes, selectedHeroTypeId)
-                const selectedCooldownSkill = selectedHero?.skills.find((skill) => skill.typeId === Number(condition.skillTypeId))
-                const updateCondition = (changes: Partial<SkillCooldownConditionValue>) => setSkillCooldownConditions((current) => current.map((item) => item.id === condition.id ? { ...item, ...changes } : item))
-                return <div className="cooldown-condition-row" key={condition.id}>
-                  <span className="effect-condition-index">{String(index + 1).padStart(2, '0')}</span>
-                  <HeroAvatar hero={selectedHero} size="sm" />
-                  <label className="field"><span>具体英雄</span><select value={condition.heroTypeId} onChange={(event) => { const nextHeroTypeId = Number(event.target.value); const nextHero = heroByRuntimeId(heroes, nextHeroTypeId); const nextSkill = nextHero?.skills.find((skill) => typeof skill.typeId === 'number'); updateCondition({ heroTypeId: event.target.value, skillTypeId: nextSkill?.typeId ? String(nextSkill.typeId) : '' }) }}>{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={typeId}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select></label>
-                  <SkillIcon hero={selectedHero} skill={selectedCooldownSkill} slot={selectedCooldownSkill?.slot} />
-                  <label className="field"><span>具体技能</span><select value={condition.skillTypeId} onChange={(event) => updateCondition({ skillTypeId: event.target.value })}>{(selectedHero?.skills ?? []).filter((skill) => typeof skill.typeId === 'number').map((skill) => <option key={skill.typeId} value={skill.typeId}>{skill.name || `技能 ${skill.slot}`}</option>)}</select></label>
-                  <label className="effect-turn-field"><span>冷却 ≥</span><input type="text" inputMode="numeric" value={condition.turnsAtLeast} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtLeast: event.target.value })} placeholder="不限" /></label>
-                  <label className="effect-turn-field"><span>冷却 ≤</span><input type="text" inputMode="numeric" value={condition.turnsAtMost} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtMost: event.target.value })} placeholder="不限" /></label>
-                  <button type="button" className="effect-condition-delete" aria-label={`删除技能冷却条件 ${index + 1}`} onClick={() => setSkillCooldownConditions((current) => current.filter((item) => item.id !== condition.id))}><Trash2 size={15} /></button>
-                </div>
-              })}</div> : <div className="effect-condition-empty"><Activity size={22} /><span><strong>没有技能冷却限制</strong></span></div>}
+            <fieldset className="effect-condition-builder condition-tree-builder span-2">
+              <legend>条件逻辑</legend>
+              <div className="effect-condition-heading">
+                <span><strong>{conditionLeafCount(conditionTree) ? `已添加 ${conditionLeafCount(conditionTree)} 条条件` : '按需添加'}</strong><small>可任意嵌套 AND、OR，并可对任一条件或逻辑组使用 NOT</small></span>
               </div>
-              <div className="condition-subsection effect-condition-subsection">
-              <div className="condition-subsection-title">效果条件</div>
-              <div className="effect-condition-heading"><span><strong>{effectConditions.length ? `已添加 ${effectConditions.length} 条` : '按需添加'}</strong></span><div className="condition-heading-actions"><label className="condition-logic-select"><span>组合</span><select value={effectConditionsMode} onChange={(event) => setEffectConditionsMode(event.target.value === 'any' ? 'any' : 'all')}><option value="all">全部满足（并且）</option><option value="any">任意满足（或者）</option></select></label><button type="button" className="button ghost" onClick={() => setEffectConditions((current) => [...current, createEffectCondition({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })])}><Plus size={15} />添加效果条件</button></div></div>
-              {effectConditions.length ? <div className="effect-condition-list">
-                {effectConditions.map((condition, index) => {
-                  const selectedHeroTypeId = Number(condition.heroTypeId)
-                  const selectedTeamHero = heroByRuntimeId(heroes, selectedHeroTypeId)
-                  const savedHeroOutsideTeam = condition.target === 'ally' && selectedHeroTypeId > 0 && !team.slice(0, teamSize).includes(selectedHeroTypeId)
-                  const updateCondition = (changes: Partial<EffectConditionValue>) => setEffectConditions((current) => current.map((item) => item.id === condition.id ? { ...item, ...changes } : item))
-                  return <div className="effect-condition-row" key={condition.id}>
-                    <span className="effect-condition-index">{String(index + 1).padStart(2, '0')}</span>
-                    <div className="effect-condition-target">
-                      {condition.target === 'ally' ? <HeroAvatar hero={selectedTeamHero} size="sm" /> : <span className="effect-target-boss"><Crosshair size={16} /></span>}
-                      <span><select aria-label={`效果条件 ${index + 1} 的目标`} value={condition.target === 'ally' ? `ally:${condition.heroTypeId}` : condition.target} onChange={(event) => { const [targetType, rawHeroTypeId = ''] = event.target.value.split(':'); const bossTarget = targetType === 'bossAll' || targetType === 'bossAny' || targetType === 'bossPriority' ? targetType : 'boss'; updateCondition({ target: targetType === 'ally' ? 'ally' : bossTarget, heroTypeId: targetType === 'ally' ? rawHeroTypeId : '' }) }}>{bossMode === 'hydra' ? <><option value="bossPriority">规则优先目标蛇头</option><option value="bossAny">任一在场蛇头</option><option value="bossAll">全部在场蛇头</option></> : <option value="boss">奇美拉 Boss</option>}{savedHeroOutsideTeam && <option value={`ally:${condition.heroTypeId}`}>已保存英雄 {condition.heroTypeId}</option>}{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={`ally:${typeId}`}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select></span>
-                    </div>
-                    <div className="effect-presence-toggle" role="group" aria-label={`效果条件 ${index + 1} 的状态`}><button type="button" className={condition.presence === 'has' ? 'active' : ''} onClick={() => updateCondition({ presence: 'has' })}>必须已有</button><button type="button" className={condition.presence === 'missing' ? 'active missing' : ''} onClick={() => updateCondition({ presence: 'missing', turnsAtLeast: '', turnsAtMost: '' })}>必须缺少</button></div>
-                    <EffectPicker effects={effects} value={condition.token} onValue={(token) => updateCondition({ token })} />
-                    <label className="effect-turn-field"><span>剩余 ≥</span><input type="text" inputMode="numeric" value={condition.turnsAtLeast} disabled={!condition.token || condition.presence === 'missing'} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtLeast: event.target.value })} placeholder={condition.presence === 'missing' ? '不适用' : '不限'} /></label>
-                    <label className="effect-turn-field"><span>剩余 ≤</span><input type="text" inputMode="numeric" value={condition.turnsAtMost} disabled={!condition.token || condition.presence === 'missing'} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtMost: event.target.value })} placeholder={condition.presence === 'missing' ? '不适用' : '不限'} /></label>
-                    <button type="button" className="effect-condition-delete" aria-label={`删除效果条件 ${index + 1}`} onClick={() => setEffectConditions((current) => current.filter((item) => item.id !== condition.id))}><Trash2 size={15} /></button>
-                  </div>
-                })}
-              </div> : <div className="effect-condition-empty"><ShieldCheck size={22} /><span><strong>没有效果限制</strong></span></div>}
-              </div>
+              {renderConditionNode(conditionTree, 0, '')}
             </fieldset>
             <details className="advanced-conditions span-2"><summary>完整条件数据</summary><label className="field"><textarea rows={7} value={advanced} onChange={(event) => setAdvanced(event.target.value)} spellCheck={false} /></label></details>
             </>}
@@ -1875,6 +2111,27 @@ function App() {
     setConfig((current) => ({
       ...current,
       objectives: { ...(current.objectives ?? {}), [key]: value },
+    }))
+  }
+
+  function applyRequiredTrials(ids: number[]) {
+    setConfig((current) => ({
+      ...current,
+      objectives: {
+        ...(current.objectives ?? {}),
+        mandatoryTrialIds: ids,
+      },
+    }))
+  }
+
+  function changeTrialDifficulty(difficultyId: number) {
+    setTrialSearchDifficulty(difficultyId)
+    setConfig((current) => ({
+      ...current,
+      objectives: {
+        ...(current.objectives ?? {}),
+        mandatoryTrialIds: [],
+      },
     }))
   }
 
@@ -2188,7 +2445,7 @@ function App() {
           <section className="card objectives-card">
             <div className="section-heading"><span><Crosshair size={18} />战斗目标</span><em>自动追踪</em></div>
             <div className="two-fields">
-              {bossMode === 'chimera' && <label className="field"><span>Boss 难度</span><select value={trialSearchDifficulty} onChange={(event) => { setTrialSearchDifficulty(Number(event.target.value)); updateObjective('mandatoryTrialIds', []) }}>{data?.difficulties.map((item) => <option key={item.difficultyId} value={item.difficultyId}>{BOSS_DIFFICULTY[item.difficulty] ?? item.difficulty}</option>)}</select></label>}
+              {bossMode === 'chimera' && <label className="field"><span>Boss 难度</span><select value={trialSearchDifficulty} onChange={(event) => changeTrialDifficulty(Number(event.target.value))}>{data?.difficulties.map((item) => <option key={item.difficultyId} value={item.difficultyId}>{BOSS_DIFFICULTY[item.difficulty] ?? item.difficulty}</option>)}</select></label>}
               <label className="field"><span>最多免费重整</span><NumericInput value={objectives.maxRegroupRetries ?? 10} onValue={(value) => updateObjective('maxRegroupRetries', value)} /></label>
               <label className="field"><span>最低伤害（M）</span><NumericInput decimal value={damageInMillions(objectives.minimumDamage)} onValue={(value) => updateObjective('minimumDamage', value * 1_000_000)} placeholder="例如 300" /></label>
             </div>
@@ -2330,7 +2587,7 @@ function App() {
         </Dialog.Portal>
       </Dialog.Root>
 
-      {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={(ids) => updateObjective('mandatoryTrialIds', ids)} />}
+      {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={applyRequiredTrials} />}
       <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} onSave={saveRule} />
       <Dialog.Root open={logsExpanded} onOpenChange={setLogsExpanded}>
         <Dialog.Portal>

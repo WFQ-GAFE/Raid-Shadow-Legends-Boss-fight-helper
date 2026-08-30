@@ -554,6 +554,10 @@ class ControllerManager:
                     boss_mode,
                     "--agent",
                     str(AGENT),
+                    "--capability-cache",
+                    str(PROJECT_ROOT / "cache" / "chimera-skill-capabilities.json"),
+                    "--capability-seed",
+                    str(BUNDLE_ROOT / "data" / "chimera-skill-capabilities.json"),
                     "--bootstrap-current",
                     "--execute",
                 ]
