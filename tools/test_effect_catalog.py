@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from chimera_icons import EFFECT_OPTIONS, runtime_effect_options
+from chimera_icons import EFFECT_OPTIONS, EFFECT_TYPE_ICONS, runtime_effect_options
 
 
 def main() -> int:
+    options_by_token = {option["token"]: option for option in EFFECT_OPTIONS}
+    assert options_by_token["350"]["label"] == "虚弱 25%"
+    assert options_by_token["350"]["icon"] == "IncreaseDamageTaken2"
+    assert options_by_token["351"]["label"] == "虚弱 15%"
+    assert options_by_token["351"]["icon"] == "IncreaseDamageTaken"
+    assert EFFECT_TYPE_ICONS[350] == "IncreaseDamageTaken2"
+    assert EFFECT_TYPE_ICONS[351] == "IncreaseDamageTaken"
     runtime = [
         {"id": 880, "name": "MagmaShield"},
         {"id": 560, "name": "BlockPassiveSkills"},

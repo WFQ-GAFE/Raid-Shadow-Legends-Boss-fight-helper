@@ -6,9 +6,9 @@ A local Windows strategy editor and battle controller for the Alliance Chimera a
 
 一款面向 **RAID: Shadow Legends** 联盟奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
 
-Current release: **1.0.1**.
+Current release: **1.0.3**.
 
-当前版本：**1.0.1**。
+当前版本：**1.0.3**。
 
 Download the .exe tool in release page.
 
@@ -38,8 +38,8 @@ The application reads live battle state from the selected RAID client, evaluates
   显示英雄头像、技能图标、增益/减益图标以及各战斗专属的 Boss 图标。
 - Keeps Chimera and Hydra strategies, live state, and run logs separate.<br>
   将奇美拉与六头蛇的策略、实时状态和运行日志相互独立保存。
-- Supports strict ordered rules, fallback skill orders, skill cooldown conditions, effect conditions, remaining-turn checks, and preferred targets.<br>
-  支持严格的规则顺序、备用技能顺序、技能冷却条件、效果条件、剩余回合检查和优先目标。
+- Supports strict ordered rules, fallback skill orders, nested AND/OR/NOT condition groups, effect and cooldown checks, exact champion alive/dead checks, remaining-turn checks, and preferred targets.<br>
+  支持严格的规则顺序、备用技能顺序、可嵌套的 AND/OR/NOT 条件组、效果与冷却检查、指定英雄存活/死亡检查、剩余回合检查和优先目标。
 - Revalidates the account, acting hero, skill readiness, legal targets, battle mode, and current turn on the game thread before executing an action.<br>
   执行动作前，会在游戏线程中再次校验账户、行动英雄、技能就绪状态、合法目标、战斗模式和当前回合。
 - Allows normal manual interaction. A stale action is rejected safely when manual input or turn progression changes the battle state.<br>
@@ -53,8 +53,8 @@ The application reads live battle state from the selected RAID client, evaluates
   支持能够识别当前试炼的自动决策，以及针对已知试炼类型的结构化方案。
 - Handles Mythical champion transformations and keeps the two forms' skill catalogs separate.<br>
   支持神话英雄变形，并将两种形态的技能目录分开处理。
-- Can perform a guarded free regroup when a required trial becomes impossible, then verify the same five champions before re-entering battle.<br>
-  当必要试炼已不可能完成时，可以在安全校验下执行免费重整，并在重新进入战斗前确认仍为相同的五名英雄。
+- Can perform a guarded free regroup when a required trial becomes impossible or when a user-defined Boss-turn/trial deadline is reached, then verify the same five champions before re-entering battle.<br>
+  当必要试炼已不可能完成，或达到用户设定的 Boss 回合/试炼截止条件时，可以在安全校验下执行免费重整，并在重新进入战斗前确认仍为相同的五名英雄。
 
 ### Hydra / 六头蛇
 

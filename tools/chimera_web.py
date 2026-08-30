@@ -346,6 +346,7 @@ def normalized_strategy(
         objectives["onMandatoryTrialImpossible"] = "free_regroup_and_retry_manual"
     else:
         objectives.pop("mandatoryTrialIds", None)
+        objectives.pop("earlyRetryConditions", None)
         objectives.pop("onMandatoryTrialImpossible", None)
     objectives.pop("minimumCompetitionPoints", None)
     for key in ("minimumDamage", "maxRegroupRetries"):
@@ -361,6 +362,38 @@ def normalized_strategy(
         ):
             raise ValueError("必做试炼设置无效")
         objectives["mandatoryTrialIds"] = list(dict.fromkeys(trial_ids))
+        early_retry_conditions = objectives.get("earlyRetryConditions", [])
+        if not isinstance(early_retry_conditions, list):
+            raise ValueError("提前重整条件设置无效")
+        normalized_early_retry_conditions: list[dict[str, Any]] = []
+        for condition in early_retry_conditions[:20]:
+            if not isinstance(condition, dict):
+                continue
+            threshold = condition.get("bossTurnAtLeast")
+            if (
+                not isinstance(threshold, int)
+                or isinstance(threshold, bool)
+                or threshold < 0
+            ):
+                continue
+            condition_trial_ids = condition.get("trialIds", [])
+            if not isinstance(condition_trial_ids, list):
+                continue
+            filtered_trial_ids = list(dict.fromkeys(
+                trial_id
+                for trial_id in condition_trial_ids
+                if isinstance(trial_id, int)
+                and not isinstance(trial_id, bool)
+                and trial_id > 0
+            ))
+            if not filtered_trial_ids:
+                continue
+            normalized_early_retry_conditions.append({
+                "bossTurnAtLeast": threshold,
+                "mode": "all" if condition.get("mode") == "all" else "any",
+                "trialIds": filtered_trial_ids,
+            })
+        objectives["earlyRetryConditions"] = normalized_early_retry_conditions
     result["objectives"] = objectives
     team = result.get("team")
     if isinstance(team, dict):
@@ -554,6 +587,10 @@ class ControllerManager:
                     boss_mode,
                     "--agent",
                     str(AGENT),
+                    "--capability-cache",
+                    str(PROJECT_ROOT / "cache" / "chimera-skill-capabilities.json"),
+                    "--capability-seed",
+                    str(BUNDLE_ROOT / "data" / "chimera-skill-capabilities.json"),
                     "--bootstrap-current",
                     "--execute",
                 ]
@@ -2014,6 +2051,26 @@ def self_test() -> int:
     config = normalized_strategy(service.strategy(), service.strategy())
     assert config["mode"] == "execute"
     assert config["objectives"]["onAllMetAtResult"] == "hold_for_user"
+    early_retry_config = normalized_strategy(
+        {
+            **config,
+            "objectives": {
+                **config["objectives"],
+                "mandatoryTrialIds": [8000607],
+                "earlyRetryConditions": [
+                    {
+                        "bossTurnAtLeast": 5,
+                        "mode": "any",
+                        "trialIds": [8000607, 8000608],
+                    }
+                ],
+            },
+        },
+        config,
+    )
+    assert early_retry_config["objectives"]["earlyRetryConditions"] == [
+        {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607, 8000608]}
+    ]
     assert len(service.ui_catalog.get("difficulties", [])) == 6
     reward_asset = service.asset("reward", ["resource-4100"])
     assert reward_asset is not None and reward_asset.is_file()

@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updatedAt": "2026-08-24T15:41:21.637640+00:00",
+  "updatedAt": "2026-08-24T17:44:16.087324+00:00",
   "skills": {
     "47101": [
       {
@@ -510,8 +510,8 @@
         "effectTypeId": 141,
         "effectKindId": 2102,
         "effectKind": "StatusIncreaseDefence",
-        "lifetime": 2,
-        "turnsLeft": 2
+        "lifetime": 3,
+        "turnsLeft": 3
       },
       {
         "targetScope": "self",
@@ -2133,8 +2133,8 @@
   },
   "performance": {
     "47101": {
-      "samples": 2758,
-      "emaDamage": 38099.052,
+      "samples": 2877,
+      "emaDamage": 112671.425,
       "maxDamage": 627900.0,
       "trials": {
         "8000501": {
@@ -2143,8 +2143,8 @@
           "maxDamage": 83745.7
         },
         "8000625": {
-          "samples": 33,
-          "emaDamage": 7175.593,
+          "samples": 37,
+          "emaDamage": 10558.731,
           "maxDamage": 22105.76
         },
         "8000619": {
@@ -2160,13 +2160,13 @@
       }
     },
     "47102": {
-      "samples": 1515,
-      "emaDamage": 47883.603,
+      "samples": 1582,
+      "emaDamage": 97421.407,
       "maxDamage": 527600.0,
       "trials": {
         "8000625": {
-          "samples": 40,
-          "emaDamage": 7202.572,
+          "samples": 42,
+          "emaDamage": 5767.551,
           "maxDamage": 12434.0
         },
         "8000619": {
@@ -2187,8 +2187,8 @@
       }
     },
     "47103": {
-      "samples": 407,
-      "emaDamage": 53252.154,
+      "samples": 425,
+      "emaDamage": 33672.175,
       "maxDamage": 636000.0,
       "trials": {
         "8000619": {
@@ -2202,12 +2202,12 @@
           "maxDamage": 20420.0
         },
         "8000625": {
-          "samples": 27,
-          "emaDamage": 15663.792,
+          "samples": 29,
+          "emaDamage": 12725.133,
           "maxDamage": 33620.3
         },
         "8000626": {
-          "samples": 16,
+          "samples": 17,
           "emaDamage": 0.0,
           "maxDamage": 0.0
         }
@@ -2224,8 +2224,8 @@
       "maxDamage": 520.239
     },
     "73701": {
-      "samples": 2802,
-      "emaDamage": 41605.932,
+      "samples": 2924,
+      "emaDamage": 7230.085,
       "maxDamage": 593700.0,
       "trials": {
         "8000601": {
@@ -2236,13 +2236,13 @@
       }
     },
     "73702": {
-      "samples": 1492,
-      "emaDamage": 73635.941,
+      "samples": 1557,
+      "emaDamage": 29211.198,
       "maxDamage": 781300.0
     },
     "73703": {
-      "samples": 424,
-      "emaDamage": 177.263,
+      "samples": 435,
+      "emaDamage": 9.364,
       "maxDamage": 433230.0
     },
     "82501": {
@@ -2266,17 +2266,17 @@
       "maxDamage": 0.0
     },
     "87301": {
-      "samples": 2292,
-      "emaDamage": 145442.318,
+      "samples": 2391,
+      "emaDamage": 81358.569,
       "maxDamage": 683600.0
     },
     "87302": {
-      "samples": 1490,
-      "emaDamage": 2267133.514,
+      "samples": 1553,
+      "emaDamage": 1915164.011,
       "maxDamage": 3901700.0
     },
     "87303": {
-      "samples": 1127,
+      "samples": 1177,
       "emaDamage": 0.0,
       "maxDamage": 0.0
     },
@@ -2340,13 +2340,13 @@
       "maxDamage": 90000.0
     },
     "98901": {
-      "samples": 2110,
-      "emaDamage": 15997.979,
+      "samples": 2197,
+      "emaDamage": 12011.682,
       "maxDamage": 798300.0
     },
     "98902": {
-      "samples": 1460,
-      "emaDamage": 22483.996,
+      "samples": 1523,
+      "emaDamage": 14899.432,
       "maxDamage": 620000.0,
       "trials": {
         "8000601": {
@@ -2357,8 +2357,8 @@
       }
     },
     "98903": {
-      "samples": 1036,
-      "emaDamage": 550.102,
+      "samples": 1081,
+      "emaDamage": 24778.691,
       "maxDamage": 499500.0
     },
     "99001": {
@@ -2412,8 +2412,8 @@
       "maxDamage": 2600100.0
     },
     "104101": {
-      "samples": 1918,
-      "emaDamage": 77324.279,
+      "samples": 1993,
+      "emaDamage": 38515.945,
       "maxDamage": 577800.0,
       "trials": {
         "8000601": {
@@ -2424,13 +2424,13 @@
       }
     },
     "104102": {
-      "samples": 1508,
-      "emaDamage": 247990.027,
+      "samples": 1558,
+      "emaDamage": 157878.969,
       "maxDamage": 1591200.0
     },
     "104103": {
-      "samples": 1582,
-      "emaDamage": 923.989,
+      "samples": 1630,
+      "emaDamage": 45.148,
       "maxDamage": 652700.0
     },
     "104301": {

@@ -173,6 +173,7 @@ def strategy_template(mode: Any = "chimera") -> dict[str, Any]:
         objectives.update(
             {
                 "mandatoryTrialIds": [],
+                "earlyRetryConditions": [],
                 "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
             }
         )
