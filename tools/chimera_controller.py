@@ -1717,16 +1717,38 @@ def match_skill_cooldown_conditions(
     return any(results) if mode == "any" else all(results)
 
 
-def state_for_rule_target(
-    state: dict[str, Any], action: Any
+def _state_scoped_to_boss(
+    state: dict[str, Any], selected: dict[str, Any]
 ) -> dict[str, Any]:
-    if not isinstance(action, dict):
+    actor_id = selected.get("id")
+    if not isinstance(actor_id, int) or isinstance(actor_id, bool):
         return state
+    scoped = dict(state)
+    scoped["_conditionBossId"] = actor_id
+    if not any(
+        boss.get("id") == actor_id
+        for boss in state_entities(state, "bosses")
+    ):
+        scoped["bosses"] = [*state_entities(state, "bosses"), selected]
+    return scoped
+
+
+def states_for_rule_targets(
+    state: dict[str, Any], action: Any
+) -> list[dict[str, Any]]:
+    """Return condition scopes in the same order as the action's targets.
+
+    A Hydra priority selector is a search order, not one fixed target. Each
+    legal head must therefore get a chance to satisfy target-bound conditions;
+    otherwise a protected first head incorrectly blocks a later eligible one.
+    """
+    if not isinstance(action, dict):
+        return [state]
     selector = action.get("target")
     if isinstance(selector, str):
         selector = {"type": selector}
     if not isinstance(selector, dict):
-        return state
+        return [state]
     selector_type = selector.get("type")
     bosses = [
         boss for boss in state_entities(state, "bosses")
@@ -1744,7 +1766,7 @@ def state_for_rule_target(
     }
     if valid_target_ids:
         bosses = [boss for boss in bosses if boss.get("id") in valid_target_ids]
-    selected: dict[str, Any] | None = None
+    selected_targets: list[dict[str, Any]] = []
     if selector_type == "devouringHead":
         devouring_ids = hydra_devouring_head_ids(state)
         selected = next(
@@ -1766,6 +1788,8 @@ def state_for_rule_target(
                     "isDevouring": True,
                     "effects": [],
                 }
+        if selected is not None:
+            selected_targets.append(selected)
     elif selector_type == "exposedNeck":
         selected = next(
             (
@@ -1774,6 +1798,8 @@ def state_for_rule_target(
             ),
             None,
         )
+        if selected is not None:
+            selected_targets.append(selected)
     elif selector_type == "lowestHpBoss":
         selected = min(
             bosses,
@@ -1782,30 +1808,28 @@ def state_for_rule_target(
             else 101,
             default=None,
         )
+        if selected is not None:
+            selected_targets.append(selected)
     elif selector_type == "hydraHeadPriority":
-        selected = next(iter(hydra_priority_targets(selector, bosses)), None)
+        selected_targets.extend(hydra_priority_targets(selector, bosses))
     elif selector_type == "hydraHeadSlot":
         # Legacy rules used an unstable visual slot.  Keep them safe by
         # treating the old selector as a loose lowest-health fallback.
-        selected = next(
-            iter(
-                hydra_priority_targets(
-                    {"type": "hydraHeadPriority", "fallback": "lowestHp"},
-                    bosses,
-                )
-            ),
-            None,
+        selected_targets.extend(
+            hydra_priority_targets(
+                {"type": "hydraHeadPriority", "fallback": "lowestHp"},
+                bosses,
+            )
         )
-    if selected is None or not isinstance(selected.get("id"), int):
-        return state
-    scoped = dict(state)
-    scoped["_conditionBossId"] = selected["id"]
-    if not any(
-        boss.get("id") == selected["id"]
-        for boss in state_entities(state, "bosses")
-    ):
-        scoped["bosses"] = [*state_entities(state, "bosses"), selected]
-    return scoped
+    if not selected_targets:
+        return [state]
+    return [_state_scoped_to_boss(state, selected) for selected in selected_targets]
+
+
+def state_for_rule_target(
+    state: dict[str, Any], action: Any
+) -> dict[str, Any]:
+    return states_for_rule_targets(state, action)[0]
 
 
 def trial_status_by_id(state: dict[str, Any]) -> dict[int, dict[str, Any]]:
@@ -3097,10 +3121,24 @@ def select_target(
             )
         if not candidates:
             return None
+        condition_boss_id = state.get("_conditionBossId")
+        condition_target = next(
+            (
+                item
+                for item in candidates
+                if isinstance(condition_boss_id, int)
+                and not isinstance(condition_boss_id, bool)
+                and item.get("id") == condition_boss_id
+            ),
+            None,
+        )
         target = (
-            candidates[0]
-            if selector_type in {"hydraHeadPriority", "hydraHeadSlot"}
-            else min(candidates, key=hydra_target_sort_key)
+            condition_target
+            or (
+                candidates[0]
+                if selector_type in {"hydraHeadPriority", "hydraHeadSlot"}
+                else min(candidates, key=hydra_target_sort_key)
+            )
         )
         target_label = target.get("name", f"蛇头 {target['id']}")
         if selector_type == "devouringHead":
@@ -6358,9 +6396,13 @@ def evaluate_strategy_node(
     if not isinstance(action, dict):
         return None
     if node_type == "rule":
-        state = state_for_rule_target(state, action)
+        scoped_states = states_for_rule_targets(state, action)
         when = node.get("when", {})
-        if not matches(when, state):
+        matched_state = next(
+            (candidate for candidate in scoped_states if matches(when, candidate)),
+            None,
+        )
+        if matched_state is None:
             desired_form = configured_skill_form_index(action)
             if (
                 action.get("type") == "cast"
@@ -6378,19 +6420,28 @@ def evaluate_strategy_node(
                 if isinstance(when, dict)
                 else {}
             )
+            form_switch_state = next(
+                (
+                    candidate
+                    for candidate in scoped_states
+                    if matches(conditions_without_hero_form, candidate)
+                ),
+                None,
+            )
             if (
                 action.get("type") == "cast"
                 and desired_form in {0, 1}
                 and state.get("activeHeroFormIndex") != desired_form
-                and matches(conditions_without_hero_form, state)
+                and form_switch_state is not None
             ):
                 return automatic_mythic_form_switch_decision(
                     str(node.get("name", f"strategy-node-{depth}")),
                     action,
-                    state,
+                    form_switch_state,
                     desired_form_index=desired_form,
                 )
             return None
+        state = matched_state
     return decision_from_action(
         str(node.get("name", f"strategy-node-{depth}")),
         action,
@@ -6526,11 +6577,11 @@ def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str
         if hero_scope and not matches(hero_scope, state):
             continue
         name = str(rule.get("name") or "未命名规则")
-        scoped_state = state_for_rule_target(
+        scoped_states = states_for_rule_targets(
             state,
             rule.get("action") if isinstance(rule.get("action"), dict) else {},
         )
-        if not matches(when, scoped_state):
+        if not any(matches(when, scoped_state) for scoped_state in scoped_states):
             expected_form = when.get("activeHeroFormIndex")
             actual_form = state.get("activeHeroFormIndex")
             if expected_form is not None and not matches(

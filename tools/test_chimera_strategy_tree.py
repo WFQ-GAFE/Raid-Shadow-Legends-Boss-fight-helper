@@ -1131,6 +1131,93 @@ def main() -> int:
         dead_boss_state,
     ) is None
 
+    hydra_priority_state = copy.deepcopy(state)
+    hydra_priority_state.update(
+        {
+            "bossMode": "hydra",
+            "activeHeroId": 0,
+            "activeHeroTypeId": 9906,
+            "hydra": {"active": True, "turnCount": 4},
+            "skills": [
+                {
+                    "slot": 2,
+                    "skillId": 1,
+                    "typeId": 99002,
+                    "ready": True,
+                    "validTargetIds": [5, 6, 7],
+                }
+            ],
+            "bosses": [
+                {
+                    "id": 5,
+                    "typeId": 26210,
+                    "avatar": "BossAvatars/26200",
+                    "name": "priority-protected",
+                    "healthPct": 80,
+                    "dead": False,
+                    "effects": [
+                        {"effectTypeId": 670, "effectKind": "NewbieDefence"}
+                    ],
+                },
+                {
+                    "id": 6,
+                    "typeId": 26050,
+                    "avatar": "BossAvatars/26040",
+                    "name": "priority-eligible",
+                    "healthPct": 90,
+                    "dead": False,
+                    "effects": [],
+                },
+                {
+                    "id": 7,
+                    "typeId": 26130,
+                    "avatar": "BossAvatars/26120",
+                    "name": "fallback-eligible",
+                    "healthPct": 10,
+                    "dead": False,
+                    "effects": [],
+                },
+            ],
+        }
+    )
+    hydra_priority_rule = {
+        "rules": [
+            {
+                "name": "skip-protected-priority-head",
+                "when": {
+                    "activeHeroTypeId": [9900, 9906],
+                    "effectConditions": [
+                        {
+                            "target": "bossPriority",
+                            "presence": "missing",
+                            "effect": {"effectTypeId": 670},
+                        }
+                    ],
+                    "effectConditionsMode": "all",
+                },
+                "action": {
+                    "type": "cast",
+                    "skillSlot": 2,
+                    "skillTypeId": 99002,
+                    "target": {
+                        "type": "hydraHeadPriority",
+                        "headTypeIds": [26200, 26040],
+                        "fallback": "lowestHp",
+                    },
+                },
+            }
+        ]
+    }
+    hydra_priority_decision = evaluate(hydra_priority_rule, hydra_priority_state)
+    assert hydra_priority_decision is not None
+    assert hydra_priority_decision.target_id == 6
+    all_protected_hydra = copy.deepcopy(hydra_priority_state)
+    for head in all_protected_hydra["bosses"]:
+        head["effects"] = [
+            {"effectTypeId": 670, "effectKind": "NewbieDefence"}
+        ]
+    assert evaluate(hydra_priority_rule, all_protected_hydra) is None
+
     learned_state = json.loads(json.dumps(state))
     learned_state["skills"].append(
         {

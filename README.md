@@ -6,9 +6,9 @@ A local Windows strategy editor and battle controller for the Alliance Chimera a
 
 一款面向 **RAID: Shadow Legends** 联盟奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
 
-Current release: **1.0.3**.
+Current release: **1.0.4**.
 
-当前版本：**1.0.3**。
+当前版本：**1.0.4**。
 
 Download the .exe tool in release page.
 
