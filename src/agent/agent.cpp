@@ -53,7 +53,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 3;
-constexpr std::uint64_t kAgentBuildId = 2026082403ULL;
+constexpr std::uint64_t kAgentBuildId = 2026083101ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -1016,7 +1016,8 @@ struct IntDictionaryKeys {
     bool valid{};
 };
 
-IntDictionaryKeys read_int_dictionary_keys(void* dictionary) {
+IntDictionaryKeys read_int_dictionary_keys(void* dictionary,
+                                           bool keep_latest = false) {
     IntDictionaryKeys snapshot{};
     Il2CppClass* dictionary_class = nullptr;
     if (!safe_read(dictionary, 0, dictionary_class) || !dictionary_class) {
@@ -1084,8 +1085,7 @@ IntDictionaryKeys read_int_dictionary_keys(void* dictionary) {
     const std::size_t used = (std::min)(
         static_cast<std::size_t>(snapshot.reported_count), array_length);
     auto* vector = static_cast<unsigned char*>(entries) + 32;
-    for (std::size_t index = 0; index < used && snapshot.count < snapshot.values.size();
-         ++index) {
+    for (std::size_t index = 0; index < used; ++index) {
         void* entry = vector + index * static_cast<std::size_t>(entry_size);
         std::int32_t hash_code = 0;
         std::int32_t key = 0;
@@ -1098,8 +1098,19 @@ IntDictionaryKeys read_int_dictionary_keys(void* dictionary) {
         for (std::size_t existing = 0; existing < snapshot.count; ++existing) {
             duplicate = duplicate || snapshot.values[existing] == key;
         }
-        if (!duplicate) {
+        if (duplicate) {
+            continue;
+        }
+        if (snapshot.count < snapshot.values.size()) {
             snapshot.values[snapshot.count++] = key;
+        } else if (keep_latest) {
+            for (std::size_t retained = 1;
+                 retained < snapshot.values.size(); ++retained) {
+                snapshot.values[retained - 1] = snapshot.values[retained];
+            }
+            snapshot.values.back() = key;
+        } else {
+            break;
         }
     }
     snapshot.valid = true;
@@ -3307,7 +3318,10 @@ bool read_command_guard(const QueueCommandRequest& request,
     const IntDictionaryKeys acceptable_keys =
         read_int_dictionary_keys(acceptable_targets);
     const IntDictionaryKeys actor_keys = read_int_dictionary_keys(actors);
-    const IntDictionaryKeys boss_keys = read_int_dictionary_keys(bosses);
+    // Hydra keeps historical head actors in this dictionary. Long battles can
+    // exceed the bounded snapshot capacity, so retain the newest actor IDs for
+    // the command guard instead of the first heads spawned in the battle.
+    const IntDictionaryKeys boss_keys = read_int_dictionary_keys(bosses, true);
     if (!dictionary_contains(acceptable_keys, request.target_id) ||
         (!dictionary_contains(actor_keys, request.target_id) &&
          !dictionary_contains(boss_keys, request.target_id))) {
@@ -5358,7 +5372,7 @@ void capture_battle_state(void* mode, void* skill_data,
     const IntDictionaryKeys valid_targets =
         read_int_dictionary_keys(acceptable_targets);
     const IntDictionaryKeys boss_ids =
-        read_int_dictionary_keys(bosses_dictionary);
+        read_int_dictionary_keys(bosses_dictionary, true);
     const IntObjectDictionaryItems actors =
         read_int_object_dictionary(actors_dictionary);
     const IntObjectDictionaryItems bosses =

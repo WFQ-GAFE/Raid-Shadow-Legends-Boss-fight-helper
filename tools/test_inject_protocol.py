@@ -115,10 +115,23 @@ def main() -> int:
         0x987654321,
         6,
     )
+    chimera_restart = encode_lifecycle_request(
+        session_id=7,
+        context=0x987654322,
+        action=7,
+        nonce=101,
+    )
+    assert struct.unpack("<IIQQIIII5iI", chimera_restart)[:5] == (
+        0x52434C43,
+        2,
+        7,
+        0x987654322,
+        7,
+    )
     for invalid in (
         {"session_id": 0, "context": 1, "action": 4, "nonce": 1},
         {"session_id": 1, "context": 0, "action": 4, "nonce": 1},
-        {"session_id": 1, "context": 1, "action": 7, "nonce": 1},
+        {"session_id": 1, "context": 1, "action": 8, "nonce": 1},
         {"session_id": 1, "context": 1, "action": 5, "nonce": 1},
         {
             "session_id": 1,
