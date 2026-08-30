@@ -260,6 +260,14 @@ def infer_trial_difficulty_id(config: dict[str, Any], default: int = 5) -> int:
             for value in objectives.get("mandatoryTrialIds", [])
             if isinstance(value, int)
         )
+        for condition in objectives.get("earlyRetryConditions", []):
+            if not isinstance(condition, dict):
+                continue
+            values.extend(
+                value
+                for value in condition.get("trialIds", [])
+                if isinstance(value, int)
+            )
     for rule in config.get("rules", []):
         if not isinstance(rule, dict):
             continue

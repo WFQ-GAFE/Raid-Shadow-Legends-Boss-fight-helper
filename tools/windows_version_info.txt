@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 1, 0),
-    prodvers=(1, 0, 1, 0),
+    filevers=(1, 0, 3, 0),
+    prodvers=(1, 0, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'WFQ-GAFE'),
           StringStruct('FileDescription', 'RAID Alliance Boss Strategy Studio'),
-          StringStruct('FileVersion', '1.0.1'),
+          StringStruct('FileVersion', '1.0.3'),
           StringStruct('InternalName', 'AllianceBossStrategyStudio'),
           StringStruct('LegalCopyright', 'Copyright (c) 2026 WFQ-GAFE'),
           StringStruct('OriginalFilename', 'AllianceBossStrategyStudio.exe'),
           StringStruct('ProductName', 'RAID Alliance Boss Strategy Studio'),
-          StringStruct('ProductVersion', '1.0.1')
+          StringStruct('ProductVersion', '1.0.3')
         ]
       )
     ]),
