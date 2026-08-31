@@ -427,6 +427,8 @@ const MethodInfo* g_hydra_quick_battle_active_method{};
 const MethodInfo* g_hydra_selection_start_battle_click_method{};
 const MethodInfo* g_execute_cancel_chimera_method{};
 const MethodInfo* g_cancel_chimera_method{};
+const MethodInfo* g_execute_cancel_hydra_method{};
+const MethodInfo* g_cancel_hydra_method{};
 const MethodInfo* g_hydra_total_damage_method{};
 const MethodInfo* g_hydra_result_restart_pressed_method{};
 const MethodInfo* g_chimera_result_restart_pressed_method{};
@@ -3344,7 +3346,8 @@ bool read_command_guard(const QueueCommandRequest& request,
     return true;
 }
 
-bool validate_free_regroup_model(void* mode) {
+bool validate_free_regroup_model(void* mode, LONG& validated_mode) {
+    validated_mode = kTakeoverBossModeUnknown;
     void* processor = nullptr;
     void* context = nullptr;
     void* state = nullptr;
@@ -3361,8 +3364,10 @@ bool validate_free_regroup_model(void* mode) {
         return false;
     }
     bool chimera_preset = false;
+    bool hydra_battle = false;
     bool finished = true;
     safe_read_field(state, "IsChimeraPreset", nullptr, chimera_preset);
+    safe_read_field(state, "IsHydraBattle", nullptr, hydra_battle);
     safe_read_field(state, "BattleFinished", nullptr, finished);
     Il2CppClass* state_class = nullptr;
     void* chimera = nullptr;
@@ -3377,18 +3382,48 @@ bool validate_free_regroup_model(void* mode) {
         safe_read_field(chimera, "<Id>k__BackingField", "Id", chimera_id);
         safe_read_field(chimera, "TypeId", nullptr, chimera_type_id);
     }
-    SelectionSnapshot started{};
-    AcquireSRWLockShared(&g_ui_state_lock);
-    started = g_last_started_selection;
-    ReleaseSRWLockShared(&g_ui_state_lock);
-    const LONG requested_mode =
-        g_takeover_boss_mode.load(std::memory_order_acquire);
-    const bool chimera_session =
-        requested_mode == kTakeoverBossModeChimera ||
-        (requested_mode == kTakeoverBossModeUnknown && started.valid &&
-         !started.hydra);
-    return chimera_session && !finished && chimera && chimera_id >= 0 &&
+
+    void* active_hero = nullptr;
+    std::int32_t active_hero_id = -1;
+    std::int32_t active_hero_type_id = 0;
+    bool active_hero_valid = false;
+    if (safe_read_field(state, "ActiveHero", nullptr, active_hero) &&
+        active_hero) {
+        const bool id_read = safe_read_field(
+            active_hero, "<Id>k__BackingField", "Id", active_hero_id);
+        const bool type_read = safe_read_field(
+            active_hero, "TypeId", nullptr, active_hero_type_id);
+        active_hero_valid = id_read && type_read && active_hero_id >= 0 &&
+            active_hero_type_id > 0;
+    }
+
+    void* bosses_dictionary = nullptr;
+    safe_read(mode, 128, bosses_dictionary);
+    const IntDictionaryKeys bosses =
+        read_int_dictionary_keys(bosses_dictionary);
+    const AllianceBossIdentity identity = identify_alliance_boss(
+        active_hero_valid, active_hero_type_id, chimera_preset, hydra_battle,
+        chimera != nullptr && chimera_id >= 0, bosses.count);
+    const bool active_chimera =
+        identity.mode == kTakeoverBossModeChimera && chimera &&
+        chimera_id >= 0 &&
         (chimera_preset || is_chimera_type_id(chimera_type_id));
+    const bool active_hydra =
+        identity.mode == kTakeoverBossModeHydra && bosses.valid &&
+        bosses.count > 0 && !chimera;
+    if (finished || (!active_chimera && !active_hydra)) {
+        diagnostic(
+            "free_regroup_guard_failed requested_mode=" +
+            std::to_string(identity.requested_mode) +
+            " identified_mode=" + std::to_string(identity.mode) +
+            " hydra_battle=" + std::to_string(hydra_battle ? 1 : 0) +
+            " chimera_present=" + std::to_string(chimera ? 1 : 0) +
+            " boss_count=" + std::to_string(bosses.count) +
+            " finished=" + std::to_string(finished ? 1 : 0));
+        return false;
+    }
+    validated_mode = identity.mode;
+    return true;
 }
 
 bool disable_selection_auto_battle(void* context) {
@@ -3663,23 +3698,37 @@ void drain_pending_lifecycle_command() {
         if (!context || context != reinterpret_cast<void*>(request.context) ||
             g_screen_state.load(std::memory_order_acquire) != kScreenBattle ||
             !object_has_class_name(context, "ClientBattleViewContext") ||
-            !mode || !g_execute_cancel_chimera_method ||
-            !g_cancel_chimera_method) {
+            !mode) {
             publish_lifecycle_ack(request, "rejected",
                                   "battle_context_changed");
             return;
         }
-        if (!validate_free_regroup_model(mode)) {
+        LONG validated_mode = kTakeoverBossModeUnknown;
+        if (!validate_free_regroup_model(mode, validated_mode)) {
             publish_lifecycle_ack(request, "rejected",
                                   "free_regroup_guard_failed");
             return;
         }
+        const MethodInfo* prepare_method =
+            validated_mode == kTakeoverBossModeHydra
+                ? g_cancel_hydra_method
+                : g_cancel_chimera_method;
+        const MethodInfo* execute_method =
+            validated_mode == kTakeoverBossModeHydra
+                ? g_execute_cancel_hydra_method
+                : g_execute_cancel_chimera_method;
+        if (!prepare_method || !execute_method) {
+            publish_lifecycle_ack(request, "rejected",
+                                  "free_regroup_method_missing");
+            return;
+        }
         if (request.action == kLifecyclePrepareFreeRegroup) {
             diagnostic("lifecycle_free_regroup_prepare nonce=" +
-                       std::to_string(request.nonce));
+                       std::to_string(request.nonce) + " boss_mode=" +
+                       std::to_string(validated_mode));
             g_internal_action_depth.fetch_add(1, std::memory_order_acq_rel);
             const bool invoked =
-                safe_runtime_invoke_void(g_cancel_chimera_method, context);
+                safe_runtime_invoke_void(prepare_method, context);
             g_internal_action_depth.fetch_sub(1, std::memory_order_acq_rel);
             if (!invoked) {
                 publish_lifecycle_ack(request, "exception",
@@ -3710,10 +3759,11 @@ void drain_pending_lifecycle_command() {
             return;
         }
         diagnostic("lifecycle_free_regroup_execute nonce=" +
-                   std::to_string(request.nonce));
+                   std::to_string(request.nonce) + " boss_mode=" +
+                   std::to_string(validated_mode));
         g_internal_action_depth.fetch_add(1, std::memory_order_acq_rel);
         const bool invoked = safe_runtime_invoke_void(
-            g_execute_cancel_chimera_method, context);
+            execute_method, context);
         g_internal_action_depth.fetch_sub(1, std::memory_order_acq_rel);
         if (!invoked) {
             publish_lifecycle_ack(request, "exception",
@@ -7912,6 +7962,10 @@ DWORD WINAPI probe_thread(void*) {
         api, battle_context.klass, "ExecuteCancelChimeraBattleCmd");
     const MethodLocation cancel_chimera = find_method_by_name(
         api, battle_context.klass, "CancelChimeraBattle");
+    const MethodLocation execute_cancel_hydra = find_method_by_name(
+        api, battle_context.klass, "ExecuteCancelHydraBattleCmd");
+    const MethodLocation cancel_hydra = find_method_by_name(
+        api, battle_context.klass, "CancelHydraBattle");
     const MethodLocation heroes_selection_on_enabled = find_method_by_name(
         api, heroes_selection_chimera.klass, "OnEnabled");
     const MethodLocation heroes_selection_on_disabled = find_method_by_name(
@@ -8007,6 +8061,8 @@ DWORD WINAPI probe_thread(void*) {
         battle_finish_completed_challenges.method;
     g_execute_cancel_chimera_method = execute_cancel_chimera.method;
     g_cancel_chimera_method = cancel_chimera.method;
+    g_execute_cancel_hydra_method = execute_cancel_hydra.method;
+    g_cancel_hydra_method = cancel_hydra.method;
     g_hydra_total_damage_method =
         find_hydra_total_damage_method(hydra_extensions.klass);
     g_hydra_result_restart_pressed_method =
@@ -8239,6 +8295,9 @@ DWORD WINAPI probe_thread(void*) {
     append_method_location(output, "ExecuteCancelChimeraBattleCmd",
                            execute_cancel_chimera);
     append_method_location(output, "CancelChimeraBattle", cancel_chimera);
+    append_method_location(output, "ExecuteCancelHydraBattleCmd",
+                           execute_cancel_hydra);
+    append_method_location(output, "CancelHydraBattle", cancel_hydra);
     append_method_location(output, "HeroesSelectionChimera.OnEnabled",
                            heroes_selection_on_enabled);
     append_method_location(output, "HeroesSelectionChimera.Refresh",
@@ -8764,6 +8823,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI RaidChimeraAgentShutdown(LPVOID) {
     g_enemy_boss_current_method = nullptr;
     g_execute_cancel_chimera_method = nullptr;
     g_cancel_chimera_method = nullptr;
+    g_execute_cancel_hydra_method = nullptr;
+    g_cancel_hydra_method = nullptr;
     g_chimera_result_restart_pressed_method = nullptr;
     g_hydra_result_restart_pressed_method = nullptr;
     g_selection_hero_method = nullptr;

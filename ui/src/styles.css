@@ -432,6 +432,11 @@ select option { color: #e9f0f5; background: #102033; }
 .early-retry-trials small, .early-retry-trials strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .early-retry-trials small { color: var(--muted); font-size: 10px; }
 .early-retry-trials strong { font-size: 11px; font-weight: 550; }
+.devour-retry-heroes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.devour-retry-heroes > button { min-width: 0; display: grid; grid-template-columns: 24px 34px minmax(0, 1fr); align-items: center; gap: 8px; padding: 8px; text-align: left; color: var(--text); border: 1px solid var(--line); border-radius: 9px; background: rgba(16, 33, 50, .45); cursor: pointer; }
+.devour-retry-heroes > button:hover, .devour-retry-heroes > button.selected { border-color: var(--line-strong); background: rgba(51, 118, 113, .12); }
+.devour-retry-heroes > button > span:last-child { min-width: 0; overflow: hidden; }
+.devour-retry-heroes strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 550; }
 .check-box { width: 19px; height: 19px; display: grid; place-items: center; color: #04110f; border: 1px solid #496174; border-radius: 5px; }
 .selected .check-box { border-color: var(--teal); background: var(--teal); }
 .trial-copy { min-width: 0; display: grid; gap: 6px; }
@@ -901,4 +906,5 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
   .rule-row .rule-target { display: none; }
   .hero-library, .skill-library { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .early-retry-trials { grid-template-columns: minmax(0, 1fr); }
+  .devour-retry-heroes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

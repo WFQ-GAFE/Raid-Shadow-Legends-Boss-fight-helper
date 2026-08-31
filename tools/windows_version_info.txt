@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'WFQ-GAFE'),
           StringStruct('FileDescription', 'RAID Alliance Boss Strategy Studio'),
-          StringStruct('FileVersion', '1.0.4'),
+          StringStruct('FileVersion', '1.0.5'),
           StringStruct('InternalName', 'AllianceBossStrategyStudio'),
           StringStruct('LegalCopyright', 'Copyright (c) 2026 WFQ-GAFE'),
           StringStruct('OriginalFilename', 'AllianceBossStrategyStudio.exe'),
           StringStruct('ProductName', 'RAID Alliance Boss Strategy Studio'),
-          StringStruct('ProductVersion', '1.0.4')
+          StringStruct('ProductVersion', '1.0.5')
         ]
       )
     ]),

@@ -182,6 +182,7 @@ def strategy_template(mode: Any = "chimera") -> dict[str, Any]:
             {
                 "onTeamDefeatedBeforeMinimumDamage": "free_regroup_and_retry_manual",
                 "rescueDevouredChampion": True,
+                "devourOrderRetryConditions": [],
             }
         )
     return {

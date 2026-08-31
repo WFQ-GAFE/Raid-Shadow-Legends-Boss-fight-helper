@@ -394,6 +394,43 @@ def normalized_strategy(
                 "trialIds": filtered_trial_ids,
             })
         objectives["earlyRetryConditions"] = normalized_early_retry_conditions
+    else:
+        devour_conditions = objectives.get("devourOrderRetryConditions", [])
+        if not isinstance(devour_conditions, list):
+            raise ValueError("六头蛇吞噬顺序重整条件设置无效")
+        normalized_devour_conditions: list[dict[str, Any]] = []
+        for condition in devour_conditions[:20]:
+            if not isinstance(condition, dict):
+                continue
+            mark_index = condition.get("markIndex")
+            if (
+                not isinstance(mark_index, int)
+                or isinstance(mark_index, bool)
+                or not 1 <= mark_index <= 100
+            ):
+                continue
+            hero_type_ids = condition.get("heroTypeIds", [])
+            if not isinstance(hero_type_ids, list):
+                continue
+            filtered_hero_type_ids = list(dict.fromkeys(
+                hero_type_id
+                for hero_type_id in hero_type_ids
+                if isinstance(hero_type_id, int)
+                and not isinstance(hero_type_id, bool)
+                and hero_type_id > 0
+            ))
+            if not filtered_hero_type_ids:
+                continue
+            normalized_devour_conditions.append({
+                "markIndex": mark_index,
+                "relation": (
+                    "isAnyOf"
+                    if condition.get("relation") == "isAnyOf"
+                    else "isNoneOf"
+                ),
+                "heroTypeIds": filtered_hero_type_ids,
+            })
+        objectives["devourOrderRetryConditions"] = normalized_devour_conditions
     result["objectives"] = objectives
     team = result.get("team")
     if isinstance(team, dict):
@@ -2068,6 +2105,31 @@ def self_test() -> int:
     )
     assert early_retry_config["objectives"]["earlyRetryConditions"] == [
         {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607, 8000608]}
+    ]
+    hydra_config = default_strategy("hydra")
+    hydra_retry_config = normalized_strategy(
+        {
+            **hydra_config,
+            "objectives": {
+                **hydra_config["objectives"],
+                "devourOrderRetryConditions": [
+                    {
+                        "markIndex": 2,
+                        "relation": "isNoneOf",
+                        "heroTypeIds": [6200, 9510, 6200],
+                    }
+                ],
+            },
+        },
+        hydra_config,
+        "hydra",
+    )
+    assert hydra_retry_config["objectives"]["devourOrderRetryConditions"] == [
+        {
+            "markIndex": 2,
+            "relation": "isNoneOf",
+            "heroTypeIds": [6200, 9510],
+        }
     ]
     assert len(service.ui_catalog.get("difficulties", [])) == 6
     reward_asset = service.asset("reward", ["resource-4100"])

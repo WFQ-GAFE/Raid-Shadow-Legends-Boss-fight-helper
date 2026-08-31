@@ -904,6 +904,17 @@ class EarlyRetryTrigger:
 
 
 @dataclass(frozen=True)
+class HydraDevourRetryTrigger:
+    condition_index: int
+    mark_index: int
+    relation: str
+    expected_hero_type_ids: tuple[int, ...]
+    actual_hero_type_id: int
+    actual_hero_name: str
+    observed_sequence: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AccountBinding:
     pid: int
     account_name: str
@@ -1106,6 +1117,41 @@ def validate_strategy_config(
         }:
             raise ValueError("未知的必要试炼失败处理方式")
     else:
+        devour_conditions = objectives.get("devourOrderRetryConditions", [])
+        if not isinstance(devour_conditions, list):
+            raise ValueError("devourOrderRetryConditions 必须是数组")
+        if len(devour_conditions) > 20:
+            raise ValueError("六头蛇吞噬顺序重整条件最多允许 20 条")
+        for index, condition in enumerate(devour_conditions):
+            path = f"devourOrderRetryConditions[{index}]"
+            if not isinstance(condition, dict):
+                raise ValueError(f"{path} 必须是对象")
+            mark_index = condition.get("markIndex")
+            if (
+                not isinstance(mark_index, int)
+                or isinstance(mark_index, bool)
+                or not 1 <= mark_index <= 100
+            ):
+                raise ValueError(f"{path}.markIndex 必须是 1 到 100 的整数")
+            if condition.get("relation", "isNoneOf") not in {
+                "isAnyOf",
+                "isNoneOf",
+            }:
+                raise ValueError(f"{path}.relation 只允许 isAnyOf 或 isNoneOf")
+            raw_ids = condition.get("heroTypeIds", [])
+            hero_type_ids = tuple(
+                dict.fromkeys(
+                    value
+                    for value in raw_ids
+                    if isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value > 0
+                )
+            ) if isinstance(raw_ids, list) else ()
+            if not hero_type_ids or len(hero_type_ids) != len(raw_ids):
+                raise ValueError(
+                    f"{path}.heroTypeIds 必须是非空且互不重复的正整数数组"
+                )
         behavior = objectives.get(
             "onTeamDefeatedBeforeMinimumDamage",
             "free_regroup_and_retry_manual",
@@ -1482,13 +1528,232 @@ def state_entities(state: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return [value for value in values if isinstance(value, dict)]
 
 
+def hydra_hunger_counter_effect(entity: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the Hydra mark that identifies the next devour victim.
+
+    The current client publishes this as skill 260006 / effect type 680 /
+    effect kind 9020 (HungerCounter).  Accept all four identities so a missing
+    localized enum name cannot hide the target after a client update.
+    """
+    for effect in entity.get("effects", []):
+        if not isinstance(effect, dict):
+            continue
+        if (
+            effect.get("effectKind") == "HungerCounter"
+            or effect.get("effectKindId") == 9020
+            or effect.get("effectTypeId") == 680
+            or effect.get("skillTypeId") == 260006
+        ):
+            return effect
+    return None
+
+
+def hydra_marked_target(state: dict[str, Any]) -> dict[str, Any] | None:
+    marked = [
+        hero
+        for hero in state_entities(state, "heroes")
+        if hero.get("dead") is not True and hydra_hunger_counter_effect(hero)
+    ]
+    if not marked:
+        return None
+    return min(
+        marked,
+        key=lambda hero: (
+            hero.get("battlePosition")
+            if isinstance(hero.get("battlePosition"), int)
+            else 10_000,
+            hero.get("id") if isinstance(hero.get("id"), int) else 10_000,
+        ),
+    )
+
+
+def observe_hydra_devour_sequence(
+    state: dict[str, Any], runtime_state: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, bool]:
+    """Track marks in the order the game reveals them.
+
+    Only a controller that observed the opening of this battle is armed.  A
+    mid-battle attach cannot safely infer how many earlier marks occurred and
+    therefore never relabels the current target as number one.
+    """
+    battle = state.get("battle", {})
+    hydra = state.get("hydra", {})
+    pointers = state.get("pointers", {})
+    player_turn = battle.get("playerTurnCount") if isinstance(battle, dict) else None
+    hydra_turn = hydra.get("turnCount") if isinstance(hydra, dict) else None
+    context = pointers.get("context") if isinstance(pointers, dict) else None
+    opening = bool(
+        (
+            isinstance(player_turn, int)
+            and not isinstance(player_turn, bool)
+            and player_turn in {0, 1}
+        )
+        or (
+            not isinstance(player_turn, int)
+            and isinstance(hydra_turn, int)
+            and not isinstance(hydra_turn, bool)
+            and hydra_turn in {0, 1}
+        )
+    )
+    tracker = runtime_state.get("hydraDevourTracker")
+    new_battle = False
+    if isinstance(tracker, dict):
+        previous_context = tracker.get("lastContext")
+        previous_hydra_turn = tracker.get("lastHydraTurn")
+        previous_player_turn = tracker.get("lastPlayerTurn")
+        new_battle = bool(
+            isinstance(context, int)
+            and context > 0
+            and isinstance(previous_context, int)
+            and previous_context > 0
+            and context != previous_context
+        ) or bool(
+            isinstance(hydra_turn, int)
+            and isinstance(previous_hydra_turn, int)
+            and hydra_turn < previous_hydra_turn
+        ) or bool(
+            isinstance(player_turn, int)
+            and isinstance(previous_player_turn, int)
+            and player_turn < previous_player_turn
+        )
+    if not isinstance(tracker, dict) or new_battle:
+        tracker = {
+            "armed": opening,
+            "sequence": [],
+            "lastMarkedActorId": None,
+            "evaluatedConditionIndexes": set(),
+            "midBattleNoticeEmitted": False,
+        }
+        runtime_state["hydraDevourTracker"] = tracker
+
+    sequence = tracker.get("sequence")
+    if not isinstance(sequence, list):
+        sequence = []
+        tracker["sequence"] = sequence
+    evaluated = tracker.get("evaluatedConditionIndexes")
+    if not isinstance(evaluated, set):
+        evaluated = set(evaluated) if isinstance(evaluated, (list, tuple, set)) else set()
+        tracker["evaluatedConditionIndexes"] = evaluated
+
+    new_mark: dict[str, Any] | None = None
+    target = hydra_marked_target(state)
+    if tracker.get("armed") is True and isinstance(target, dict):
+        actor_id = target.get("id")
+        hero_type_id = target.get("typeId")
+        if (
+            isinstance(actor_id, int)
+            and not isinstance(actor_id, bool)
+            and isinstance(hero_type_id, int)
+            and not isinstance(hero_type_id, bool)
+            and hero_type_id > 0
+            and actor_id != tracker.get("lastMarkedActorId")
+        ):
+            new_mark = {
+                "actorId": actor_id,
+                "heroTypeId": hero_type_id,
+                "name": str(target.get("name") or f"英雄 {hero_type_id}"),
+            }
+            sequence.append(new_mark)
+            tracker["lastMarkedActorId"] = actor_id
+
+    tracker["lastContext"] = context
+    tracker["lastHydraTurn"] = hydra_turn
+    tracker["lastPlayerTurn"] = player_turn
+    return sequence, new_mark, tracker.get("armed") is True
+
+
+def evaluate_hydra_devour_retry_trigger(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    runtime_state: dict[str, Any],
+) -> tuple[HydraDevourRetryTrigger | None, dict[str, Any] | None, bool]:
+    sequence, new_mark, armed = observe_hydra_devour_sequence(state, runtime_state)
+    objectives = config.get("objectives", {})
+    conditions = (
+        objectives.get("devourOrderRetryConditions", [])
+        if isinstance(objectives, dict)
+        else []
+    )
+    tracker = runtime_state.get("hydraDevourTracker", {})
+    evaluated = (
+        tracker.get("evaluatedConditionIndexes", set())
+        if isinstance(tracker, dict)
+        else set()
+    )
+    if not armed or not isinstance(conditions, list):
+        return None, new_mark, armed
+    for index, condition in enumerate(conditions):
+        if index in evaluated or not isinstance(condition, dict):
+            continue
+        mark_index = condition.get("markIndex")
+        if (
+            not isinstance(mark_index, int)
+            or isinstance(mark_index, bool)
+            or mark_index < 1
+            or len(sequence) < mark_index
+        ):
+            continue
+        actual = sequence[mark_index - 1]
+        actual_type_id = actual.get("heroTypeId")
+        if not isinstance(actual_type_id, int) or isinstance(actual_type_id, bool):
+            continue
+        expected = tuple(
+            value
+            for value in condition.get("heroTypeIds", [])
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )
+        relation = "isAnyOf" if condition.get("relation") == "isAnyOf" else "isNoneOf"
+        violated = (
+            actual_type_id not in expected
+            if relation == "isAnyOf"
+            else actual_type_id in expected
+        )
+        evaluated.add(index)
+        if violated:
+            return HydraDevourRetryTrigger(
+                condition_index=index,
+                mark_index=mark_index,
+                relation=relation,
+                expected_hero_type_ids=expected,
+                actual_hero_type_id=actual_type_id,
+                actual_hero_name=str(actual.get("name") or f"英雄 {actual_type_id}"),
+                observed_sequence=tuple(
+                    str(item.get("name") or f"英雄 {item.get('heroTypeId', '?')}")
+                    for item in sequence
+                ),
+            ), new_mark, armed
+    return None, new_mark, armed
+
+
 def hydra_head_is_devouring(entity: dict[str, Any]) -> bool:
     devoured_id = entity.get("devouredHeroId")
-    return entity.get("isDevouring") is True or (
+    if entity.get("isDevouring") is True or (
         isinstance(devoured_id, int)
         and not isinstance(devoured_id, bool)
         and devoured_id >= 0
-    )
+    ):
+        return True
+    # Recent clients can leave BattleHero.get_IsDigestingNow and the mirrored
+    # top-level fields false even while the model still carries the Digestion
+    # effect.  The effect identity is the authoritative fallback and remains
+    # available even when the swallowed ally is absent from the UI actor map.
+    for effect in entity.get("effects", []):
+        if not isinstance(effect, dict):
+            continue
+        effect_devoured_id = effect.get("devouredHeroId")
+        if (
+            effect.get("effectKind") == "Digestion"
+            or effect.get("effectKindId") == 9025
+            or effect.get("effectTypeId") == 700
+            or (
+                effect.get("skillTypeId") == 260007
+                and isinstance(effect_devoured_id, int)
+                and not isinstance(effect_devoured_id, bool)
+                and effect_devoured_id >= 0
+            )
+        ):
+            return True
+    return False
 
 
 def hydra_devouring_head_ids(state: dict[str, Any]) -> set[int]:
@@ -3656,7 +3921,7 @@ def submit_free_regroup(
         or not isinstance(context, int)
         or context <= 0
     ):
-        raise RuntimeError("必要试炼已不可能完成，但当前战斗实例已变化，未执行免费重整")
+        raise RuntimeError("当前战斗实例已变化，未执行免费重整")
     preparation_nonce = lifecycle_nonce(nonce, 1)
     preparation = queue_lifecycle_command(
         pid,
@@ -3722,7 +3987,7 @@ def submit_free_regroup(
         }:
             raise RuntimeError(f"免费重整没有通过安全检查：{reason}")
         time.sleep(0.1)
-    raise RuntimeError("奇美拉退出验证在 15 秒内没有完成，未执行免费重整")
+    raise RuntimeError("Boss 战斗退出验证在 15 秒内没有完成，未执行免费重整")
 
 
 def refresh_team_selection(
@@ -3737,7 +4002,7 @@ def refresh_team_selection(
     selection = lifecycle.get("selection") or {}
     context = selection.get("context") if isinstance(selection, dict) else None
     if lifecycle.get("screen") != "team_selection" or not isinstance(context, int):
-        raise RuntimeError("当前不是可刷新的奇美拉队伍界面")
+        raise RuntimeError("当前不是可刷新的 Boss 队伍界面")
     refresh_nonce = lifecycle_nonce(nonce, 300)
     queued = queue_lifecycle_command(
         pid,
@@ -3822,53 +4087,44 @@ def free_regroup_and_retry_manual(
     nonce: int,
     desired_hero_ids: list[int] | None = None,
     desired_hero_type_ids: list[int] | None = None,
+    boss_mode: str | None = None,
 ) -> None:
+    mode = normalize_mode(boss_mode or ACTIVE_BOSS_MODE)
+    label = "六头蛇" if mode == "hydra" else "奇美拉"
+    team_size = 6 if mode == "hydra" else 5
     before = ipc.lifecycle() or {}
     before_battle = before.get("battle") or {}
     old_context = before_battle.get("context")
-    original_hero_ids = [
-        value
-        for value in before_battle.get("heroIds", [])
-        if isinstance(value, int) and value > 0
-    ]
-    original_hero_type_ids = [
-        value
-        for value in before_battle.get("heroTypeIds", [])
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    ]
-    configured_hero_ids = [
-        value
-        for value in (desired_hero_ids or [])
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    ]
-    configured_hero_type_ids = [
-        value
-        for value in (desired_hero_type_ids or [])
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0
-    ]
-    if len(original_hero_ids) == 5:
-        expected_hero_ids = original_hero_ids
-        if configured_hero_ids and configured_hero_ids != expected_hero_ids:
-            raise RuntimeError(
-                "The live battle team does not match the configured five-hero team"
-            )
-    elif len(configured_hero_ids) == 5 and len(set(configured_hero_ids)) == 5:
-        expected_hero_ids = configured_hero_ids
-    else:
-        raise RuntimeError(
-            "No exact five-hero team is available for safe regroup verification"
+    def valid_team_ids(value: Any) -> list[int]:
+        if not isinstance(value, list):
+            return []
+        result = [
+            item
+            for item in value
+            if isinstance(item, int) and not isinstance(item, bool) and item > 0
+        ]
+        return (
+            result
+            if 1 <= len(result) <= team_size and len(set(result)) == len(result)
+            else []
         )
+
+    original_hero_ids = valid_team_ids(before_battle.get("heroIds"))
+    original_hero_type_ids = valid_team_ids(before_battle.get("heroTypeIds"))
+    configured_hero_ids = valid_team_ids(desired_hero_ids)
+    configured_hero_type_ids = valid_team_ids(desired_hero_type_ids)
+    expected_hero_ids = original_hero_ids or configured_hero_ids
+    if not expected_hero_ids:
+        raise RuntimeError(f"没有可用于核对重整的{label}实战队伍")
     expected_hero_type_ids = (
         original_hero_type_ids
-        if len(original_hero_type_ids) == 5
-        else configured_hero_type_ids
+        if len(original_hero_type_ids) == len(expected_hero_ids)
+        else (
+            configured_hero_type_ids
+            if len(configured_hero_type_ids) == len(expected_hero_ids)
+            else []
+        )
     )
-    if (
-        len(configured_hero_type_ids) == 5
-        and len(original_hero_type_ids) == 5
-        and configured_hero_type_ids != original_hero_type_ids
-    ):
-        raise RuntimeError("实战英雄身份与策略组保存的五人队伍不一致")
     if not isinstance(old_context, int) or old_context <= 0:
         raise RuntimeError("重整前没有可验证的战斗实例")
     submit_free_regroup(
@@ -3901,9 +4157,9 @@ def free_regroup_and_retry_manual(
     ]
     if (
         not regrouped_hero_ids
-        and len(expected_hero_ids) == 5
+        and len(expected_hero_ids) == team_size
         and selection.get("valid") is True
-        and selection.get("bossMode") != "hydra"
+        and mode == "chimera"
     ):
         refreshed = select_team_heroes(
             ipc,
@@ -3918,12 +4174,12 @@ def free_regroup_and_retry_manual(
         regrouped_hero_type_ids = list(selection.get("heroTypeIds", []))
     if (
         selection.get("valid") is not True
-        or selection.get("filled") is not True
-        or len(regrouped_hero_ids) != 5
-        or selection.get("bossMode") == "hydra"
+        or not regrouped_hero_ids
+        or len(regrouped_hero_ids) != len(expected_hero_ids)
+        or selection.get("bossMode") not in {None, mode}
         or selection.get("quickBattle") is True
     ):
-        raise RuntimeError("免费重整后的队伍未通过奇美拉五人队伍/快速战斗守卫")
+        raise RuntimeError(f"免费重整后的{label}队伍/快速战斗状态未通过核对")
     if regrouped_hero_ids != expected_hero_ids:
         raise RuntimeError("免费重整后队伍发生变化，已停止在队伍界面")
     if expected_hero_type_ids and regrouped_hero_type_ids != expected_hero_type_ids:
@@ -3936,9 +4192,10 @@ def free_regroup_and_retry_manual(
         command_nonce=lifecycle_nonce(nonce, 400),
         desired_hero_ids=expected_hero_ids,
         desired_hero_type_ids=expected_hero_type_ids or None,
+        boss_mode=mode,
     )
     if not started:
-        raise RuntimeError("免费重整后没有开始新的奇美拉战斗")
+        raise RuntimeError(f"免费重整后没有开始新的{label}战斗")
     new_battle = wait_for_lifecycle_screen(
         ipc, session_id, "battle", timeout_seconds=30.0
     )
@@ -3946,8 +4203,8 @@ def free_regroup_and_retry_manual(
     new_context = new_battle_state.get("context")
     if not isinstance(new_context, int) or new_context <= 0:
         raise RuntimeError("重新开战后未取得新战斗实例")
-    if new_battle_state.get("bossMode") not in {None, "chimera"}:
-        raise RuntimeError("重新开战后进入的不是奇美拉战斗")
+    if new_battle_state.get("bossMode") not in {None, mode}:
+        raise RuntimeError(f"重新开战后进入的不是{label}战斗")
     restarted_hero_ids = [
         value
         for value in new_battle_state.get("heroIds", [])
@@ -3959,13 +4216,13 @@ def free_regroup_and_retry_manual(
         if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
     if restarted_hero_ids and restarted_hero_ids != expected_hero_ids:
-        raise RuntimeError("重新开战后的五人队伍与重整前不一致")
+        raise RuntimeError(f"重新开战后的{label}队伍与重整前不一致")
     if (
         expected_hero_type_ids
         and restarted_hero_type_ids
         and restarted_hero_type_ids != expected_hero_type_ids
     ):
-        raise RuntimeError("重新开战后的英雄身份或顺序与重整前不一致")
+        raise RuntimeError(f"重新开战后的{label}英雄身份或顺序与重整前不一致")
 
     # ClientBattleViewContext is a reusable UI object.  The game can keep the
     # same address when a free regroup goes battle -> team selection -> battle,
@@ -3990,8 +4247,7 @@ def free_regroup_and_retry_manual(
     ):
         raise RuntimeError("重新开战后的状态时间早于队伍重整")
     print(
-        "必要试炼已不可完成；免费重整后已核对原五人队伍，"
-        "关闭自动战斗并以手动模式进入下一次尝试。",
+        f"免费重整后已核对原{label}队伍，关闭自动战斗并以手动模式进入下一次尝试。",
         flush=True,
     )
 
@@ -4376,6 +4632,7 @@ def result_screen_reached(
         f"正在执行第 {used + 1} 次免费重整并重新开战。",
         flush=True,
     )
+    runtime.pop("hydraDevourTracker", None)
     restarted = restart_hydra_from_result(
         ipc,
         pid=pid,
@@ -6665,6 +6922,7 @@ def request_chimera_regroup_retry(
     session_id: int,
     nonce: int,
     runtime_state: dict[str, Any] | None,
+    boss_mode: str = "chimera",
 ) -> None:
     """Use the single verified in-battle regroup/restart path and budget."""
     objectives = config.get("objectives", {})
@@ -6695,6 +6953,7 @@ def request_chimera_regroup_retry(
             )
             else None
         ),
+        boss_mode=boss_mode,
     )
     runtime["regroupRetries"] = used + 1
 
@@ -6725,6 +6984,76 @@ def process_state(
     if reason:
         print(f"暂停：{reason}", flush=True)
         return False
+    if ACTIVE_BOSS_MODE == "hydra" and runtime_state is not None:
+        devour_retry, new_mark, devour_tracking_armed = (
+            evaluate_hydra_devour_retry_trigger(config, state, runtime_state)
+        )
+        tracker = runtime_state.get("hydraDevourTracker", {})
+        sequence = tracker.get("sequence", []) if isinstance(tracker, dict) else []
+        if new_mark is not None:
+            print(
+                f"六头蛇吞噬顺序：第 {len(sequence)} 个标记目标为"
+                f"“{new_mark.get('name', '未知英雄')}”。",
+                flush=True,
+            )
+        objectives = config.get("objectives", {})
+        devour_conditions = (
+            objectives.get("devourOrderRetryConditions", [])
+            if isinstance(objectives, dict)
+            else []
+        )
+        if (
+            devour_conditions
+            and not devour_tracking_armed
+            and isinstance(tracker, dict)
+            and tracker.get("midBattleNoticeEmitted") is not True
+        ):
+            print(
+                "当前接管不是从本场六头蛇开局开始；无法确认此前吞噬顺序，"
+                "本场不会据此自动重整，下一场将自动启用。",
+                flush=True,
+            )
+            tracker["midBattleNoticeEmitted"] = True
+        if devour_retry is not None:
+            hero_names_by_type = {
+                hero.get("typeId"): str(
+                    hero.get("name") or f"英雄 {hero.get('typeId')}"
+                )
+                for hero in state_entities(state, "heroes")
+                if isinstance(hero.get("typeId"), int)
+            }
+            expected_labels = ", ".join(
+                hero_names_by_type.get(type_id, f"英雄 {type_id}")
+                for type_id in devour_retry.expected_hero_type_ids
+            )
+            requirement = (
+                f"必须是以下英雄之一：{expected_labels}"
+                if devour_retry.relation == "isAnyOf"
+                else f"不能是以下英雄之一：{expected_labels}"
+            )
+            print(
+                f"六头蛇吞噬顺序重整条件 {devour_retry.condition_index + 1} 已触发："
+                f"第 {devour_retry.mark_index} 个标记目标为"
+                f"“{devour_retry.actual_hero_name}”，但该位置{requirement}；"
+                f"当前已观察顺序：{' → '.join(devour_retry.observed_sequence)}。",
+                flush=True,
+            )
+            execute = execute_requested and config.get("mode") == "execute"
+            if execute:
+                runtime_state.pop("hydraDevourTracker", None)
+                request_chimera_regroup_retry(
+                    config,
+                    state,
+                    agent=agent,
+                    ipc=ipc,
+                    session_id=session_id,
+                    nonce=nonce,
+                    runtime_state=runtime_state,
+                    boss_mode="hydra",
+                )
+            else:
+                print("观察模式：不会实际触发免费重整。", flush=True)
+            return False
     objective_report = evaluate_objectives(config, state)
     if runtime_state is not None and ACTIVE_BOSS_MODE == "chimera":
         runtime_state["lastObjectiveReport"] = {

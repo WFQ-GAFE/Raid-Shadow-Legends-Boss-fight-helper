@@ -13,6 +13,7 @@ from chimera_controller import (
     TakeoverInterrupted,
     account_binding,
     evaluate_early_retry_trigger,
+    evaluate_hydra_devour_retry_trigger,
     free_regroup_and_retry_manual,
     lifecycle_nonce,
     process_state,
@@ -31,6 +32,8 @@ SESSION = 99112233
 AGENT = Path("RaidChimeraAgent.dll")
 HERO_IDS = [39104, 21597, 34700, 21826, 26679]
 HERO_TYPE_IDS = [8896, 4716, 10436, 9906, 8256]
+HYDRA_HERO_IDS = [50101, 50102]
+HYDRA_HERO_TYPE_IDS = [6200, 9510]
 
 
 class FakeIpc:
@@ -564,6 +567,92 @@ def test_retry_uses_configured_team_after_agent_reload() -> None:
         session_id=SESSION,
         command_nonce=lifecycle_nonce(12, 400),
         desired_hero_ids=HERO_IDS,
+        desired_hero_type_ids=None,
+        boss_mode="chimera",
+    )
+
+
+def test_hydra_devour_retry_accepts_partial_live_team() -> None:
+    ipc = FakeIpc(
+        active_lifecycle(
+            "battle",
+            {
+                "battle": {
+                    "context": 4001,
+                    "bossMode": "hydra",
+                    "heroIds": HYDRA_HERO_IDS,
+                    "heroTypeIds": HYDRA_HERO_TYPE_IDS,
+                }
+            },
+        )
+    )
+
+    def submit(*args, **kwargs):
+        ipc.current_lifecycle = {
+            **active_lifecycle(
+                "team_selection", {"selection": {"context": 5001}}
+            ),
+            "sequence": 21,
+            "observedAtTick": 210,
+        }
+        return {"status": "submitted"}
+
+    refreshed = active_lifecycle(
+        "team_selection",
+        {
+            "selection": {
+                "valid": True,
+                "filled": False,
+                "bossMode": "hydra",
+                "quickBattle": False,
+                "heroIds": HYDRA_HERO_IDS,
+                "heroTypeIds": HYDRA_HERO_TYPE_IDS,
+            }
+        },
+    )
+    new_battle = {
+        **active_lifecycle(
+            "battle",
+            {
+                "battle": {
+                    "context": 4001,
+                    "bossMode": "hydra",
+                    "heroIds": HYDRA_HERO_IDS,
+                    "heroTypeIds": HYDRA_HERO_TYPE_IDS,
+                }
+            },
+        ),
+        "sequence": 22,
+        "observedAtTick": 220,
+    }
+    with (
+        patch("chimera_controller.submit_free_regroup", side_effect=submit),
+        patch(
+            "chimera_controller.wait_for_lifecycle_screen",
+            side_effect=[ipc.current_lifecycle, new_battle],
+        ),
+        patch("chimera_controller.refresh_team_selection", return_value=refreshed),
+        patch(
+            "chimera_controller.start_first_battle_if_ready", return_value=True
+        ) as start,
+    ):
+        free_regroup_and_retry_manual(
+            ipc,
+            pid=1,
+            agent=AGENT,
+            session_id=SESSION,
+            nonce=14,
+            boss_mode="hydra",
+        )
+    start.assert_called_once_with(
+        ipc,
+        pid=1,
+        agent=AGENT,
+        session_id=SESSION,
+        command_nonce=lifecycle_nonce(14, 400),
+        desired_hero_ids=HYDRA_HERO_IDS,
+        desired_hero_type_ids=HYDRA_HERO_TYPE_IDS,
+        boss_mode="hydra",
     )
 
 
@@ -923,6 +1012,95 @@ def test_chimera_result_retries_for_missing_trial_or_damage() -> None:
         restart.assert_called_once()
 
 
+def test_hydra_devour_order_is_observed_and_evaluated_incrementally() -> None:
+    config = {
+        "objectives": {
+            "devourOrderRetryConditions": [
+                {
+                    "markIndex": 2,
+                    "relation": "isNoneOf",
+                    "heroTypeIds": [HERO_TYPE_IDS[1]],
+                }
+            ]
+        }
+    }
+    first = {
+        "battle": {"playerTurnCount": 1},
+        "hydra": {"turnCount": 1},
+        "pointers": {"context": 7001},
+        "heroes": [
+            {
+                "id": 101,
+                "typeId": HERO_TYPE_IDS[0],
+                "name": "First",
+                "dead": False,
+                "effects": [
+                    {
+                        "skillTypeId": 260006,
+                        "effectTypeId": 680,
+                        "effectKindId": 9020,
+                        "effectKind": "HungerCounter",
+                    }
+                ],
+            },
+            {
+                "id": 102,
+                "typeId": HERO_TYPE_IDS[1],
+                "name": "Second",
+                "dead": False,
+                "effects": [],
+            },
+        ],
+    }
+    runtime: dict = {}
+    trigger, new_mark, armed = evaluate_hydra_devour_retry_trigger(
+        config, first, runtime
+    )
+    assert armed is True
+    assert trigger is None
+    assert new_mark == {
+        "actorId": 101,
+        "heroTypeId": HERO_TYPE_IDS[0],
+        "name": "First",
+    }
+
+    repeated_trigger, repeated_mark, _ = evaluate_hydra_devour_retry_trigger(
+        config, first, runtime
+    )
+    assert repeated_trigger is None
+    assert repeated_mark is None
+
+    second = {
+        **first,
+        "battle": {"playerTurnCount": 20},
+        "hydra": {"turnCount": 20},
+        "heroes": [
+            {**first["heroes"][0], "effects": []},
+            {
+                **first["heroes"][1],
+                "effects": [{"effectKindId": 9020}],
+            },
+        ],
+    }
+    trigger, new_mark, armed = evaluate_hydra_devour_retry_trigger(
+        config, second, runtime
+    )
+    assert armed is True
+    assert new_mark is not None and new_mark["name"] == "Second"
+    assert trigger is not None
+    assert trigger.mark_index == 2
+    assert trigger.actual_hero_type_id == HERO_TYPE_IDS[1]
+    assert trigger.observed_sequence == ("First", "Second")
+
+    mid_battle_runtime: dict = {}
+    trigger, new_mark, armed = evaluate_hydra_devour_retry_trigger(
+        config, second, mid_battle_runtime
+    )
+    assert armed is False
+    assert trigger is None
+    assert new_mark is None
+
+
 def main() -> int:
     test_nonce_uniqueness()
     test_team_reader_never_falls_back_from_partial_type_ids()
@@ -934,6 +1112,8 @@ def main() -> int:
     test_select_team_uses_five_bound_hero_ids()
     test_retry_rejects_changed_team_before_start()
     test_retry_accepts_same_team_when_battle_context_is_reused()
+    test_retry_uses_configured_team_after_agent_reload()
+    test_hydra_devour_retry_accepts_partial_live_team()
     test_retry_budget_stops_before_mutation()
     test_retry_success_updates_session_budget()
     test_early_retry_uses_explicit_turn_and_trial_deadline()
@@ -943,6 +1123,7 @@ def main() -> int:
     test_hydra_result_retries_below_damage_target()
     test_chimera_result_holds_only_after_all_objectives()
     test_chimera_result_retries_for_missing_trial_or_damage()
+    test_hydra_devour_order_is_observed_and_evaluated_incrementally()
     print("chimera-lifecycle-flow-tests-ok")
     return 0
 

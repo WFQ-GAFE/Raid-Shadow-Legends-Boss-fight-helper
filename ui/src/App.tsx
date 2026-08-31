@@ -215,7 +215,14 @@ type EarlyRetryCondition = {
   trialIds: number[]
 }
 
+type HydraDevourRetryCondition = {
+  markIndex: number
+  relation: 'isAnyOf' | 'isNoneOf'
+  heroTypeIds: number[]
+}
+
 const EMPTY_EARLY_RETRY_CONDITIONS: EarlyRetryCondition[] = []
+const EMPTY_HYDRA_DEVOUR_RETRY_CONDITIONS: HydraDevourRetryCondition[] = []
 
 type Strategy = {
   name?: string
@@ -224,6 +231,7 @@ type Strategy = {
   objectives?: {
     mandatoryTrialIds?: number[]
     earlyRetryConditions?: EarlyRetryCondition[]
+    devourOrderRetryConditions?: HydraDevourRetryCondition[]
     minimumDamage?: number
     maxRegroupRetries?: number
     [key: string]: unknown
@@ -1250,6 +1258,81 @@ function EarlyRetryPicker({
   )
 }
 
+function HydraDevourRetryPicker({
+  open,
+  onOpenChange,
+  heroes,
+  team,
+  conditions,
+  onApply,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  heroes: Hero[]
+  team: number[]
+  conditions: HydraDevourRetryCondition[]
+  onApply: (conditions: HydraDevourRetryCondition[]) => void
+}) {
+  const [draft, setDraft] = useState<HydraDevourRetryCondition[]>(conditions)
+  const teamHeroTypeIds = [...new Set(team.filter((value) => Number.isInteger(value) && value > 0))]
+
+  useEffect(() => {
+    if (!open) return
+    setDraft(conditions)
+  }, [open, conditions])
+
+  function updateCondition(index: number, changes: Partial<HydraDevourRetryCondition>) {
+    setDraft((current) => current.map((condition, itemIndex) => itemIndex === index ? { ...condition, ...changes } : condition))
+  }
+
+  function addCondition() {
+    if (!teamHeroTypeIds.length) return
+    setDraft((current) => [...current, {
+      markIndex: Math.min(100, current.length + 1),
+      relation: 'isNoneOf',
+      heroTypeIds: [teamHeroTypeIds[0]],
+    }])
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content early-retry-dialog">
+          <div className="dialog-heading">
+            <div><Dialog.Title>六头蛇吞噬顺序重整</Dialog.Title><Dialog.Description>首个吞噬标记会在开局立即读取；后续目标会在游戏生成新标记时依次判定。不符合条件时使用当前队伍免费重整并重新开战。</Dialog.Description></div>
+            <Dialog.Close className="icon-button" aria-label="关闭"><X size={19} /></Dialog.Close>
+          </div>
+          <div className="early-retry-list">
+            {!teamHeroTypeIds.length && <div className="effect-condition-empty"><Waves size={22} /><span><strong>尚未读取准备队伍</strong><small>请先进入六头蛇准备界面，或保存当前准备队伍</small></span></div>}
+            {teamHeroTypeIds.length > 0 && !draft.length && <div className="effect-condition-empty"><Activity size={22} /><span><strong>尚未设置吞噬顺序条件</strong><small>不设置时不会因吞噬目标提前重整</small></span></div>}
+            {draft.map((condition, index) => (
+              <article className="early-retry-condition" key={index}>
+                <div className="early-retry-condition-heading"><strong>条件 {index + 1}</strong><button type="button" className="icon-button danger" aria-label={`删除吞噬顺序条件 ${index + 1}`} onClick={() => setDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>
+                <div className="early-retry-fields">
+                  <label className="field"><span>第几个吞噬标记</span><NumericInput value={condition.markIndex} onValue={(value) => updateCondition(index, { markIndex: value })} /></label>
+                  <label className="field"><span>目标要求</span><select value={condition.relation} onChange={(event) => updateCondition(index, { relation: event.target.value === 'isAnyOf' ? 'isAnyOf' : 'isNoneOf' })}><option value="isNoneOf">不能是所选英雄</option><option value="isAnyOf">必须是所选英雄之一</option></select></label>
+                </div>
+                <div className="devour-retry-heroes">
+                  {teamHeroTypeIds.map((heroTypeId) => {
+                    const hero = heroByRuntimeId(heroes, heroTypeId)
+                    const checked = condition.heroTypeIds.includes(heroTypeId)
+                    return <button type="button" key={heroTypeId} className={checked ? 'selected' : ''} onClick={() => updateCondition(index, { heroTypeIds: checked ? condition.heroTypeIds.filter((value) => value !== heroTypeId) : [...condition.heroTypeIds, heroTypeId] })}><span className="check-box">{checked && <Check size={14} />}</span><HeroAvatar hero={hero} size="sm" /><span><strong>{hero?.name ?? `英雄 ${heroTypeId}`}</strong></span></button>
+                  })}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="dialog-footer">
+            <button className="button ghost" disabled={!teamHeroTypeIds.length || draft.length >= 20} onClick={addCondition}><Plus size={15} />添加顺序条件</button>
+            <div><Dialog.Close className="button ghost">取消</Dialog.Close><button className="button primary" onClick={() => { onApply(draft.filter((condition) => condition.heroTypeIds.length).map((condition) => ({ ...condition, markIndex: Math.max(1, Math.min(100, Math.floor(condition.markIndex))) }))); onOpenChange(false) }}>应用条件</button></div>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
 function RuleEditor({
   open,
   onOpenChange,
@@ -2147,6 +2230,7 @@ function App() {
   const strategyImportRef = useRef<HTMLInputElement | null>(null)
   const [trialOpen, setTrialOpen] = useState(false)
   const [earlyRetryOpen, setEarlyRetryOpen] = useState(false)
+  const [hydraDevourRetryOpen, setHydraDevourRetryOpen] = useState(false)
   const [ruleOpen, setRuleOpen] = useState(false)
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [trialSearchDifficulty, setTrialSearchDifficulty] = useState<number>(5)
@@ -2252,6 +2336,7 @@ function App() {
   const trials = difficulty?.trials ?? []
   const selectedTrials = objectives.mandatoryTrialIds ?? []
   const earlyRetryConditions = objectives.earlyRetryConditions ?? EMPTY_EARLY_RETRY_CONDITIONS
+  const hydraDevourRetryConditions = objectives.devourOrderRetryConditions ?? EMPTY_HYDRA_DEVOUR_RETRY_CONDITIONS
   const selectedProcess = data?.processes.find((process) => process.pid === selectedPid)
   const team = (live.teamHeroIds?.length ? live.teamHeroIds : config.team?.heroTypeIds ?? config.team?.heroIds) ?? []
   const activeModeSpec = data?.modes.find((mode) => mode.id === bossMode)
@@ -2280,7 +2365,7 @@ function App() {
     [trials, selectedTrials],
   )
 
-  function updateObjective(key: string, value: number | number[] | EarlyRetryCondition[]) {
+  function updateObjective(key: string, value: number | number[] | EarlyRetryCondition[] | HydraDevourRetryCondition[]) {
     setConfig((current) => ({
       ...current,
       objectives: { ...(current.objectives ?? {}), [key]: value },
@@ -2633,6 +2718,11 @@ function App() {
               <span><small>提前重整条件</small><strong>{earlyRetryConditions.length ? `已设置 ${earlyRetryConditions.length} 条` : '按回合与试炼设置'}</strong><em>{trials.length ? '可从当前难度全部试炼中选择' : '等待本轮试炼数据'}</em></span>
               <ChevronDown size={18} />
             </button>}
+            {bossMode === 'hydra' && <button className={`trial-trigger early-retry-trigger ${hydraDevourRetryConditions.length ? 'has-selection' : ''}`} disabled={!team.some((value) => value > 0)} onClick={() => setHydraDevourRetryOpen(true)}>
+              <span className="trial-trigger-icon"><RefreshCw size={20} /></span>
+              <span><small>吞噬顺序重整</small><strong>{hydraDevourRetryConditions.length ? `已设置 ${hydraDevourRetryConditions.length} 条` : '按标记顺序与英雄设置'}</strong><em>首个目标开局读取，后续目标出现时判定</em></span>
+              <ChevronDown size={18} />
+            </button>}
             {bossMode === 'hydra' && !live.modeReady && <p className="mode-calibration"><Waves size={16} /><span><strong>等待首次实战标定</strong>进入六头蛇准备界面或手动战斗后，工具会读取区域、四个蛇头和六人队伍；读取成功前不会执行任何操作。</span></p>}
           </section>
 
@@ -2768,6 +2858,7 @@ function App() {
 
       {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={applyRequiredTrials} />}
       {bossMode === 'chimera' && <EarlyRetryPicker open={earlyRetryOpen} onOpenChange={setEarlyRetryOpen} trials={trials} conditions={earlyRetryConditions} onApply={(conditions) => updateObjective('earlyRetryConditions', conditions)} />}
+      {bossMode === 'hydra' && <HydraDevourRetryPicker open={hydraDevourRetryOpen} onOpenChange={setHydraDevourRetryOpen} heroes={heroes} team={team} conditions={hydraDevourRetryConditions} onApply={(conditions) => updateObjective('devourOrderRetryConditions', conditions)} />}
       <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} onSave={saveRule} />
       <Dialog.Root open={logsExpanded} onOpenChange={setLogsExpanded}>
         <Dialog.Portal>

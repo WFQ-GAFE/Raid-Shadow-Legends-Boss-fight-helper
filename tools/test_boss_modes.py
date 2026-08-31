@@ -194,6 +194,27 @@ def main() -> None:
     assert select_target(priority, skill, state)[0] == 23
     assert select_target({"type": "auto"}, skill, state)[0] == 22
 
+    # Newer clients may leave the head-level digestion booleans false.  The
+    # model's Digestion effect must still make the swallowed target win.
+    state["bosses"][1].update(
+        {
+            "devouredHeroId": -1,
+            "isDevouring": False,
+            "effects": [
+                {"effectKind": "PoisonCloud"},
+                {
+                    "skillTypeId": 260007,
+                    "effectTypeId": 700,
+                    "effectKindId": 9025,
+                    "effectKind": "Digestion",
+                    "devouredHeroId": 11,
+                }
+            ],
+        }
+    )
+    assert select_target({"type": "devouringHead"}, skill, state)[0] == 22
+    assert select_target({"type": "auto"}, skill, state)[0] == 22
+
     # Long Hydra battles retain old head UI entries.  The current legal head
     # can therefore be absent from the bounded boss snapshot even though the
     # Devoured effect on its victim still exposes the head as producerId.
