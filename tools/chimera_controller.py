@@ -1494,11 +1494,10 @@ def hydra_head_is_devouring(entity: dict[str, Any]) -> bool:
 def hydra_devouring_head_ids(state: dict[str, Any]) -> set[int]:
     """Return authoritative Hydra head actor IDs that currently hold a hero.
 
-    A long Hydra battle keeps old head UI contexts in the client dictionary.
-    Once that dictionary outgrows the agent snapshot, a newly spawned head can
-    be present in a skill's legal target IDs before it is present in ``bosses``.
-    The Devoured effect on the victim still identifies its producer (the head)
-    and is therefore the most stable link for rescue targeting.
+    A newly spawned head can briefly be present in a skill's legal target IDs
+    before its UI metadata is published.  The Devoured effect on the victim
+    still identifies its producer (the head) and is therefore the most stable
+    link for rescue targeting.
     """
     result: set[int] = set()
     for boss in state_entities(state, "bosses"):
@@ -1507,6 +1506,7 @@ def hydra_devouring_head_ids(state: dict[str, Any]) -> set[int]:
             isinstance(actor_id, int)
             and not isinstance(actor_id, bool)
             and actor_id >= 0
+            and boss.get("dead") is not True
             and hydra_head_is_devouring(boss)
         ):
             result.add(actor_id)
@@ -2932,12 +2932,10 @@ def select_target(
     def unresolved_hydra_target() -> tuple[int, str] | None:
         """Trust the current SkillData target window over a stale boss cache.
 
-        Hydra replaces heads with new battle actors throughout a long fight.  An
-        older/bounded boss UI snapshot can therefore contain only historical
-        actors while GetAcceptableTargets already returns the four current head
-        IDs.  Those IDs are the authoritative legality check used by the game,
-        so a generic/automatic target may safely use one even before its head
-        metadata reaches the snapshot.
+        Hydra replaces heads with new battle actors throughout a long fight.
+        GetAcceptableTargets is the authoritative legality check used by the
+        game, so a generic/automatic target may safely use a legal actor ID
+        during the brief interval before its head metadata reaches the snapshot.
         """
         hydra = state.get("hydra")
         if state.get("bossMode") != "hydra" and not (

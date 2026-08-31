@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import time
+from pathlib import Path
 
 from inject_probe import (
     close_result_pipe,
@@ -21,6 +22,16 @@ def expect_value_error(**kwargs) -> None:
 
 
 def main() -> int:
+    agent_source = (
+        Path(__file__).resolve().parents[1] / "src" / "agent" / "agent.cpp"
+    ).read_text(encoding="utf-8")
+    assert "std::array<HydraDamageObservation" not in agent_source
+    assert "std::array<HydraUiDamageObservation" not in agent_source
+    assert "g_hydra_accumulated_damage_raw" not in agent_source
+    assert "std::array<std::int32_t, 64> values{};\n    std::size_t count{};\n    std::int32_t reported_count" not in agent_source
+    assert "std::vector<std::int32_t> values{};" in agent_source
+    assert "std::vector<void*> objects{};" in agent_source
+
     pipe = create_result_pipe(2_000_000_001)
     result_queue, reader = start_result_reader(pipe)
     del result_queue

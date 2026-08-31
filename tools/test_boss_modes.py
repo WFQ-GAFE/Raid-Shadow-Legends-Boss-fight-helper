@@ -282,9 +282,8 @@ def main() -> None:
     assert fallback_decision is not None and fallback_decision.target_id == 69
     assert "优先目标不可用" in fallback_decision.target_label
 
-    # A legacy agent can retain 64 historical head contexts while the current
-    # SkillData window already exposes newer legal actor IDs.  Automatic/default
-    # targeting must trust those legal IDs instead of stalling after resume.
+    # Even after hundreds of head replacements, automatic/default targeting
+    # must ignore historical dead actors and trust the current SkillData window.
     stale_head_state = {
         "bossMode": "hydra",
         "hydra": {"active": True, "turnCount": 833},
@@ -296,25 +295,25 @@ def main() -> None:
         ],
         "bosses": [
             {"id": head_id, "dead": True, "effects": []}
-            for head_id in range(8, 72)
+            for head_id in range(8, 708)
         ],
         "skills": [
             {
                 "slot": 2,
                 "typeId": 104102,
                 "ready": True,
-                "validTargetIds": [72, 73, 74, 75],
+                "validTargetIds": [708, 709, 710, 711],
             }
         ],
     }
     stale_target = select_target(
         {"type": "auto"}, stale_head_state["skills"][0], stale_head_state
     )
-    assert stale_target is not None and stale_target[0] == 72
+    assert stale_target is not None and stale_target[0] == 708
     assert "技能合法目标" in stale_target[1]
     assert select_target(
         {"type": "boss"}, stale_head_state["skills"][0], stale_head_state
-    )[0] == 72
+    )[0] == 708
     stale_decision = evaluate(
         {
             "rules": [
@@ -336,7 +335,7 @@ def main() -> None:
         },
         stale_head_state,
     )
-    assert stale_decision is not None and stale_decision.target_id == 72
+    assert stale_decision is not None and stale_decision.target_id == 708
     assert "优先目标不可用" in stale_decision.target_label
 
     state["activeHeroTypeId"] = 100

@@ -12,7 +12,9 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -53,7 +55,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 3;
-constexpr std::uint64_t kAgentBuildId = 2026083101ULL;
+constexpr std::uint64_t kAgentBuildId = 2026083102ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -243,18 +245,17 @@ std::atomic<std::uint64_t> g_state_sequence{};
 
 struct HydraDamageObservation {
     void* hero{};
-    std::int32_t actor_id{INT_MIN};
     std::int64_t raw_damage{};
 };
 
-struct HydraUiDamageObservation {
-    std::int32_t head_id{INT_MIN};
-    std::int64_t damage{};
-};
-
-std::array<HydraDamageObservation, 96> g_hydra_damage_observations{};
-std::int64_t g_hydra_accumulated_damage_raw{};
-std::array<HydraUiDamageObservation, 512> g_hydra_ui_damage_observations{};
+// Hydra creates a new battle actor whenever a head respawns.  These maps must
+// grow with the battle rather than silently stop at an arbitrary number of
+// historical heads; otherwise long battles lose both target and damage data.
+std::unordered_map<std::int32_t, HydraDamageObservation>
+    g_hydra_damage_observations{};
+double g_hydra_accumulated_damage{};
+std::unordered_map<std::int32_t, std::int64_t>
+    g_hydra_ui_damage_observations{};
 std::int64_t g_hydra_ui_total_damage{};
 bool g_hydra_ui_damage_valid{};
 void* g_hydra_damage_battle_context{};
@@ -262,9 +263,9 @@ SRWLOCK g_hydra_damage_lock = SRWLOCK_INIT;
 
 void reset_hydra_damage_tracker(void* battle_context = nullptr) {
     AcquireSRWLockExclusive(&g_hydra_damage_lock);
-    g_hydra_damage_observations.fill({});
-    g_hydra_accumulated_damage_raw = 0;
-    g_hydra_ui_damage_observations.fill({});
+    g_hydra_damage_observations.clear();
+    g_hydra_accumulated_damage = 0;
+    g_hydra_ui_damage_observations.clear();
     g_hydra_ui_total_damage = 0;
     g_hydra_ui_damage_valid = false;
     g_hydra_damage_battle_context = battle_context;
@@ -276,33 +277,19 @@ void observe_hydra_ui_damage(std::int32_t head_id, std::int64_t damage) {
         return;
     }
     AcquireSRWLockExclusive(&g_hydra_damage_lock);
-    HydraUiDamageObservation* observation = nullptr;
-    HydraUiDamageObservation* empty = nullptr;
-    for (HydraUiDamageObservation& candidate :
-         g_hydra_ui_damage_observations) {
-        if (candidate.head_id == INT_MIN && !empty) {
-            empty = &candidate;
-        }
-        if (candidate.head_id == head_id) {
-            observation = &candidate;
-            break;
-        }
-    }
-    if (!observation) {
-        observation = empty;
-        if (observation) {
-            observation->head_id = head_id;
-        }
-    }
-    if (observation) {
-        if (damage > observation->damage) {
-            const std::int64_t delta = damage - observation->damage;
+    try {
+        std::int64_t& observed_damage =
+            g_hydra_ui_damage_observations[head_id];
+        if (damage > observed_damage) {
+            const std::int64_t delta = damage - observed_damage;
             if (g_hydra_ui_total_damage <= LLONG_MAX - delta) {
                 g_hydra_ui_total_damage += delta;
             }
-            observation->damage = damage;
+            observed_damage = damage;
         }
         g_hydra_ui_damage_valid = true;
+    } catch (...) {
+        // Keep the previous valid total if allocation ever fails in-process.
     }
     ReleaseSRWLockExclusive(&g_hydra_damage_lock);
 }
@@ -314,62 +301,43 @@ bool read_hydra_ui_damage(std::int64_t* total, std::size_t* head_count) {
     AcquireSRWLockShared(&g_hydra_damage_lock);
     const bool valid = g_hydra_ui_damage_valid;
     *total = g_hydra_ui_total_damage;
-    *head_count = 0;
-    if (valid) {
-        for (const HydraUiDamageObservation& observation :
-             g_hydra_ui_damage_observations) {
-            if (observation.head_id != INT_MIN) {
-                ++*head_count;
-            }
-        }
-    }
+    *head_count = valid ? g_hydra_ui_damage_observations.size() : 0;
     ReleaseSRWLockShared(&g_hydra_damage_lock);
     return valid;
 }
 
-std::int64_t observe_hydra_damage(void* battle_context,
-                                  std::int32_t actor_id, void* hero,
-                                  std::int64_t raw_damage) {
+double observe_hydra_damage(void* battle_context, std::int32_t actor_id,
+                            void* hero, std::int64_t raw_damage) {
     if (!battle_context || !hero || actor_id < 0 || raw_damage < 0) {
-        return -1;
+        return -1.0;
     }
     AcquireSRWLockExclusive(&g_hydra_damage_lock);
     if (g_hydra_damage_battle_context != battle_context) {
-        g_hydra_damage_observations.fill({});
-        g_hydra_accumulated_damage_raw = 0;
+        g_hydra_damage_observations.clear();
+        g_hydra_accumulated_damage = 0;
         g_hydra_damage_battle_context = battle_context;
     }
 
-    HydraDamageObservation* observation = nullptr;
-    HydraDamageObservation* empty = nullptr;
-    for (HydraDamageObservation& candidate : g_hydra_damage_observations) {
-        if (!candidate.hero && !empty) {
-            empty = &candidate;
+    try {
+        HydraDamageObservation& observation =
+            g_hydra_damage_observations[actor_id];
+        if (observation.hero != hero) {
+            observation.hero = hero;
+            observation.raw_damage = 0;
         }
-        if (candidate.hero == hero && candidate.actor_id == actor_id) {
-            observation = &candidate;
-            break;
-        }
-    }
-    if (!observation) {
-        observation = empty;
-        if (observation) {
-            observation->hero = hero;
-            observation->actor_id = actor_id;
-            observation->raw_damage = 0;
-        }
-    }
-    if (observation) {
-        const std::int64_t delta = raw_damage >= observation->raw_damage
-            ? raw_damage - observation->raw_damage
+        const std::int64_t delta = raw_damage >= observation.raw_damage
+            ? raw_damage - observation.raw_damage
             : raw_damage;
-        if (delta > 0 &&
-            g_hydra_accumulated_damage_raw <= LLONG_MAX - delta) {
-            g_hydra_accumulated_damage_raw += delta;
+        if (delta > 0) {
+            constexpr double kFixedOne = 4294967296.0;
+            g_hydra_accumulated_damage +=
+                static_cast<double>(delta) / kFixedOne;
         }
-        observation->raw_damage = raw_damage;
+        observation.raw_damage = raw_damage;
+    } catch (...) {
+        // Return the accumulated value collected so far if allocation fails.
     }
-    const std::int64_t total = g_hydra_accumulated_damage_raw;
+    const double total = g_hydra_accumulated_damage;
     ReleaseSRWLockExclusive(&g_hydra_damage_lock);
     return total;
 }
@@ -1003,7 +971,7 @@ bool safe_class_value_size(Il2CppClass* klass, std::int32_t* size) {
 }
 
 struct IntDictionaryKeys {
-    std::array<std::int32_t, 64> values{};
+    std::vector<std::int32_t> values{};
     std::size_t count{};
     std::int32_t reported_count{};
     std::int32_t stage{};
@@ -1016,8 +984,7 @@ struct IntDictionaryKeys {
     bool valid{};
 };
 
-IntDictionaryKeys read_int_dictionary_keys(void* dictionary,
-                                           bool keep_latest = false) {
+IntDictionaryKeys read_int_dictionary_keys(void* dictionary) {
     IntDictionaryKeys snapshot{};
     Il2CppClass* dictionary_class = nullptr;
     if (!safe_read(dictionary, 0, dictionary_class) || !dictionary_class) {
@@ -1084,6 +1051,12 @@ IntDictionaryKeys read_int_dictionary_keys(void* dictionary,
 
     const std::size_t used = (std::min)(
         static_cast<std::size_t>(snapshot.reported_count), array_length);
+    try {
+        snapshot.values.reserve(used);
+    } catch (...) {
+        snapshot.stage = 7;
+        return snapshot;
+    }
     auto* vector = static_cast<unsigned char*>(entries) + 32;
     for (std::size_t index = 0; index < used; ++index) {
         void* entry = vector + index * static_cast<std::size_t>(entry_size);
@@ -1094,39 +1067,27 @@ IntDictionaryKeys read_int_dictionary_keys(void* dictionary,
             !safe_read(entry, key_offset, key) || key < 0) {
             continue;
         }
-        bool duplicate = false;
-        for (std::size_t existing = 0; existing < snapshot.count; ++existing) {
-            duplicate = duplicate || snapshot.values[existing] == key;
-        }
-        if (duplicate) {
-            continue;
-        }
-        if (snapshot.count < snapshot.values.size()) {
-            snapshot.values[snapshot.count++] = key;
-        } else if (keep_latest) {
-            for (std::size_t retained = 1;
-                 retained < snapshot.values.size(); ++retained) {
-                snapshot.values[retained - 1] = snapshot.values[retained];
-            }
-            snapshot.values.back() = key;
-        } else {
-            break;
+        try {
+            snapshot.values.push_back(key);
+        } catch (...) {
+            snapshot.stage = 7;
+            return snapshot;
         }
     }
+    snapshot.count = snapshot.values.size();
     snapshot.valid = true;
     snapshot.stage = 7;
     return snapshot;
 }
 
 struct IntObjectDictionaryItems {
-    std::array<std::int32_t, 64> keys{};
-    std::array<void*, 64> objects{};
+    std::vector<std::int32_t> keys{};
+    std::vector<void*> objects{};
     std::size_t count{};
     bool valid{};
 };
 
-IntObjectDictionaryItems read_int_object_dictionary(
-    void* dictionary, bool keep_latest = false) {
+IntObjectDictionaryItems read_int_object_dictionary(void* dictionary) {
     IntObjectDictionaryItems snapshot{};
     Il2CppClass* dictionary_class = nullptr;
     if (!safe_read(dictionary, 0, dictionary_class) || !dictionary_class) {
@@ -1184,6 +1145,12 @@ IntObjectDictionaryItems read_int_object_dictionary(
 
     const std::size_t used = (std::min)(
         static_cast<std::size_t>(reported_count), array_length);
+    try {
+        snapshot.keys.reserve(used);
+        snapshot.objects.reserve(used);
+    } catch (...) {
+        return snapshot;
+    }
     auto* vector = static_cast<unsigned char*>(entries) + 32;
     for (std::size_t index = 0; index < used; ++index) {
         void* entry = vector + index * static_cast<std::size_t>(entry_size);
@@ -1196,22 +1163,16 @@ IntObjectDictionaryItems read_int_object_dictionary(
             !safe_read(entry, value_offset, value) || !value) {
             continue;
         }
-        if (snapshot.count < snapshot.keys.size()) {
-            snapshot.keys[snapshot.count] = key;
-            snapshot.objects[snapshot.count] = value;
-            ++snapshot.count;
-        } else if (keep_latest) {
-            for (std::size_t retained = 1;
-                 retained < snapshot.keys.size(); ++retained) {
-                snapshot.keys[retained - 1] = snapshot.keys[retained];
-                snapshot.objects[retained - 1] = snapshot.objects[retained];
-            }
-            snapshot.keys.back() = key;
-            snapshot.objects.back() = value;
-        } else {
-            break;
+        try {
+            snapshot.keys.push_back(key);
+            snapshot.objects.push_back(value);
+        } catch (...) {
+            snapshot.keys.clear();
+            snapshot.objects.clear();
+            return snapshot;
         }
     }
+    snapshot.count = snapshot.keys.size();
     snapshot.valid = true;
     return snapshot;
 }
@@ -3318,10 +3279,10 @@ bool read_command_guard(const QueueCommandRequest& request,
     const IntDictionaryKeys acceptable_keys =
         read_int_dictionary_keys(acceptable_targets);
     const IntDictionaryKeys actor_keys = read_int_dictionary_keys(actors);
-    // Hydra keeps historical head actors in this dictionary. Long battles can
-    // exceed the bounded snapshot capacity, so retain the newest actor IDs for
-    // the command guard instead of the first heads spawned in the battle.
-    const IntDictionaryKeys boss_keys = read_int_dictionary_keys(bosses, true);
+    // Hydra keeps every replaced head actor in this dictionary.  The snapshot
+    // is deliberately unbounded (up to the validated game collection size),
+    // so membership checks remain correct for both current and historical IDs.
+    const IntDictionaryKeys boss_keys = read_int_dictionary_keys(bosses);
     if (!dictionary_contains(acceptable_keys, request.target_id) ||
         (!dictionary_contains(actor_keys, request.target_id) &&
          !dictionary_contains(boss_keys, request.target_id))) {
@@ -5003,7 +4964,10 @@ void append_actor_state(std::ostringstream& output, void* mode,
                 }
             }
         }
-        if (living_only && dead) {
+        // Historical Hydra UI entries may outlive their BattleHero.  They are
+        // not current targets even if the stale UI object itself has no dead
+        // flag, so require a live model object before publishing a head.
+        if (living_only && (!hero || dead)) {
             continue;
         }
         if (!first_actor) {
@@ -5195,21 +5159,21 @@ ChimeraBattleMetrics read_hydra_battle_metrics(void* mode) {
 
     // In RAID 11.70 / Unity 6000.3, HydraTotalTakenDamage is overloaded for
     // BattleHero and BattleHeroSnapshot.  The BattleStateSnapshot overload
-    // assumed by the earlier implementation does not exist.  Read the four
-    // current model heroes, then retain each object's monotonic contribution
-    // so a replacement head starts a new contribution instead of erasing the
-    // damage dealt to the previous object.
+    // assumed by the earlier implementation does not exist.  Read every head
+    // actor retained by the battle dictionary and remember each monotonic
+    // contribution, so replacements never erase earlier damage and long
+    // battles are not capped at an arbitrary number of heads.
     void* bosses_dictionary = nullptr;
     if (!safe_read(mode, 128, bosses_dictionary)) {
         return metrics;
     }
     const IntObjectDictionaryItems bosses =
-        read_int_object_dictionary(bosses_dictionary, true);
+        read_int_object_dictionary(bosses_dictionary);
     if (!bosses.valid) {
         return metrics;
     }
 
-    std::int64_t accumulated_raw = -1;
+    double accumulated_damage = -1.0;
     bool used_extension = false;
     bool used_field_fallback = false;
     for (std::size_t index = 0; index < bosses.count; ++index) {
@@ -5230,17 +5194,16 @@ ChimeraBattleMetrics read_hydra_battle_metrics(void* mode) {
         if (!damage_read || head_damage_raw < 0) {
             continue;
         }
-        const std::int64_t observed = observe_hydra_damage(
+        const double observed = observe_hydra_damage(
             context, actor_id, hero, head_damage_raw);
         if (observed >= 0) {
-            accumulated_raw = observed;
+            accumulated_damage = observed;
             ++metrics.sample_count;
         }
     }
 
-    if (metrics.sample_count > 0 && accumulated_raw >= 0) {
-        constexpr double kFixedOne = 4294967296.0;
-        metrics.damage = static_cast<double>(accumulated_raw) / kFixedOne;
+    if (metrics.sample_count > 0 && accumulated_damage >= 0) {
+        metrics.damage = accumulated_damage;
         metrics.valid = true;
         metrics.source = used_extension
             ? "hydra_total_taken_damage"
@@ -5372,11 +5335,11 @@ void capture_battle_state(void* mode, void* skill_data,
     const IntDictionaryKeys valid_targets =
         read_int_dictionary_keys(acceptable_targets);
     const IntDictionaryKeys boss_ids =
-        read_int_dictionary_keys(bosses_dictionary, true);
+        read_int_dictionary_keys(bosses_dictionary);
     const IntObjectDictionaryItems actors =
         read_int_object_dictionary(actors_dictionary);
     const IntObjectDictionaryItems bosses =
-        read_int_object_dictionary(bosses_dictionary, true);
+        read_int_object_dictionary(bosses_dictionary);
 
     std::int32_t skill_id = -1;
     std::int32_t level = 0;
@@ -5634,7 +5597,7 @@ void capture_decision_state(void* generator) {
     const IntObjectDictionaryItems actors =
         read_int_object_dictionary(actors_dictionary);
     const IntObjectDictionaryItems bosses =
-        read_int_object_dictionary(bosses_dictionary, true);
+        read_int_object_dictionary(bosses_dictionary);
     const AllianceBossIdentity boss_identity = identify_alliance_boss(
         runtime.active_hero_valid, runtime.active_hero_type_id,
         runtime.chimera_preset, runtime.reported_hydra_battle,

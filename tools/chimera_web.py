@@ -1524,18 +1524,16 @@ class ChimeraService:
                 head = normalize_hydra_head(value)
                 if head.get("dead") is True:
                     continue
-                identity = canonical_hydra_head_type_id(head)
                 actor_id = head.get("id")
-                if not isinstance(identity, int):
-                    identity = actor_id if isinstance(actor_id, int) else None
-                if identity is None:
+                if not isinstance(actor_id, int) or isinstance(actor_id, bool):
                     continue
                 # Hydra creates a new actor whenever a head returns.  The UI
-                # keeps only the current identity and deliberately carries no
-                # HP fields, so old actor records cannot accumulate forever.
+                # keys current entries by actor rather than type, so two live
+                # instances can never overwrite one another.  HP is omitted so
+                # replaced actors cannot accumulate meaningless history.
                 for key in ("healthPct", "health", "currentHealth", "maxHealth"):
                     head.pop(key, None)
-                current_heads[identity] = head
+                current_heads[actor_id] = head
             bosses = list(current_heads.values())
             self.update_hydra_heads(bosses)
         boss = next((value for value in bosses if isinstance(value, dict)), {})
