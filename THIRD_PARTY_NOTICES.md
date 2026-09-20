@@ -27,6 +27,11 @@ clr-loader 0.3.1, Bottle 0.13.4, proxy_tools 0.1.0, cffi 2.1.1,
 pycparser 3.0, and typing_extensions 4.16.0. Runtime packages and their
 license metadata are retained under `third_party/python`.
 
+The vendored pywebview WebView2 backend includes local fixes for closing
+during initialization, disposing an uninitialized browser, and releasing
+pending JavaScript calls during shutdown. These changes are covered by the
+offline desktop lifecycle tests.
+
 Native game portrait and icon extraction in packaged releases uses UnityPy
 1.25.3 and its declared decoder dependencies. UnityPy is MIT-licensed; the
 licenses supplied with those build-environment packages apply to their bundled

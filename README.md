@@ -10,6 +10,16 @@ Current release: **1.0.5**.
 
 当前版本：**1.0.5**。
 
+本次稳定版源码、发布包对应关系与构建验证见 [1.0.5 源码说明](docs/1.0.5-source-release.md)。克隆仓库时请使用 `--recurse-submodules` 获取 MinHook。
+
+本地固定启动入口：`build\release\AllianceBossStrategyStudio.exe`。桌面快捷方式指向这个文件；后续发布更新同一路径，快捷方式无需重建。发布时如文件被占用，请关闭工具后重试。构建与发布说明见 [通用 release](docs/release-workflow.md)。
+
+规则数量条件：[仅统计增益或减益的设置方法](docs/1.0.5-effect-count-conditions.md)。
+
+Stability fixes and verification / 稳定性修复与验收：[1.0.5 修复说明](docs/1.0.5-stability-fixes.md).
+
+独立离线试炼原型：[使用说明与模型范围](offline_sim/README.md)。当前提供人工试炼链验证及真实导出数据的缺项检查，尚不支持真实队伍或完整战斗预测，未接入现有 EXE。
+
 Download the .exe tool in release page.
 
 请在 Release 页面下载 .exe 工具。

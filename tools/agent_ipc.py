@@ -9,7 +9,7 @@ from typing import Any
 
 SHARED_STATE_MAGIC = 0x52434950
 SHARED_STATE_VERSION = 3
-AGENT_BUILD_ID = 2026083102
+AGENT_BUILD_ID = 2026091301
 COMMAND_VERSION = 4
 AGENT_STATE_INITIALIZING = 1
 AGENT_STATE_READY = 2
@@ -201,7 +201,24 @@ class AgentIpc:
         if text is None:
             return None
         value = json.loads(text)
+        if isinstance(value, dict) and value.get("type") == "ipc_error":
+            raise ValueError(f"代理状态容量不足（{slot_name}）：{value.get('requiredBytes')} / {value.get('capacity')} 字节，已停止使用此快照")
         return value if isinstance(value, dict) else None
+
+    def slot_usage(self) -> dict[str, Any]:
+        result = {}
+        for name in ("account", "decision", "acknowledgement", "lifecycle", "battle_ledger", "rotation_catalog"):
+            slot = getattr(self.state, name)
+            for _ in range(8):
+                before = int(slot.sequence)
+                if before & 1:
+                    continue
+                size = int(slot.reserved)
+                capacity = ctypes.sizeof(type(slot)) - 16
+                if before == int(slot.sequence):
+                    result[name] = {"bytes": size, "capacity": capacity, "overflow": size >= capacity}
+                    break
+        return result
 
     def account(self) -> dict[str, Any] | None:
         return self.read_json("account")

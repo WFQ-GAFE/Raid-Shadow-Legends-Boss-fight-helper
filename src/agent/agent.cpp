@@ -1,4 +1,7 @@
 #include "il2cpp_api.hpp"
+#include "shared_json_payload.hpp"
+#include "result_confirmation.hpp"
+#include "event_history.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -55,7 +58,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 3;
-constexpr std::uint64_t kAgentBuildId = 2026083102ULL;
+constexpr std::uint64_t kAgentBuildId = 2026091301ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -394,6 +397,34 @@ SelectionSnapshot g_selection_snapshot{};
 SelectionSnapshot g_last_started_selection{};
 SRWLOCK g_ui_state_lock = SRWLOCK_INIT;
 std::atomic<LONG> g_screen_state{kScreenUnknown};
+ResultConfirmation g_result_confirmation{};
+SRWLOCK g_result_confirmation_lock = SRWLOCK_INIT;
+std::array<InstanceVoidMethod, 4> g_original_result_ui{};
+std::array<std::atomic<bool>, 2> g_result_ui_ready{};
+EventHistory g_lifecycle_history; // protected by g_takeover_lock
+std::string g_terminal_battle_json = "{}"; // protected by g_result_confirmation_lock
+std::atomic<std::uint64_t> g_ignored_result_generation{};
+
+ResultConfirmation result_confirmation_snapshot() {
+    AcquireSRWLockShared(&g_result_confirmation_lock);
+    const auto snapshot = g_result_confirmation;
+    ReleaseSRWLockShared(&g_result_confirmation_lock);
+    return snapshot;
+}
+
+void begin_result_battle_generation() {
+    AcquireSRWLockExclusive(&g_result_confirmation_lock);
+    g_result_confirmation.begin_battle();
+    g_terminal_battle_json = "{}";
+    ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+}
+
+void refresh_result_battle_completion();
+bool confirmed_result_for_restart(void* context) {
+    refresh_result_battle_completion();
+    return result_confirmation_snapshot().permits_restart(
+        reinterpret_cast<std::uintptr_t>(context));
+}
 std::atomic<void*> g_selection_user{};
 
 InstanceVoidMethod g_original_selection_on_enabled{};
@@ -466,13 +497,17 @@ bool refresh_chimera_rotation_catalog(bool force);
 template <std::size_t Capacity>
 void publish_shared_json(SharedJsonSlot<Capacity>& slot,
                          const std::string& payload) {
-    const std::size_t copy_length =
-        payload.size() < Capacity ? payload.size() : Capacity - 1;
+    static_assert(Capacity >= 4096);
+    const std::string overflow = payload.size() >= Capacity
+        ? shared_json_overflow(payload.size(), Capacity) : std::string{};
+    const std::string& complete = overflow.empty() ? payload : overflow;
+    const std::size_t copy_length = complete.size();
     InterlockedIncrement64(&slot.sequence);
     MemoryBarrier();
-    std::memcpy(slot.data, payload.data(), copy_length);
+    std::memcpy(slot.data, complete.data(), copy_length);
     slot.data[copy_length] = '\0';
     slot.length = static_cast<std::uint32_t>(copy_length);
+    slot.reserved = static_cast<std::uint32_t>((std::min)(payload.size(), static_cast<std::size_t>(UINT_MAX)));
     MemoryBarrier();
     InterlockedIncrement64(&slot.sequence);
 }
@@ -565,6 +600,20 @@ void publish_takeover_state_locked(const char* reason,
     const std::uint64_t sequence =
         g_takeover_sequence.fetch_add(1, std::memory_order_acq_rel) + 1;
     const LONG state = g_takeover_state.load(std::memory_order_acquire);
+    const auto confirmation = result_confirmation_snapshot();
+    std::ostringstream event;
+    event << "\"reason\":\"" << json_escape(reason ? reason : "")
+          << "\",\"screen\":\"" << screen_state_name(g_screen_state.load())
+          << "\",\"takeoverState\":\"" << takeover_state_name(state)
+          << "\",\"battleGeneration\":" << confirmation.generation
+          << ",\"battleVerified\":" << (confirmation.battle_verified ? "true" : "false")
+          << ",\"battleFinished\":" << (confirmation.battle_finished ? "true" : "false")
+          << ",\"finishedReadStatus\":" << confirmation.finished_read_status
+          << ",\"uiEpoch\":" << confirmation.ui_epoch
+          << ",\"resultGenerationRetired\":" << (confirmation.generation_retired ? "true" : "false")
+          << ",\"dialogOpen\":" << (confirmation.dialog ? "true" : "false")
+          << ",\"openedAtTick\":" << confirmation.opened_tick;
+    g_lifecycle_history.append_state(event.str(), GetTickCount64());
     std::ostringstream output;
     output << "{\"type\":\"lifecycle_state\",\"sequence\":" << sequence
            << ",\"pid\":" << GetCurrentProcessId()
@@ -574,7 +623,10 @@ void publish_takeover_state_locked(const char* reason,
            << ",\"reason\":\"" << json_escape(reason ? reason : "")
            << "\",\"screen\":\""
            << screen_state_name(g_screen_state.load(std::memory_order_acquire))
-           << "\",\"observedAtTick\":" << GetTickCount64();
+           << "\",\"observedAtTick\":" << GetTickCount64()
+           << ",\"battleGeneration\":" << result_confirmation_snapshot().generation
+           << ",\"resultConfirmationAvailable\":"
+           << (g_result_ui_ready[g_takeover_boss_mode.load() == kTakeoverBossModeHydra ? 1 : 0].load() ? "true" : "false");
     if (g_screen_state.load(std::memory_order_acquire) ==
         kScreenTeamSelection) {
         SelectionSnapshot selection{};
@@ -664,13 +716,22 @@ void publish_takeover_state_locked(const char* reason,
         output << ",\"result\":{\"context\":"
                << reinterpret_cast<std::uintptr_t>(result_context)
                << ",\"bossMode\":\""
-               << (result_is_hydra ? "hydra" : "chimera") << "\"}";
+               << (result_is_hydra ? "hydra" : "chimera") << "\"";
+        const auto confirmation = result_confirmation_snapshot();
+        output << ",\"confirmed\":"
+               << (confirmation.permits_restart(reinterpret_cast<std::uintptr_t>(result_context)) ? "true" : "false")
+               << ",\"battleGeneration\":" << confirmation.generation
+               << ",\"openedAtTick\":" << confirmation.opened_tick
+               << ",\"battleFinished\":" << (confirmation.battle_finished ? "true" : "false")
+               << ",\"finishedReadStatus\":" << confirmation.finished_read_status
+               << ",\"source\":\"dialog_enabled_and_battle_finished\"}";
     }
     if (input_source && *input_source) {
         output << ",\"inputSource\":\"" << json_escape(input_source)
                << "\"";
     }
-    output << '}';
+    output << ",\"agentInstanceId\":" << g_shared_state->instance_id
+           << ",\"events\":" << g_lifecycle_history.json() << '}';
     publish_shared_json(g_shared_state->lifecycle, output.str());
 }
 
@@ -3632,6 +3693,10 @@ void drain_pending_lifecycle_command() {
     }
     if (request.action == kLifecycleRestartHydraResult) {
         void* context = g_result_context.load(std::memory_order_acquire);
+        if (!confirmed_result_for_restart(context)) {
+            publish_lifecycle_ack(request, "rejected", "result_not_confirmed");
+            return;
+        }
         if (!context || context != reinterpret_cast<void*>(request.context) ||
             g_screen_state.load(std::memory_order_acquire) != kScreenResult ||
             g_takeover_boss_mode.load(std::memory_order_acquire) !=
@@ -3660,6 +3725,10 @@ void drain_pending_lifecycle_command() {
     }
     if (request.action == kLifecycleRestartChimeraResult) {
         void* context = g_result_context.load(std::memory_order_acquire);
+        if (!confirmed_result_for_restart(context)) {
+            publish_lifecycle_ack(request, "rejected", "result_not_confirmed");
+            return;
+        }
         if (!context || context != reinterpret_cast<void*>(request.context) ||
             g_screen_state.load(std::memory_order_acquire) != kScreenResult ||
             g_takeover_boss_mode.load(std::memory_order_acquire) !=
@@ -4050,6 +4119,7 @@ void capture_battle_context(void* context) {
     void* previous_context =
         g_battle_context.exchange(context, std::memory_order_acq_rel);
     if (previous_context != context) {
+        begin_result_battle_generation();
         g_last_chimera_damage.store(0, std::memory_order_release);
         g_last_chimera_competition_points.store(0,
                                                 std::memory_order_release);
@@ -4922,7 +4992,7 @@ void append_model_challenges(std::ostringstream& output, void* hero) {
 
 void append_actor_state(std::ostringstream& output, void* mode,
                         const IntObjectDictionaryItems& actors,
-                        const char* side, bool living_only = false) {
+                        const char* side, bool living_only = false, bool diagnostic_only = false) {
     output << '[';
     bool first_actor = true;
     for (std::size_t index = 0; index < actors.count; ++index) {
@@ -5025,7 +5095,7 @@ void append_actor_state(std::ostringstream& output, void* mode,
         }
         first_actor = false;
         const ResolvedText name = resolve_static_hero_name(type_id);
-        const std::string avatar =
+        const std::string avatar = diagnostic_only ? "" :
             resolve_static_hero_avatar(type_id, current_form_index);
         const double health_percent = max_health_raw > 0
             ? static_cast<double>(health_raw) * 100.0 /
@@ -5074,7 +5144,8 @@ void append_actor_state(std::ostringstream& output, void* mode,
                << ",\"enfeeble\":" << (enfeeble ? "true" : "false")
                << ",\"rages\":" << (rages ? "true" : "false") << '}';
         output << ",\"skills\":";
-        append_model_skills(output, hero);
+        if (diagnostic_only) output << "[]";
+        else append_model_skills(output, hero);
         output << ",\"effects\":";
         append_model_effects(output, hero);
         output << ",\"challenges\":";
@@ -5134,6 +5205,32 @@ bool battle_model_objects(void* mode, void** context, void** state) {
            safe_read_field(processor, "<Context>k__BackingField", "Context",
                            *context) && *context &&
            safe_read_field(*context, "State", nullptr, *state) && *state;
+}
+
+void capture_finished_battle(void* mode);
+void refresh_result_battle_completion() {
+    void* mode = g_battle_mode.load(std::memory_order_acquire);
+    void* context = nullptr;
+    void* state = nullptr;
+    bool finished = false;
+    if (mode && battle_model_objects(mode, &context, &state) &&
+        safe_read_field(state, "BattleFinished", nullptr, finished)) {
+        AcquireSRWLockExclusive(&g_result_confirmation_lock);
+        const bool was_finished = g_result_confirmation.battle_finished;
+        g_result_confirmation.finished_read_status = finished ? 1 : 0;
+        if (finished) g_result_confirmation.observe_finished_battle();
+        else g_result_confirmation.battle_finished = false;
+        const bool became_finished = !was_finished && g_result_confirmation.battle_finished;
+        ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+        if (became_finished) {
+            capture_finished_battle(mode);
+            publish_lifecycle("battle_finished_observed");
+        }
+    } else {
+        AcquireSRWLockExclusive(&g_result_confirmation_lock);
+        g_result_confirmation.finished_read_status = -1;
+        ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+    }
 }
 
 struct ChimeraBattleMetrics {
@@ -5379,6 +5476,40 @@ BattleRuntimeState read_battle_runtime_state(void* mode) {
     return snapshot;
 }
 
+void capture_finished_battle(void* mode) {
+    const auto runtime = read_battle_runtime_state(mode);
+    if (!runtime.valid || !runtime.finished) return;
+    void* actors = nullptr;
+    void* bosses = nullptr;
+    const bool actors_read = safe_read(mode, 112, actors) && actors;
+    const bool bosses_read = safe_read(mode, 128, bosses) && bosses;
+    const auto actor_items = read_int_object_dictionary(actors);
+    const auto boss_items = read_int_object_dictionary(bosses);
+    const auto confirmation = result_confirmation_snapshot();
+    std::ostringstream summary;
+    summary << "{\"observedAtTick\":" << GetTickCount64()
+            << ",\"battleGeneration\":" << confirmation.generation
+            << ",\"source\":\"BattleFinished_transition\",\"battle\":{\"finished\":true,\"round\":" << runtime.round
+            << ",\"turn\":" << runtime.turn << ",\"playerTurnCount\":" << runtime.player_turn_count << '}'
+            << ",\"chimera\":{\"turnCount\":" << runtime.chimera_turn_count
+            << ",\"currentForm\":\"" << json_escape(enum_member_name(g_chimera_form_class, runtime.chimera_form_index)) << "\"}"
+            << ",\"actorsAvailable\":" << (actors_read && actor_items.valid ? "true" : "false")
+            << ",\"bossesAvailable\":" << (bosses_read && boss_items.valid ? "true" : "false");
+    const auto prefix = summary.str();
+    summary << ",\"heroes\":";
+    append_actor_state(summary, mode, actor_items, "ally", false, true);
+    summary << ",\"bosses\":";
+    append_actor_state(summary, mode, boss_items, "enemy", false, true);
+    summary << '}';
+    auto payload = summary.str();
+    if (payload.size() > 48000) payload = prefix + ",\"entitiesTruncated\":true}";
+    AcquireSRWLockExclusive(&g_result_confirmation_lock);
+    g_terminal_battle_json = payload;
+    ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+    if (g_shared_state) publish_shared_json(g_shared_state->battle_ledger,
+        "{\"type\":\"terminal_battle_observation\",\"terminalState\":" + payload + "}");
+}
+
 void capture_battle_state(void* mode, void* skill_data,
                           void* acceptable_targets, void* actors_dictionary,
                           void* bosses_dictionary) {
@@ -5424,6 +5555,7 @@ void capture_battle_state(void* mode, void* skill_data,
     }
 
     BattleRuntimeState runtime = read_battle_runtime_state(mode);
+    refresh_result_battle_completion();
     const AllianceBossIdentity boss_identity = identify_alliance_boss(
         runtime.active_hero_valid, runtime.active_hero_type_id,
         runtime.chimera_preset, runtime.reported_hydra_battle,
@@ -5628,6 +5760,7 @@ void append_decision_skills(std::ostringstream& output, void* mode,
 }
 
 void capture_decision_state(void* generator) {
+    refresh_result_battle_completion();
     void* mode = g_battle_mode.load(std::memory_order_acquire);
     void* active_generator = nullptr;
     bool waiting = false;
@@ -5714,6 +5847,9 @@ void capture_decision_state(void* generator) {
                               ? "hydra_battle_verified"
                               : "chimera_battle_verified");
     }
+    AcquireSRWLockExclusive(&g_result_confirmation_lock);
+    g_result_confirmation.observe_running_battle();
+    ReleaseSRWLockExclusive(&g_result_confirmation_lock);
 
     const bool skill_catalog_fresh =
         g_skill_catalog_active_hero_id.load(std::memory_order_acquire) ==
@@ -5758,6 +5894,7 @@ void capture_decision_state(void* generator) {
            << ",\"bossMode\":\""
            << (runtime.hydra_battle ? "hydra" : "chimera") << "\""
            << ",\"observedAtTick\":" << GetTickCount64()
+           << ",\"battleGeneration\":" << result_confirmation_snapshot().generation
            << ",\"battle\":{\"areaTypeId\":" << runtime.area_id
            << ",\"regionTypeId\":" << runtime.region_id
            << ",\"kindId\":" << runtime.kind_id
@@ -6032,6 +6169,9 @@ void capture_selection_state(void* self, const char* reason,
     ReleaseSRWLockExclusive(&g_ui_state_lock);
     g_selection_context.store(self, std::memory_order_release);
     g_result_context.store(nullptr, std::memory_order_release);
+    AcquireSRWLockExclusive(&g_result_confirmation_lock);
+    g_result_confirmation.observe_selection();
+    ReleaseSRWLockExclusive(&g_result_confirmation_lock);
     g_screen_state.store(kScreenTeamSelection, std::memory_order_release);
     if (!publish_unchanged && selection_snapshots_equal(snapshot, previous)) {
         return;
@@ -6065,6 +6205,17 @@ void capture_result_state(void* self, std::int64_t returned_damage) {
     const bool is_hydra = self && object_has_class_name(
         self, "BattleFinishAllianceHydraDialogContext");
     if (!is_chimera && !is_hydra) {
+        return;
+    }
+    // TotalDamageDealt can be read independently of a visible result dialog.
+    // Only a matching OnEnabled observation may publish a result screen.
+    refresh_result_battle_completion();
+    const auto confirmation = result_confirmation_snapshot();
+    if (!confirmation.is_open(reinterpret_cast<std::uintptr_t>(self))) {
+        // Preserve one ignored getter observation per battle, without flooding
+        // the bounded history on repeated binding reads.
+        if (confirmation.generation && g_ignored_result_generation.exchange(confirmation.generation) != confirmation.generation)
+            publish_lifecycle("result_damage_read_without_open_dialog");
         return;
     }
     std::int64_t damage = returned_damage;
@@ -6118,7 +6269,15 @@ void capture_result_state(void* self, std::int64_t returned_damage) {
         output << ']'
                << ",\"disposition\":\"awaiting_user\""
                << ",\"resultSaved\":false,\"automaticRestart\":false"
-               << ",\"observedAtTick\":" << GetTickCount64() << '}';
+               << ",\"battleGeneration\":" << confirmation.generation
+               << ",\"resultOpenedAtTick\":" << confirmation.opened_tick
+               << ",\"confirmed\":"
+               << (confirmation.permits_restart(reinterpret_cast<std::uintptr_t>(self)) ? "true" : "false")
+               << ",\"observedAtTick\":" << GetTickCount64();
+        AcquireSRWLockShared(&g_result_confirmation_lock);
+        output << ",\"terminalState\":" << g_terminal_battle_json;
+        ReleaseSRWLockShared(&g_result_confirmation_lock);
+        output << '}';
         publish_shared_json(g_shared_state->battle_ledger, output.str());
     }
     publish_lifecycle("result_screen_observed");
@@ -6233,6 +6392,41 @@ void __fastcall hook_hydra_selection_start_battle_click(
     g_original_hydra_selection_start_battle_click(self, method);
 }
 
+template <std::size_t Slot>
+void __fastcall hook_result_ui(void* self, const MethodInfo* method) {
+    const bool chimera = object_has_class_name(self, "BattleFinishAllianceChimeraDialogContext");
+    const bool hydra = object_has_class_name(self, "BattleFinishAllianceHydraDialogContext");
+    const bool watched = (chimera && g_result_ui_ready[0].load()) ||
+                         (hydra && g_result_ui_ready[1].load());
+    if constexpr (Slot % 2 == 1) {
+        if (watched) {
+            AcquireSRWLockExclusive(&g_result_confirmation_lock);
+            if (g_result_confirmation.dialog == reinterpret_cast<std::uintptr_t>(self))
+                g_result_confirmation.close_dialog();
+            ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+            if (g_result_context.load() == self) {
+                g_result_context.store(nullptr);
+                if (g_screen_state.load() == kScreenResult) g_screen_state.store(kScreenUnknown);
+                publish_lifecycle("result_dialog_disabled");
+            }
+        }
+        g_original_result_ui[Slot](self, method);
+    } else {
+        // OnEnabled can return after nested UI callbacks have already entered
+        // preparation or another battle. Preserve its entry identity.
+        const auto callback_epoch = result_confirmation_snapshot().ui_epoch;
+        g_original_result_ui[Slot](self, method);
+        if (watched) {
+            AcquireSRWLockExclusive(&g_result_confirmation_lock);
+            const bool accepted = g_result_confirmation.open_dialog(
+                reinterpret_cast<std::uintptr_t>(self), GetTickCount64(), callback_epoch);
+            ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+            if (accepted) capture_result_state(self, 0);
+            else publish_lifecycle("stale_result_dialog_ignored");
+        }
+    }
+}
+
 std::int64_t __fastcall hook_result_total_damage(void* self,
                                                  const MethodInfo* method) {
     const std::int64_t damage = g_original_result_total_damage(self, method);
@@ -6259,6 +6453,9 @@ void __fastcall hook_hydra_damage_counter_change(
 }
 
 void __fastcall hook_on_enabled(void* self, const MethodInfo* method) {
+    // UI contexts can be reused across battles, so pointer changes alone do
+    // not identify a new battle.
+    begin_result_battle_generation();
     g_original_on_enabled(self, method);
     AcquireSRWLockExclusive(&g_completed_challenges_lock);
     g_last_completed_challenge_count = 0;
@@ -6279,6 +6476,7 @@ void __fastcall hook_on_enabled(void* self, const MethodInfo* method) {
 }
 
 void __fastcall hook_on_disabled(void* self, const MethodInfo* method) {
+    refresh_result_battle_completion();
     g_original_on_disabled(self, method);
     if (g_battle_context.load(std::memory_order_acquire) == self) {
         g_battle_context.store(nullptr, std::memory_order_release);
@@ -6291,7 +6489,8 @@ void __fastcall hook_on_disabled(void* self, const MethodInfo* method) {
         if (g_shared_state) {
             publish_shared_json(g_shared_state->decision, "");
         }
-        g_screen_state.store(kScreenUnknown, std::memory_order_release);
+        if (g_screen_state.load() == kScreenBattle)
+            g_screen_state.store(kScreenUnknown, std::memory_order_release);
         publish_lifecycle("battle_context_disabled");
         diagnostic("battle_context_cleared");
     }
@@ -6444,6 +6643,37 @@ void* native_method_pointer(const MethodLocation& location) {
     const DWORD executable = PAGE_EXECUTE | PAGE_EXECUTE_READ |
                              PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (memory.Protect & executable) ? pointer : nullptr;
+}
+
+bool install_result_ui_hooks(const std::array<MethodLocation, 4>& methods) {
+    const std::array<void*, 4> replacements{
+        reinterpret_cast<void*>(&hook_result_ui<0>), reinterpret_cast<void*>(&hook_result_ui<1>),
+        reinterpret_cast<void*>(&hook_result_ui<2>), reinterpret_cast<void*>(&hook_result_ui<3>)};
+    std::array<void*, 4> installed{};
+    std::array<bool, 4> ready{};
+    for (std::size_t i = 0; i < methods.size(); ++i) {
+        if (!methods[i].method || methods[i].parameter_count != 0) continue;
+        void* pointer = native_method_pointer(methods[i]);
+        if (!pointer) continue;
+        bool duplicate = false;
+        for (std::size_t j = 0; j < i; ++j) {
+            if (installed[j] == pointer) {
+                duplicate = true;
+                ready[i] = ready[j] && (i % 2 == j % 2);
+                break;
+            }
+        }
+        if (duplicate) continue;
+        if (MH_CreateHook(pointer, replacements[i], reinterpret_cast<void**>(&g_original_result_ui[i])) != MH_OK)
+            continue;
+        installed[i] = pointer;
+        ready[i] = MH_EnableHook(pointer) == MH_OK;
+    }
+    g_result_ui_ready[0].store(ready[0] && ready[1]);
+    g_result_ui_ready[1].store(ready[2] && ready[3]);
+    diagnostic("result_dialog_hooks chimera=" + std::to_string(g_result_ui_ready[0].load()) +
+               " hydra=" + std::to_string(g_result_ui_ready[1].load()));
+    return g_result_ui_ready[0].load();
 }
 
 bool install_capture_hooks(const MethodLocation& on_enabled,
@@ -8088,6 +8318,10 @@ DWORD WINAPI probe_thread(void*) {
             hydra_selection_on_enabled, hydra_selection_on_disabled,
             hydra_selection_refresh, hydra_selection_start_battle_click,
             hydra_finish_total_damage, hydra_damage_counter_change);
+    if (hooks_installed) install_result_ui_hooks({battle_finish_on_enabled,
+        find_method_by_name(api, battle_finish_alliance_chimera.klass, "OnDisabled"),
+        find_method_by_name(api, battle_finish_alliance_hydra.klass, "OnEnabled"),
+        find_method_by_name(api, battle_finish_alliance_hydra.klass, "OnDisabled")});
     g_get_area_type = reinterpret_cast<InstanceIntGetter>(native_method_pointer(area_type));
     g_get_region_type =
         reinterpret_cast<InstanceIntGetter>(native_method_pointer(region_type));

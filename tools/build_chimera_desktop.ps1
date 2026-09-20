@@ -2,6 +2,7 @@
 param(
     [switch]$NoUac,
     [switch]$OneDir,
+    [switch]$SkipPublish,
     [string]$OutputDirectory = ""
 )
 
@@ -16,7 +17,10 @@ $dataDir = Join-Path $projectRoot "data"
 $agent = Join-Path $projectRoot "build\agent-1236\Release\RaidChimeraAgent.dll"
 $workPath = Join-Path $projectRoot "out\chimera-desktop"
 $distPath = if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    Join-Path $projectRoot "build\release"
+    # Build separately: an occupied shortcut target must never interrupt
+    # packaging or cause PyInstaller to remove an existing published file.
+    $buildStamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ")
+    Join-Path $workPath "packages\$buildStamp"
 }
 elseif ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
     [System.IO.Path]::GetFullPath($OutputDirectory)
@@ -104,5 +108,17 @@ if ($OneDir) {
     foreach ($document in @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "VERSION")) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $document) -Destination $releaseRoot -Force
     }
+    Write-Output $executable
+    Write-Warning "OneDir builds require their complete folder and do not update the one-file release entry."
 }
-Write-Output $executable
+elseif ($SkipPublish) {
+    Write-Output $executable
+}
+else {
+    $checksum = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    & python.exe (Join-Path $toolsDir "publish_chimera_release.py") `
+        --source $executable --version $version --expected-sha256 $checksum
+    if ($LASTEXITCODE -ne 0) {
+        throw "The package is ready at '$executable', but release publication failed. Close the tool and retry publish_chimera_release.py with this package."
+    }
+}

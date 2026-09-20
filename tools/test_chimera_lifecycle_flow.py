@@ -68,6 +68,13 @@ class FakeResultIpc(FakeIpc):
         self.damage = damage
         self.boss_mode = boss_mode
         self.completed_ids = list(completed_ids or [])
+        self.current_lifecycle["battleGeneration"] = 1
+        self.current_lifecycle["result"].update(confirmed=True, battleFinished=True,
+            battleGeneration=1, openedAtTick=100,
+            source="dialog_enabled_and_battle_finished")
+
+    def decision(self) -> dict:
+        return {}
 
     def battle_ledger(self) -> dict:
         return {
@@ -75,6 +82,7 @@ class FakeResultIpc(FakeIpc):
             "damage": self.damage,
             "completedChallengeCount": len(self.completed_ids),
             "completedChallengeIds": self.completed_ids,
+            "confirmed": True, "battleGeneration": 1, "resultOpenedAtTick": 100,
         }
 
 

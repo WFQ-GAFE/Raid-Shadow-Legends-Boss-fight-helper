@@ -33,28 +33,34 @@ def pause_event_name(pid: int) -> str:
 
 
 class ControllerPauseEvent:
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, token: str = "") -> None:
         self.pid = int(pid)
+        if token and (len(token) > 64 or not token.isalnum()):
+            raise ValueError("Invalid pause token")
+        self.name = pause_event_name(pid) + ("-" + token if token else "")
         self.handle: int | None = None
 
-    def open(self) -> ControllerPauseEvent:
+    def open(self, reset: bool = True) -> ControllerPauseEvent:
         if self.handle:
             return self
         handle = kernel32.CreateEventW(
             None,
             True,
             False,
-            pause_event_name(self.pid),
+            self.name,
         )
         if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
         self.handle = int(handle)
-        if not kernel32.ResetEvent(handle):
+        if reset and not kernel32.ResetEvent(handle):
             error = ctypes.get_last_error()
             kernel32.CloseHandle(handle)
             self.handle = None
             raise ctypes.WinError(error)
         return self
+
+    def signal(self) -> bool:
+        return bool(self.handle and kernel32.SetEvent(self.handle))
 
     def is_set(self) -> bool:
         return bool(

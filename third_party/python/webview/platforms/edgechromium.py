@@ -4,7 +4,7 @@ import os
 import shutil
 import webbrowser
 import winreg
-from threading import Semaphore
+from threading import Lock, Semaphore
 
 try:
     import clr
@@ -57,6 +57,9 @@ renderer = 'edgechromium'
 
 class EdgeChrome:
     def __init__(self, form: WinForms.Form, window: Window, cache_dir: str):
+        self._closing = False
+        self._pending_js = set()
+        self._pending_js_lock = Lock()
         self.pywebview_window = window
         self.webview = WebView2()
         props = CoreWebView2CreationProperties()
@@ -120,18 +123,41 @@ class EdgeChrome:
         self.webview.EnsureCoreWebView2Async(None)
 
     def clear_user_data(self):
-        if not _state['private_mode']:
-            return
-
+        with self._pending_js_lock:
+            self._closing = True
+            for semaphore in self._pending_js:
+                semaphore.release()
+        process = None
         try:
-            process_id = Convert.ToInt32(self.webview.CoreWebView2.BrowserProcessId)
-            process = Process.GetProcessById(process_id)
+            core = self.webview.CoreWebView2
+            if core is not None:
+                process_id = Convert.ToInt32(core.BrowserProcessId)
+                process = Process.GetProcessById(process_id)
+        except Exception:
+            # The browser may not exist yet, or may already have exited.
+            pass
+        try:
             self.webview.Dispose()
-            process.WaitForExit(3000)
-
-            shutil.rmtree(self.user_data_folder)
         except Exception as e:
-            logger.warning(f'Failed to delete user data folder: {e}')
+            logger.warning(f'WebView disposal failed: {e}')
+        if process is not None:
+            try:
+                process.WaitForExit(3000)
+            except Exception:
+                pass
+            finally:
+                try:
+                    process.Dispose()
+                except Exception:
+                    pass
+        if _state['private_mode']:
+            try:
+                shutil.rmtree(self.user_data_folder)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                # A locked browser cache must not abort form shutdown.
+                logger.warning(f'Browser cache cleanup deferred: {e}')
 
     def evaluate_js(self, script: str, parse_json: bool):
         def _callback(res):
@@ -147,20 +173,36 @@ class EdgeChrome:
 
         result = None
         semaphore = Semaphore(0)
+        with self._pending_js_lock:
+            if self._closing:
+                return None
+            self._pending_js.add(semaphore)
+
+        def _completed(task):
+            try:
+                _callback(json.loads(task.Result))
+            except Exception:
+                if not self._closing:
+                    logger.exception('Script evaluation failed')
+                semaphore.release()
 
         try:
             self.webview.Invoke(
                 Func[Object](
                     lambda: self.webview.ExecuteScriptAsync(script).ContinueWith(
-                        Action[Task[String]](lambda task: _callback(json.loads(task.Result))),
+                        Action[Task[String]](_completed),
                         self.syncContextTaskScheduler,
                     )
                 )
             )
-            semaphore.acquire()
+            if not semaphore.acquire(timeout=15) and not self._closing:
+                logger.warning('Script evaluation timed out')
         except Exception:
-            logger.exception('Error occurred in script')
-            semaphore.release()
+            if not self._closing:
+                logger.exception('Error occurred in script')
+        finally:
+            with self._pending_js_lock:
+                self._pending_js.discard(semaphore)
 
         return result
 
@@ -265,6 +307,8 @@ class EdgeChrome:
         self.ishtml = False
 
     def on_webview_ready(self, sender, args):
+        if self._closing or self.pywebview_window.events.closed.is_set() or self.pywebview_window.events.closing.is_set():
+            return
         if not args.IsSuccess:
             logger.error(
                 'WebView2 initialization failed with exception:\n '
