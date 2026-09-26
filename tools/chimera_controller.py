@@ -7836,7 +7836,7 @@ def main() -> int:
         "--boss-mode",
         choices=("chimera", "hydra"),
         default="chimera",
-        help="选择共享控制器中的联盟 Boss 模式",
+        help="选择共享控制器中的 Boss 模式",
     )
     parser.add_argument(
         "--agent", type=Path, default=Path("build/agent-1236/Release/RaidChimeraAgent.dll")

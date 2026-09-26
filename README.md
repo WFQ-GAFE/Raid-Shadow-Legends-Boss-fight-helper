@@ -2,15 +2,15 @@
 
 <img src="branding/alliance-boss-strategy-icon-v3.png" alt="RSL-Boss-helper" width="96">
 
-**RAID: Shadow Legends 联盟 Boss 战斗助手**
+**RAID: Shadow Legends Boss 战斗助手**
 
 **请在 Release 页面下载 .exe 工具。**
 
 **Download the .exe tool in release page.**
 
-A local Windows strategy editor and battle controller for the Alliance Chimera and Hydra encounters in **RAID: Shadow Legends**.
+A local Windows strategy editor and battle controller for the Chimera and Hydra encounters in **RAID: Shadow Legends**.
 
-一款面向 **RAID: Shadow Legends** 联盟奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
+一款面向 **RAID: Shadow Legends** 奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
 
 Current release: **1.1.0**. See the [1.1.0 release notes](docs/1.1.0-release-notes.md).
 

@@ -2937,7 +2937,7 @@ function App() {
   }
 
   if (loading && !data) {
-    return <main className="loading-screen"><div className="language-switcher loading-language-switcher" data-i18n-skip role="group" aria-label="Language / 语言"><Languages size={18} /><span>Language</span><button type="button" className={language === 'en' ? 'active' : ''} onClick={() => changeLanguage('en')}>English</button><button type="button" className={language === 'zh-CN' ? 'active' : ''} onClick={() => changeLanguage('zh-CN')}>中文</button></div><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><h1>正在建立联盟 Boss 资源缓存</h1><p>读取游戏内账户、英雄、技能与模式资料…</p><span className="loader" /></main>
+    return <main className="loading-screen"><div className="language-switcher loading-language-switcher" data-i18n-skip role="group" aria-label="Language / 语言"><Languages size={18} /><span>Language</span><button type="button" className={language === 'en' ? 'active' : ''} onClick={() => changeLanguage('en')}>English</button><button type="button" className={language === 'zh-CN' ? 'active' : ''} onClick={() => changeLanguage('zh-CN')}>中文</button></div><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><h1>正在建立 Boss 资源缓存</h1><p>读取游戏内账户、英雄、技能与模式资料…</p><span className="loader" /></main>
   }
 
   return (
@@ -2964,7 +2964,7 @@ function App() {
         </div>
       </header>
 
-      <nav className="mode-switcher" aria-label="联盟 Boss 模式">
+      <nav className="mode-switcher" aria-label="Boss 模式">
         {(data?.modes ?? []).map((mode) => (
           <button key={mode.id} type="button" className={bossMode === mode.id ? 'active' : ''} disabled={controller.running || loadingContext || profileBusy || saving} onClick={() => void switchBossMode(mode.id)}>
             <span className="mode-icon">{mode.id === 'chimera' ? <Swords size={21} /> : <Waves size={21} />}</span>
