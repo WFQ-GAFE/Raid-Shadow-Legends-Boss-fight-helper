@@ -4,6 +4,10 @@
 
 **RAID: Shadow Legends 联盟 Boss 战斗助手**
 
+**请在 Release 页面下载 .exe 工具。**
+
+**Download the .exe tool in release page.**
+
 A local Windows strategy editor and battle controller for the Alliance Chimera and Hydra encounters in **RAID: Shadow Legends**.
 
 一款面向 **RAID: Shadow Legends** 联盟奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
@@ -17,10 +21,6 @@ Current release: **1.1.0**. See the [1.1.0 release notes](docs/1.1.0-release-not
 规则数量条件：[仅统计增益或减益的设置方法](docs/1.0.5-effect-count-conditions.md)。
 
 Stability fixes and verification / 稳定性修复与验收：[1.0.5 修复说明](docs/1.0.5-stability-fixes.md).
-
-Download the .exe tool in release page.
-
-请在 Release 页面下载 .exe 工具。
 
 The application reads live battle state from the selected RAID client, evaluates user-defined rules, and submits guarded in-game actions. It includes an English and Chinese interface, separate Chimera and Hydra workspaces, multiple saved strategy profiles, live team discovery, hero and skill catalogs, target priorities, and independent run logs.
 
