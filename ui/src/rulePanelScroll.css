@@ -1,0 +1,13 @@
+/* A details element has an internal content wrapper. Give the grid a definite
+   height so long lists overflow inside it instead of getting clipped by details. */
+.strategy-column > .rules-panel[open] { flex: 0 0 auto; min-height: 0; }
+.rules-panel > .rules-card {
+  height: clamp(260px, 55vh, 720px);
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+.rules-panel .rules-list {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;
+}

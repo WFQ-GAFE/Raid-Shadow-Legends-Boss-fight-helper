@@ -10,9 +10,12 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import locale
 import mimetypes
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -24,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from desktop_lifecycle import WindowStartup
 
 
 def desktop_log(message: str) -> None:
@@ -86,6 +90,10 @@ def _runtime_project_root() -> Path:
                 / "WFQ-GAFE"
                 / "RaidBossStrategyStudio"
             )
+        from preview_runtime import preview_root, seed_preview
+        preview = preview_root(root)
+        seed_preview(root, preview)
+        root = preview
         root.mkdir(parents=True, exist_ok=True)
         return root.resolve()
 
@@ -110,6 +118,16 @@ VENDORED_PYTHON = PROJECT_ROOT / "third_party" / "python"
 if VENDORED_PYTHON.is_dir() and str(VENDORED_PYTHON) not in sys.path:
     sys.path.insert(0, str(VENDORED_PYTHON))
 
+from controller_manager import ControllerManager, controller_exit_label, utf8_subprocess_environment, decode_worker_output
+from strategy_storage import atomic_write_json, write_strategy_store, storage_health, recover_strategy_store, restore_strategy_value, revision, StrategyStoreError
+from catalog_stream import static_entity, merge_skill_catalog
+from hydra_state import hydra_devouring_head_ids
+from hydra_forecast_live import recent_forecasts as recent_hydra_forecasts
+from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService,
+                                        list_captures as list_chimera_captures,
+                                        recent_simulations as recent_chimera_simulations)
+from team_preview import (TeamSnapshotStore, decode_preview, public_preview,  # noqa: E402
+                          sanitize_reference_team)
 from agent_ipc import AgentIpc  # noqa: E402
 from boss_modes import (  # noqa: E402
     HYDRA_HEAD_TYPE_IDS,
@@ -117,6 +135,7 @@ from boss_modes import (  # noqa: E402
     MODE_SPECS,
     STRATEGY_STORE,
     active_strategy_id,
+    default_store,
     canonical_hydra_head_type_id,
     delete_mode_strategy,
     hydra_head_is_exposed_neck,
@@ -154,6 +173,8 @@ from chimera_icons import (  # noqa: E402
     ensure_icon_cache,
     game_hero_asset,
     game_reward_asset,
+    game_named_sprite,
+    TEAM_ICON_BUNDLES,
     game_skill_asset,
     preload_game_visuals,
     runtime_effect_options,
@@ -174,6 +195,24 @@ DIST_DIR = (
     BUNDLED_DIST_DIR
     if (BUNDLED_DIST_DIR / "index.html").is_file()
     else PROJECT_ROOT / "ui" / "dist"
+)
+APP_NAME = "RSL-Boss-helper"
+# The packaged build carries VERSION and the icon next to the interface.
+APP_VERSION = next(
+    (
+        (root / "VERSION").read_text(encoding="utf-8").strip()
+        for root in (BUNDLE_ROOT, PROJECT_ROOT)
+        if (root / "VERSION").is_file()
+    ),
+    "",
+)
+APP_ICON = next(
+    (
+        root / "branding" / "alliance-boss-strategy-icon-v3.ico"
+        for root in (BUNDLE_ROOT, PROJECT_ROOT)
+        if (root / "branding" / "alliance-boss-strategy-icon-v3.ico").is_file()
+    ),
+    BUNDLE_ROOT / "branding" / "alliance-boss-strategy-icon-v3.ico",
 )
 HERO_CATALOG = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
 UI_PREFERENCES = PROJECT_ROOT / "config" / "raid-boss-ui-preferences.user.json"
@@ -219,17 +258,7 @@ def canonicalize_hero_catalog(
         }
         merged["runtimeTypeIds"] = sorted(aliases)
 
-        skills: dict[tuple[int, int], dict[str, Any]] = {}
-        for source in (previous.get("skills", []), raw.get("skills", [])):
-            for skill in source if isinstance(source, list) else []:
-                if not isinstance(skill, dict):
-                    continue
-                form = int(skill.get("formIndex", 0) or 0)
-                identity = skill.get("typeId")
-                if not isinstance(identity, int):
-                    identity = int(skill.get("slot", 0) or 0)
-                skills[(form, identity)] = {**skills.get((form, identity), {}), **skill}
-        merged["skills"] = list(skills.values())
+        merged["skills"] = merge_skill_catalog(raw.get("skills", []), previous.get("skills", []))
         grouped[canonical_id] = merged
     return grouped
 
@@ -251,42 +280,6 @@ def read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return default
-
-
-def atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
-
-
-def utf8_subprocess_environment() -> dict[str, str]:
-    """Keep Python worker output decodable regardless of Windows code page."""
-    environment = os.environ.copy()
-    environment["PYTHONIOENCODING"] = "utf-8"
-    environment["PYTHONUTF8"] = "1"
-    return environment
-
-
-def decode_worker_output(value: bytes | str) -> str:
-    """Decode packaged worker output without destroying legacy CP936 bytes."""
-    if isinstance(value, str):
-        return value
-    encodings = ("utf-8-sig", locale.getpreferredencoding(False), "gb18030")
-    attempted: set[str] = set()
-    for encoding in encodings:
-        normalized = encoding.lower()
-        if normalized in attempted:
-            continue
-        attempted.add(normalized)
-        try:
-            return value.decode(encoding, errors="strict")
-        except (LookupError, UnicodeDecodeError):
-            continue
-    return value.decode("utf-8", errors="replace")
 
 
 def process_display(item: dict[str, Any]) -> str:
@@ -346,8 +339,9 @@ def normalized_strategy(
         objectives["onMandatoryTrialImpossible"] = "free_regroup_and_retry_manual"
     else:
         objectives.pop("mandatoryTrialIds", None)
-        objectives.pop("earlyRetryConditions", None)
         objectives.pop("onMandatoryTrialImpossible", None)
+    # Replaced by the opening whole-battle forecast in 1.0.6.
+    objectives.pop("earlyRetryConditions", None)
     objectives.pop("minimumCompetitionPoints", None)
     for key in ("minimumDamage", "maxRegroupRetries"):
         raw = objectives.get(key, 0)
@@ -362,38 +356,9 @@ def normalized_strategy(
         ):
             raise ValueError("必做试炼设置无效")
         objectives["mandatoryTrialIds"] = list(dict.fromkeys(trial_ids))
-        early_retry_conditions = objectives.get("earlyRetryConditions", [])
-        if not isinstance(early_retry_conditions, list):
-            raise ValueError("提前重整条件设置无效")
-        normalized_early_retry_conditions: list[dict[str, Any]] = []
-        for condition in early_retry_conditions[:20]:
-            if not isinstance(condition, dict):
-                continue
-            threshold = condition.get("bossTurnAtLeast")
-            if (
-                not isinstance(threshold, int)
-                or isinstance(threshold, bool)
-                or threshold < 0
-            ):
-                continue
-            condition_trial_ids = condition.get("trialIds", [])
-            if not isinstance(condition_trial_ids, list):
-                continue
-            filtered_trial_ids = list(dict.fromkeys(
-                trial_id
-                for trial_id in condition_trial_ids
-                if isinstance(trial_id, int)
-                and not isinstance(trial_id, bool)
-                and trial_id > 0
-            ))
-            if not filtered_trial_ids:
-                continue
-            normalized_early_retry_conditions.append({
-                "bossTurnAtLeast": threshold,
-                "mode": "all" if condition.get("mode") == "all" else "any",
-                "trialIds": filtered_trial_ids,
-            })
-        objectives["earlyRetryConditions"] = normalized_early_retry_conditions
+        # On unless the player turned it off: strategies saved before 1.0.6
+        # have no such key.
+        objectives["battleForecast"] = objectives.get("battleForecast", True) is not False
     else:
         devour_conditions = objectives.get("devourOrderRetryConditions", [])
         if not isinstance(devour_conditions, list):
@@ -402,8 +367,17 @@ def normalized_strategy(
         for condition in devour_conditions[:20]:
             if not isinstance(condition, dict):
                 continue
+            never_marked = condition.get("relation") == "neverMarked"
             mark_index = condition.get("markIndex")
-            if (
+            mark_limit = condition.get("markLimit")
+            if never_marked:
+                if not (
+                    isinstance(mark_limit, int)
+                    and not isinstance(mark_limit, bool)
+                    and 1 <= mark_limit <= 100
+                ):
+                    mark_limit = None
+            elif (
                 not isinstance(mark_index, int)
                 or isinstance(mark_index, bool)
                 or not 1 <= mark_index <= 100
@@ -421,6 +395,13 @@ def normalized_strategy(
             ))
             if not filtered_hero_type_ids:
                 continue
+            if never_marked:
+                normalized_devour_conditions.append({
+                    "relation": "neverMarked",
+                    "heroTypeIds": filtered_hero_type_ids,
+                    **({"markLimit": mark_limit} if mark_limit is not None else {}),
+                })
+                continue
             normalized_devour_conditions.append({
                 "markIndex": mark_index,
                 "relation": (
@@ -431,6 +412,7 @@ def normalized_strategy(
                 "heroTypeIds": filtered_hero_type_ids,
             })
         objectives["devourOrderRetryConditions"] = normalized_devour_conditions
+        objectives["devourOrderForecast"] = objectives.get("devourOrderForecast") is True
     result["objectives"] = objectives
     team = result.get("team")
     if isinstance(team, dict):
@@ -450,269 +432,9 @@ def normalized_strategy(
     return result
 
 
-def controller_exit_label(code: int, stop_requested: bool) -> str:
-    if code == 6:
-        return "安全中断"
-    if code == 7:
-        return "已免费重整"
-    if code == 8:
-        return "游戏内暂停"
-    if code == 0 and stop_requested:
-        return "已暂停"
-    if code == 0:
-        return "已完成"
-    return f"异常停止（代码 {code}）"
-
-
-class ControllerManager:
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-        self.process: subprocess.Popen[Any] | None = None
-        self.pid: int | None = None
-        self.boss_mode = "chimera"
-        self.status = "已停止"
-        self.error: str | None = None
-        self.logs_by_mode: dict[str, deque[str]] = {
-            mode: deque(maxlen=800) for mode in MODE_SPECS
-        }
-        self.stop_requested = False
-        self.preparing = False
-        self.closing = False
-
-    def append(self, line: str, boss_mode: str | None = None) -> None:
-        line = str(line).rstrip()
-        if not line:
-            return
-        with self.lock:
-            mode = normalize_mode(boss_mode or self.boss_mode)
-            self.logs_by_mode[mode].append(line)
-
-    def clear_logs(self, boss_mode: str) -> None:
-        with self.lock:
-            self.logs_by_mode[normalize_mode(boss_mode)].clear()
-
-    def snapshot(self, log_mode: str | None = None) -> dict[str, Any]:
-        with self.lock:
-            selected_log_mode = normalize_mode(log_mode or self.boss_mode)
-            running = self.preparing or (
-                self.process is not None and self.process.poll() is None
-            )
-            return {
-                "running": running,
-                "status": self.status,
-                "pid": self.pid,
-                "bossMode": self.boss_mode,
-                "logMode": selected_log_mode,
-                "logs": list(self.logs_by_mode[selected_log_mode]),
-                "error": self.error,
-            }
-
-    def start(
-        self, pid: int, account_name: str, user_id: int, boss_mode: str
-    ) -> None:
-        boss_mode = normalize_mode(boss_mode)
-        with self.lock:
-            if self.closing:
-                raise RuntimeError("主工具正在关闭")
-            if self.preparing or (self.process is not None and self.process.poll() is None):
-                raise RuntimeError("控制器已经在运行")
-            self.pid = pid
-            self.boss_mode = boss_mode
-            self.status = "正在准备代理…"
-            self.error = None
-            self.stop_requested = False
-            self.preparing = True
-            self.logs_by_mode[boss_mode].append(
-                f"正在为游戏内账户 {account_name} 准备{mode_spec(boss_mode)['label']}接管。"
-            )
-        threading.Thread(
-            target=self._prepare_and_run,
-            args=(pid, account_name, user_id, boss_mode),
-            daemon=True,
-            name="chimera-controller-launch",
-        ).start()
-
-    def _run_injector(self, arguments: list[str], timeout: int) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        binary_result = subprocess.run(
-            [*worker_command("injector"), "--pid", str(arguments[0]), "--agent", str(AGENT), *arguments[1:]],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            timeout=timeout,
-            creationflags=creation_flags,
-            env=utf8_subprocess_environment(),
-        )
-        result = subprocess.CompletedProcess(
-            binary_result.args,
-            binary_result.returncode,
-            decode_worker_output(binary_result.stdout),
-            decode_worker_output(binary_result.stderr),
-        )
-        payload = json.loads(result.stdout) if result.stdout.strip() else {}
-        return result, payload if isinstance(payload, dict) else {}
-
-    def _prepare_and_run(
-        self, pid: int, account_name: str, user_id: int, boss_mode: str
-    ) -> None:
-        try:
-            require_expected_account(pid, account_name, user_id)
-            check, check_payload = self._run_injector([str(pid), "--check-only"], 20)
-            if check.returncode:
-                raise RuntimeError(check_payload.get("reason") or check.stderr.strip() or "代理检查失败")
-
-            if check_payload.get("agentLoaded") and (
-                not check_payload.get("agentCompatible") or not check_payload.get("agentReady")
-            ):
-                previous_lifecycle: dict[str, Any] = {}
-                try:
-                    with AgentIpc(pid) as ipc:
-                        previous_lifecycle = ipc.lifecycle() or {}
-                except (FileNotFoundError, ValueError):
-                    pass
-                if previous_lifecycle.get("screen") == "result":
-                    raise RuntimeError("当前停留在战绩结算画面，不会在此时更新代理")
-                self.append("正在只更新所选游戏账户的代理版本…", boss_mode)
-                reload_result, reload_payload = self._run_injector([str(pid), "--reload"], 35)
-                if reload_result.returncode:
-                    raise RuntimeError(
-                        reload_payload.get("reason")
-                        or reload_result.stderr.strip()
-                        or "所选账户代理更新失败"
-                    )
-                screen = previous_lifecycle.get("screen")
-                if screen == "battle":
-                    context = (previous_lifecycle.get("battle") or {}).get("context")
-                    if isinstance(context, int) and context > 0:
-                        if not seed_battle_context(pid, AGENT, context).get("accepted"):
-                            raise RuntimeError("更新后恢复当前奇美拉战斗失败")
-                elif screen == "team_selection":
-                    context = (previous_lifecycle.get("selection") or {}).get("context")
-                    if isinstance(context, int) and context > 0:
-                        if not seed_selection_context(pid, AGENT, context).get("accepted"):
-                            raise RuntimeError("更新后恢复奇美拉队伍界面失败")
-                require_expected_account(pid, account_name, user_id)
-                check_payload = {"agentLoaded": True, "agentCompatible": True, "agentReady": True}
-
-            if not check_payload.get("agentLoaded"):
-                self.append("代理尚未载入，正在载入所选账户…", boss_mode)
-                load_result, load_payload = self._run_injector([str(pid)], 35)
-                if load_result.returncode:
-                    raise RuntimeError(load_payload.get("reason") or load_result.stderr.strip() or "代理载入失败")
-                require_expected_account(pid, account_name, user_id)
-
-            require_expected_account(pid, account_name, user_id)
-            with self.lock:
-                if self.stop_requested:
-                    self.status = "已暂停"
-                    self.preparing = False
-                    return
-
-            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            controller_arguments = [
-                    *worker_command("controller"),
-                    "--parent-pid",
-                    str(os.getpid()),
-                    "--pid",
-                    str(pid),
-                    "--account-name",
-                    account_name,
-                    "--account-user-id",
-                    str(user_id),
-                    "--config",
-                    str(USER_STRATEGY),
-                    "--boss-mode",
-                    boss_mode,
-                    "--agent",
-                    str(AGENT),
-                    "--capability-cache",
-                    str(PROJECT_ROOT / "cache" / "chimera-skill-capabilities.json"),
-                    "--capability-seed",
-                    str(BUNDLE_ROOT / "data" / "chimera-skill-capabilities.json"),
-                    "--bootstrap-current",
-                    "--execute",
-                ]
-            controller_arguments.append("--auto-start")
-            process = subprocess.Popen(
-                controller_arguments,
-                cwd=PROJECT_ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=0,
-                creationflags=creation_flags,
-                env=utf8_subprocess_environment(),
-            )
-            with self.lock:
-                self.process = process
-                self.preparing = False
-                self.status = f"正在运行 · {account_name}"
-            self.append("控制器已启动。", boss_mode)
-            assert process.stdout is not None
-            for line in process.stdout:
-                self.append(decode_worker_output(line), boss_mode)
-            code = process.wait()
-            with self.lock:
-                self.status = controller_exit_label(code, self.stop_requested)
-                self.logs_by_mode[boss_mode].append(f"控制器已退出，代码 {code}。")
-                self.process = None
-                self.preparing = False
-                self.stop_requested = False
-        except Exception as error:
-            with self.lock:
-                self.error = str(error)
-                self.status = "启动失败"
-                self.logs_by_mode[boss_mode].append(f"启动失败：{error}")
-                self.process = None
-                self.preparing = False
-
-    def stop(self, pid: int | None) -> None:
-        with self.lock:
-            self.stop_requested = True
-            self.status = "正在暂停接管…"
-            process = self.process
-            actual_pid = self.pid
-        if process is not None and process.poll() is None:
-            target = pid if isinstance(pid, int) else actual_pid
-            if not isinstance(target, int) or not signal_controller_pause(target):
-                with self.lock:
-                    self.stop_requested = False
-                    self.status = "暂停信号发送失败"
-                raise RuntimeError("暂停信号发送失败；控制器仍保持运行")
-            self.append("已请求暂停；正在等待控制器清理接管会话。", self.boss_mode)
-            return
-        with self.lock:
-            if not self.preparing:
-                self.status = "已停止"
-                self.stop_requested = False
-
-    def shutdown(self, timeout: float = 8.0) -> None:
-        with self.lock:
-            self.closing = True
-            self.stop_requested = True
-            self.status = "正在关闭…"
-            process = self.process
-            target = self.pid
-
-        if process is not None and process.poll() is None:
-            if isinstance(target, int):
-                signal_controller_pause(target)
-            try:
-                process.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=2.0)
-
-        with self.lock:
-            self.process = None
-            self.preparing = False
-            self.status = "已关闭"
-
-
 class ChimeraService:
     def __init__(self) -> None:
+        self.stopping = threading.Event()
         self.lock = threading.RLock()
         self.visual_preload_lock = threading.RLock()
         self.visual_preload_global_started = False
@@ -721,10 +443,15 @@ class ChimeraService:
         self.first_client = threading.Event()
         self.active_clients = 0
         self.controller = ControllerManager()
+        self.simulations = SimulationService()
+        self.team_snapshots = TeamSnapshotStore()
+        self.team_previews: dict[int, dict[str, Any]] = {}
+        self.catalog_epoch = 0
+        self.catalog_session = secrets.token_hex(8)
         self.processes: dict[int, dict[str, Any]] = {}
         self.last_process_refresh = 0.0
         loaded_hero_catalog = load_hero_catalog({})
-        self.hero_catalog = canonicalize_hero_catalog(loaded_hero_catalog)
+        self.hero_catalog = {key: static_entity(value) for key, value in canonicalize_hero_catalog(loaded_hero_catalog).items()}
         if self.hero_catalog != loaded_hero_catalog:
             save_hero_catalog(self.hero_catalog)
         try:
@@ -776,6 +503,8 @@ class ChimeraService:
         self.start_visual_preload()
 
     def start_visual_preload(self, hero_ids: Any = ()) -> None:
+        if self.stopping.is_set():
+            return
         requested: set[int] = set()
         for raw in hero_ids or ():
             if not isinstance(raw, (int, str)) or isinstance(raw, bool):
@@ -801,9 +530,12 @@ class ChimeraService:
 
         def worker() -> None:
             try:
-                status = preload_game_visuals(catalog, sorted(pending))
+                status = preload_game_visuals(catalog, sorted(pending), cancelled=self.stopping.is_set)
+                if self.stopping.is_set():
+                    return
                 with self.lock:
                     self.visual_cache_status = status
+                    self._catalog_changed()
                     self.effect_options = runtime_effect_options(
                         self.status_effect_catalog
                     )
@@ -840,8 +572,9 @@ class ChimeraService:
                 return
         catalog = canonicalize_hero_catalog(load_hero_catalog({}))
         with self.lock:
-            self.hero_catalog = catalog
+            self.hero_catalog = {key: static_entity(value) for key, value in catalog.items()}
             self.hero_catalog_mtime_ns = modified
+            self._catalog_changed()
 
     def client_opened(self) -> None:
         with self.client_lock:
@@ -857,6 +590,7 @@ class ChimeraService:
             return self.active_clients
 
     def shutdown(self) -> None:
+        self.stopping.set()
         self.controller.shutdown()
 
     def strategy_store(self) -> dict[str, Any]:
@@ -895,6 +629,7 @@ class ChimeraService:
         selected_id = active_strategy_id(current_store, boss_mode)
         return {
             "config": strategy_for_mode(current_store, boss_mode, selected_id),
+            "revision": revision(strategy_for_mode(current_store, boss_mode, selected_id)),
             "activeStrategyId": selected_id,
             "strategyProfiles": strategy_profiles_for_mode(current_store, boss_mode),
         }
@@ -902,18 +637,41 @@ class ChimeraService:
     def save_strategy(
         self, value: Any, boss_mode: str = "chimera",
         strategy_id: str | None = None,
+        expected_revision: str | None = None,
     ) -> dict[str, Any]:
         boss_mode = normalize_mode(boss_mode)
         with self.lock:
             store = self.strategy_store()
             selected_id = str(strategy_id or active_strategy_id(store, boss_mode))
             previous = strategy_for_mode(store, boss_mode, selected_id)
+            if expected_revision is not None and expected_revision != revision(previous):
+                raise ValueError("策略已在其他窗口更新；草稿已保留，请创建副本或重新加载后再保存")
             config = normalized_strategy(value, previous, boss_mode)
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=selected_id
             )
-            atomic_write_json(STRATEGY_STORE, updated)
+            write_strategy_store(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
+
+    def recover_strategies(self, document: Any = None, boss_mode: str = "chimera") -> None:
+        with self.lock:
+            if self.controller.snapshot()["running"]:
+                raise ValueError("请先暂停接管再恢复策略")
+            if document is None:
+                recover_strategy_store(STRATEGY_STORE)
+                return
+            boss_mode = normalize_mode(boss_mode)
+            if (not isinstance(document, dict) or document.get("format") != "raid-boss-strategy"
+                    or type(document.get("version")) is not int or document["version"] not in {1, 2}
+                    or not isinstance(document.get("strategy"), dict)):
+                raise ValueError("请选择有效的导出策略文件")
+            if document.get("bossMode") != boss_mode:
+                raise ValueError("导出策略所属 Boss 与当前模式不一致")
+            config = normalized_strategy(document["strategy"], strategy_template(boss_mode), boss_mode)
+            if isinstance(config.get("team"), dict):
+                config["team"].pop("heroInstanceIds", None)
+            store = update_mode_strategy(default_store(), boss_mode, config)
+            restore_strategy_value(STRATEGY_STORE, store)
 
     def config_with_prepared_team(
         self, value: Any, pid: Any, boss_mode: str
@@ -980,7 +738,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
-            atomic_write_json(STRATEGY_STORE, updated)
+            write_strategy_store(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def rename_strategy_profile(
@@ -995,7 +753,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
-            atomic_write_json(STRATEGY_STORE, updated)
+            write_strategy_store(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def select_strategy_profile(
@@ -1006,7 +764,7 @@ class ChimeraService:
             updated = select_mode_strategy(
                 self.strategy_store(), boss_mode, strategy_id
             )
-            atomic_write_json(STRATEGY_STORE, updated)
+            write_strategy_store(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def delete_strategy_profile(
@@ -1017,7 +775,7 @@ class ChimeraService:
             updated = delete_mode_strategy(
                 self.strategy_store(), boss_mode, strategy_id
             )
-            atomic_write_json(STRATEGY_STORE, updated)
+            write_strategy_store(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def export_strategy_profile(
@@ -1032,16 +790,21 @@ class ChimeraService:
             ).strip()
             strategy = strategy_for_mode(store, boss_mode, selected_id)
         team = strategy.get("team")
+        snapshot = None
         if isinstance(team, dict):
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             strategy["team"] = portable_team
+            snapshot = self.team_snapshots.find(portable_team.get("heroTypeIds"))
+        # An imported strategy passes its author's team on unchanged.
+        snapshot = snapshot or sanitize_reference_team(strategy.get("referenceTeam"))
         return {
             "format": "raid-boss-strategy",
-            "version": 1,
+            "version": 2 if strategy.get("strategyFlow") is not None else 1,
             "exportedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "bossMode": boss_mode,
             "strategy": strategy,
+            **({"teamSnapshot": snapshot} if snapshot else {}),
         }
 
     def import_strategy_profile(
@@ -1053,7 +816,7 @@ class ChimeraService:
             raise ValueError("导入文件的根节点必须是对象")
         if document.get("format") == "raid-boss-strategy":
             version = document.get("version")
-            if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+            if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2}:
                 raise ValueError("不支持此策略导出版本")
             value = document.get("strategy")
             declared_mode = document.get("bossMode")
@@ -1073,6 +836,12 @@ class ChimeraService:
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             portable["team"] = portable_team
+        # The author's heroes and gear stay with the strategy for reference.
+        reference = sanitize_reference_team(document.get("teamSnapshot")) or \
+            sanitize_reference_team(portable.get("referenceTeam"))
+        portable.pop("referenceTeam", None)
+        if reference:
+            portable["referenceTeam"] = reference
         config = normalized_strategy(
             portable, strategy_template(boss_mode), boss_mode
         )
@@ -1092,7 +861,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
-            atomic_write_json(STRATEGY_STORE, updated)
+            write_strategy_store(STRATEGY_STORE, updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def refresh_processes(self, force: bool = False) -> list[dict[str, Any]]:
@@ -1120,8 +889,12 @@ class ChimeraService:
                         f"[account] PID {item['pid']} -> 账户模型尚未就绪"
                     )
             except Exception as error:
+                # One unreadable client must not hide the others.
                 item["error"] = str(error)
-                item["account"] = latest_account_state(int(item["pid"]))
+                try:
+                    item["account"] = latest_account_state(int(item["pid"]))
+                except Exception:
+                    item["account"] = None
                 desktop_log(
                     f"[account] PID {item['pid']} 读取失败：{error}"
                 )
@@ -1185,7 +958,7 @@ class ChimeraService:
             if not isinstance(hero, dict):
                 continue
             skills = []
-            for raw_skill in hero.get("skills", []):
+            for raw_skill in merge_skill_catalog(hero.get("skills", [])):
                 if not isinstance(raw_skill, dict):
                     continue
                 skill = dict(raw_skill)
@@ -1264,7 +1037,9 @@ class ChimeraService:
                     "runtimeTypeIds": runtime_type_ids,
                     "name": name,
                 }
-                if updated != previous:
+                updated = static_entity(updated)
+                if updated != static_entity(previous):
+                    self._catalog_changed()
                     self.hydra_head_catalog[type_id] = updated
                     changed = True
         return changed
@@ -1292,11 +1067,6 @@ class ChimeraService:
                     for skill in previous.get("skills", [])
                     if isinstance(skill, dict) and isinstance(skill.get("typeId"), int)
                 }
-                previous_by_slot = {
-                    int(skill["slot"]): skill
-                    for skill in previous.get("skills", [])
-                    if isinstance(skill, dict) and isinstance(skill.get("slot"), int)
-                }
                 skills: list[dict[str, Any]] = []
                 seen_skill_type_ids: set[int] = set()
                 slot = 0
@@ -1307,7 +1077,9 @@ class ChimeraService:
                         continue
                     slot += 1
                     type_id = raw_skill.get("typeId")
-                    cached = previous_by_type.get(type_id, previous_by_slot.get(slot, {}))
+                    # A new TypeId must not inherit another skill's localized
+                    # name, icon or flags merely because its position matches.
+                    cached = previous_by_type.get(type_id, {})
                     merged = dict(cached) if isinstance(cached, dict) else {}
                     merged.update({key: value for key, value in raw_skill.items() if value not in (None, "")})
                     merged["slot"] = int(raw_skill.get("slot") or slot)
@@ -1332,17 +1104,10 @@ class ChimeraService:
                 # Battle snapshots can expose only the current form. Keep the
                 # complete static catalog loaded during initialization so names
                 # and the other form's skills do not flicker out of the editor.
-                skills.extend(
-                    dict(skill)
-                    for type_id, skill in previous_by_type.items()
-                    if type_id not in seen_skill_type_ids
-                )
-                if not skills:
-                    skills = [
-                        dict(value)
-                        for value in previous.get("skills", [])
-                        if isinstance(value, dict)
-                    ]
+                excluded_ids = {raw.get("typeId") for raw in raw_hero.get("skills", [])
+                    if isinstance(raw, dict) and (raw.get("activeSkill") is False or raw.get("hiddenOnHud") is True)}
+                skills = merge_skill_catalog(skills, [value for value in previous.get("skills", [])
+                    if isinstance(value, dict) and value.get("typeId") not in excluded_ids])
                 updated = {
                     **previous,
                     **{
@@ -1366,7 +1131,9 @@ class ChimeraService:
                     ),
                     "skills": skills,
                 }
+                updated = static_entity(updated)
                 if updated != previous:
+                    self._catalog_changed()
                     self.hero_catalog[hero_id] = updated
                     changed = True
             if changed:
@@ -1390,6 +1157,7 @@ class ChimeraService:
                 ]
                 if updated_effects != self.effect_options:
                     self.effect_options = updated_effects
+                    self._catalog_changed()
         self.update_hydra_heads(rotation.get("hydraHeads"))
         catalog = rotation.get("catalog")
         identity = rotation.get("identity")
@@ -1426,6 +1194,7 @@ class ChimeraService:
                 self.ui_catalog, catalog, identity,
             )
             self.cached_rotation_keys.update(cache_keys)
+            self._catalog_changed()
         return selected_difficulty_id
 
     @staticmethod
@@ -1458,6 +1227,7 @@ class ChimeraService:
                 lifecycle = ipc.lifecycle() or {}
                 ledger = ipc.battle_ledger() or {}
                 rotation = ipc.rotation_catalog() or {}
+                usage = ipc.slot_usage() if hasattr(ipc, "slot_usage") else {}
         except (FileNotFoundError, ValueError, OSError) as error:
             return {
                 "bossMode": boss_mode,
@@ -1554,6 +1324,7 @@ class ChimeraService:
         hydra = state.get("hydra") if isinstance(state.get("hydra"), dict) else {}
         bosses = state.get("bosses") if isinstance(state.get("bosses"), list) else []
         if boss_mode == "hydra" and mode_matches:
+            devouring_ids = hydra_devouring_head_ids(state)
             current_heads: dict[int, dict[str, Any]] = {}
             for value in bosses:
                 if not isinstance(value, dict):
@@ -1562,6 +1333,8 @@ class ChimeraService:
                 if head.get("dead") is True:
                     continue
                 actor_id = head.get("id")
+                if actor_id in devouring_ids:
+                    head["isDevouring"] = True
                 if not isinstance(actor_id, int) or isinstance(actor_id, bool):
                     continue
                 # Hydra creates a new actor whenever a head returns.  The UI
@@ -1626,7 +1399,94 @@ class ChimeraService:
             "trials": trial_states,
             "agentReady": bool(header.get("ready")),
             "modeReady": mode_matches,
+            "ipcUsage": usage,
         }
+
+    def _catalog_changed(self) -> None:
+        self.catalog_epoch = getattr(self, "catalog_epoch", 0) + 1
+
+    def catalog_payload(self, known_revision: str | None = None) -> dict[str, Any]:
+        with self.lock:
+            catalog_revision = f"{getattr(self, 'catalog_session', 'initial')}:{getattr(self, 'catalog_epoch', 0)}"
+            if known_revision == catalog_revision:
+                return {"catalogRevision": catalog_revision}
+            return {
+                "catalogRevision": catalog_revision,
+                "heroes": self.heroes(),
+                "hydraHeads": self.hydra_heads(),
+                "effects": list(self.effect_options),
+                "difficulties": self.ui_catalog.get("difficulties", []),
+            }
+
+    def state_payload(self, pid: int | None, boss_mode: str,
+                      catalog_revision: str | None = None,
+                      log_cursor: str | None = None) -> dict[str, Any]:
+        state = self.live_state(pid, boss_mode) if pid is not None else {
+            "bossMode": boss_mode, "statusLabel": "没有找到 Raid 账户", "modeReady": False,
+        }
+        health = storage_health(STRATEGY_STORE)
+        store = self.strategy_store() if health["ok"] else default_store()
+        return {
+            "pid": pid, "bossMode": boss_mode,
+            "state": state,
+            "controller": self.controller.snapshot(boss_mode, after=log_cursor),
+            "strategyProfiles": strategy_profiles_for_mode(store, boss_mode),
+            "storageHealth": health,
+            **({"hydraForecasts": recent_hydra_forecasts()} if boss_mode == "hydra" else {}),
+            **({"chimeraSimulation": self.simulation_overview()} if boss_mode == "chimera" else {}),
+            "teamPreview": self.team_preview_summary(pid),
+            **self.catalog_payload(catalog_revision),
+        }
+
+    def team_preview(self, pid: int | None) -> dict[str, Any] | None:
+        """The preparation-screen team of this account (hero-screen stats, sets, masteries)."""
+        if not isinstance(pid, int):
+            return None
+        try:
+            with AgentIpc(pid) as ipc:
+                raw = ipc.team_preview()
+        except (FileNotFoundError, ValueError, OSError):
+            raw = None
+        cached = self.team_previews.get(pid)
+        tick = raw.get("observedAtTick") if isinstance(raw, dict) else None
+        if raw is not None and (cached is None or cached.get("tick") != tick):
+            preview = decode_preview(raw)
+            if preview is not None:
+                preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            cached = {"tick": tick, "preview": preview}
+            self.team_previews[pid] = cached
+        preview = cached.get("preview") if cached else None
+        if preview is None:
+            return None
+        public = public_preview(preview)
+        if public is not None:
+            self.team_snapshots.remember(public)
+        return public
+
+    def team_preview_summary(self, pid: int | None) -> dict[str, Any] | None:
+        preview = self.team_preview(pid)
+        if preview is None:
+            return None
+        return {"revision": str(preview.get("teamKey") or preview.get("observedAtTick")),
+                "status": preview.get("status"), "bossMode": preview.get("bossMode"),
+                "heroes": len(preview.get("heroes") or [])}
+
+    def simulation_overview(self) -> dict[str, Any]:
+        return {"captures": list_chimera_captures(8), "job": self.simulations.status(),
+                "recent": recent_chimera_simulations(8),
+                "battleForecasts": recent_chimera_simulations(6, root=BATTLE_FORECAST_ROOT)}
+
+    def start_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
+        config = normalized_strategy(body.get("config"), {}, "chimera")
+        runs = body.get("runs")
+        if not isinstance(runs, int) or isinstance(runs, bool):
+            raise ValueError("模拟场数无效")
+        pid = body.get("pid")
+        return self.simulations.start(
+            config,
+            {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
+            str(body.get("captureId") or ""), runs,
+            pid if isinstance(pid, int) and not isinstance(pid, bool) else None)
 
     def bootstrap(
         self, pid: int | None = None, force: bool = False,
@@ -1642,7 +1502,8 @@ class ChimeraService:
                 if isinstance(running, int) and running in available
                 else self.preferred_process_pid(available, boss_mode)
             )
-        strategy_bundle = self.strategy_bundle(boss_mode)
+        health = storage_health(STRATEGY_STORE)
+        strategy_bundle = self.strategy_bundle(boss_mode, None if health["ok"] else default_store())
         config = strategy_bundle["config"]
         live = (
             self.live_state(pid, boss_mode)
@@ -1661,9 +1522,9 @@ class ChimeraService:
             "config": config,
             "activeStrategyId": strategy_bundle["activeStrategyId"],
             "strategyProfiles": strategy_bundle["strategyProfiles"],
-            "heroes": self.heroes(),
-            "hydraHeads": self.hydra_heads(),
-            "effects": list(self.effect_options),
+            **self.catalog_payload(),
+            "revision": strategy_bundle["revision"],
+            "storageHealth": health,
             "language": self.ui_preferences()["language"],
             "difficulties": difficulties if isinstance(difficulties, list) else [],
             "state": live,
@@ -1694,10 +1555,15 @@ class ChimeraService:
             raise RuntimeError(
                 "尚未读取到当前账户的六头蛇准备界面或战斗状态；为避免误操作，暂不启动接管"
             )
-        self.controller.start(pid, name, user_id, boss_mode)
+        with self.lock:
+            bundle = self.strategy_bundle(boss_mode)
+            config = normalized_strategy(bundle["config"], bundle["config"], boss_mode)
+            self.controller.start(pid, name, user_id, boss_mode, config=config, strategy_id=bundle["activeStrategyId"])
         return self.controller.snapshot(boss_mode)
 
     def asset(self, kind: str, parts: list[str]) -> Path | None:
+        if kind in TEAM_ICON_BUNDLES and len(parts) == 1:
+            return game_named_sprite(TEAM_ICON_BUNDLES[kind], parts[0])
         if kind == "hero" and len(parts) == 1 and parts[0].isdigit():
             requested_hero_id = int(parts[0])
             hero = self.hero_catalog.get(requested_hero_id)
@@ -1734,7 +1600,20 @@ class ChimeraService:
             )
         if kind == "skill" and len(parts) == 2 and all(value.isdigit() for value in parts):
             hero_id, identity = map(int, parts)
-            hero = self.hero_catalog.get(hero_id, {})
+            hero = self.hero_catalog.get(hero_id)
+            if hero is None:
+                # A live hero type id (rank/ascension variant) from the team preview.
+                hero = next(
+                    (
+                        candidate
+                        for candidate in self.hero_catalog.values()
+                        if isinstance(candidate, dict)
+                        and hero_id in candidate.get("runtimeTypeIds", [])
+                    ),
+                    {},
+                )
+                # Hero type ids are the base id plus the rank digit.
+                hero_id = hero_catalog_identity(hero_id, hero) if hero else hero_id - hero_id % 10
             if isinstance(hero, dict):
                 skill = next(
                     (
@@ -1753,6 +1632,9 @@ class ChimeraService:
                         ),
                         None,
                     )
+                if skill is None and identity >= 100:
+                    # A skill the catalog leaves out (passives): its type id ends in the slot.
+                    skill = {"typeId": identity, "slot": identity % 100}
                 if isinstance(skill, dict):
                     asset_identity = skill.get("typeId") or f"{hero_id}-{identity}"
                     native = game_skill_asset(hero_id, hero, skill)
@@ -1790,7 +1672,10 @@ class ChimeraHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _error(self, error: Exception, status: int = HTTPStatus.BAD_REQUEST) -> None:
-        self._json({"error": str(error)}, status)
+        try:
+            self._json({"error": str(error)}, status)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
 
     def _write_authorized(self) -> bool:
         return secrets.compare_digest(self.headers.get("X-Chimera-Token", ""), self.server.token)
@@ -1834,25 +1719,33 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     return
                 raw_pid = query.get("pid", [None])[0]
                 if not raw_pid or not str(raw_pid).isdigit():
-                    raise ValueError("缺少账户")
-                pid = int(raw_pid)
+                    raw_pid = None
+                pid = int(raw_pid) if raw_pid else None
                 boss_mode = normalize_mode(query.get("mode", ["chimera"])[0])
-                store = self.server.service.strategy_store()
-                self._json({
-                    "state": self.server.service.live_state(pid, boss_mode),
-                    "controller": self.server.service.controller.snapshot(boss_mode),
-                    # Keep the profile picker current when a strategy is
-                    # created or imported outside this already-open window.
-                    # The live editor config is deliberately not replaced,
-                    # so unsaved rule edits remain intact.
-                    "strategyProfiles": strategy_profiles_for_mode(
-                        store, boss_mode
-                    ),
-                    "heroes": self.server.service.heroes(),
-                    "hydraHeads": self.server.service.hydra_heads(),
-                    "effects": list(self.server.service.effect_options),
-                    "difficulties": self.server.service.ui_catalog.get("difficulties", []),
-                })
+                self._json(self.server.service.state_payload(
+                    pid, boss_mode,
+                    query.get("catalogRevision", [None])[0],
+                    query.get("logCursor", [None])[0],
+                ))
+                return
+            if parsed.path == "/api/team-preview":
+                if not self._write_authorized():
+                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    return
+                raw_pid = query.get("pid", [None])[0]
+                pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
+                self._json({"preview": self.server.service.team_preview(pid)})
+                return
+            if parsed.path == "/api/chimera-simulation":
+                if not self._write_authorized():
+                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    return
+                simulation_id = query.get("id", [""])[0]
+                raw_run = query.get("run", [None])[0]
+                if raw_run is not None and str(raw_run).isdigit():
+                    self._json(self.server.service.simulations.load_run(simulation_id, int(raw_run)))
+                else:
+                    self._json(self.server.service.simulations.load(simulation_id))
                 return
             if parsed.path.startswith("/api/asset/"):
                 parts = [part for part in parsed.path.split("/") if part][2:]
@@ -1871,6 +1764,8 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 self.wfile.write(payload)
                 return
             self._static(parsed.path)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
         except FileNotFoundError as error:
             self._error(error, HTTPStatus.NOT_FOUND)
         except Exception as error:
@@ -1900,6 +1795,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
+            if self.path == "/api/ui-error":
+                # Only bounded diagnostic strings, never frontend state or the session token.
+                fields = {key: re.sub(r"(?i)(token[=:]\s*)[^\s&]+", r"\1[redacted]", str(body.get(key, ""))[:limit])
+                          for key, limit in (("kind", 64), ("message", 2000), ("stack", 6000), ("componentStack", 3000))}
+                desktop_lifecycle_log("frontend_error " + json.dumps(fields, ensure_ascii=False))
+                self._json({"recorded": True})
+                return
             if self.path == "/api/config":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
                 config = body.get("config")
@@ -1910,8 +1812,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 result = self.server.service.save_strategy(
                     config, boss_mode,
                     strategy_id=str(body.get("strategyId") or "") or None,
+                    expected_revision=body.get("expectedRevision"),
                 )
                 self._json({**result, "message": "策略组已保存"})
+                return
+            if self.path == "/api/config/recover":
+                self.server.service.recover_strategies(body.get("document"), body.get("bossMode", "chimera"))
+                self._json({"message": "已恢复策略；原文件已保留"})
                 return
             if self.path == "/api/preferences":
                 self._json(self.server.service.save_ui_preferences(body))
@@ -1981,12 +1888,21 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 self.server.service.controller.stop(pid if isinstance(pid, int) else None)
                 self._json({"controller": self.server.service.controller.snapshot(boss_mode)})
                 return
+            if self.path == "/api/chimera-simulation/start":
+                self._json({"job": self.server.service.start_simulation(body)})
+                return
+            if self.path == "/api/chimera-simulation/stop":
+                self.server.service.simulations.stop()
+                self._json({"job": self.server.service.simulations.status()})
+                return
             if self.path == "/api/logs/clear":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
                 self.server.service.controller.clear_logs(boss_mode)
                 self._json({"controller": self.server.service.controller.snapshot(boss_mode)})
                 return
             self._error(FileNotFoundError("接口不存在"), HTTPStatus.NOT_FOUND)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
         except Exception as error:
             self._error(error)
 
@@ -2069,14 +1985,20 @@ def restore_internal_worker_streams() -> None:
 def run_internal_worker(worker: str, arguments: list[str]) -> int:
     """Run controller helpers inside the bundled interpreter."""
     restore_internal_worker_streams()
+    original_argv = sys.argv
     sys.argv = [sys.argv[0], *arguments]
-    if worker == "injector":
-        from inject_probe import main as worker_main
-    elif worker == "controller":
-        from chimera_controller import main as worker_main
-    else:
-        raise ValueError(f"未知内部工作进程：{worker}")
-    return int(worker_main())
+    try:
+        if worker == "injector":
+            from inject_probe import main as worker_main
+        elif worker == "controller":
+            from chimera_controller import main as worker_main
+        else:
+            raise ValueError(f"未知内部工作进程：{worker}")
+        return int(worker_main())
+    finally:
+        # Preserve the worker marker for the outer error handler; otherwise a
+        # helper failure would be mistaken for desktop startup and show a popup.
+        sys.argv = original_argv
 
 
 def self_test() -> int:
@@ -2086,26 +2008,21 @@ def self_test() -> int:
     config = normalized_strategy(service.strategy(), service.strategy())
     assert config["mode"] == "execute"
     assert config["objectives"]["onAllMetAtResult"] == "hold_for_user"
-    early_retry_config = normalized_strategy(
+    old_early_retry_config = normalized_strategy(
         {
             **config,
             "objectives": {
                 **config["objectives"],
                 "mandatoryTrialIds": [8000607],
                 "earlyRetryConditions": [
-                    {
-                        "bossTurnAtLeast": 5,
-                        "mode": "any",
-                        "trialIds": [8000607, 8000608],
-                    }
+                    {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607]}
                 ],
             },
         },
         config,
     )
-    assert early_retry_config["objectives"]["earlyRetryConditions"] == [
-        {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607, 8000608]}
-    ]
+    assert "earlyRetryConditions" not in old_early_retry_config["objectives"]
+    assert old_early_retry_config["objectives"]["mandatoryTrialIds"] == [8000607]
     hydra_config = default_strategy("hydra")
     hydra_retry_config = normalized_strategy(
         {
@@ -2186,6 +2103,23 @@ def self_test() -> int:
     return 0
 
 
+def desktop_lifecycle_log(event: str, error: Exception | None = None) -> None:
+    """Persist desktop failures even when the frozen app has no console."""
+    try:
+        logger = logging.getLogger("raid.desktop.lifecycle")
+        if not logger.handlers:
+            path = PROJECT_ROOT / "logs" / "desktop-lifecycle.log"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handler = RotatingFileHandler(path, maxBytes=1024 * 1024, backupCount=3, encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+            logger.propagate = False
+        logger.info(event, exc_info=(type(error), error, error.__traceback__) if error else None)
+    except (OSError, ValueError):
+        pass
+
+
 def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == "--internal-worker":
         return run_internal_worker(sys.argv[2], sys.argv[3:])
@@ -2208,30 +2142,40 @@ def main() -> int:
         except RuntimeError:
             ctypes.windll.user32.MessageBoxW(
                 None,
-                "奇美拉工具已经在运行，请使用现有窗口。",
-                "联盟 Boss 策略中心",
+                f"{APP_NAME} 已经在运行，请使用现有窗口。",
+                APP_NAME,
                 0x40,
             )
             return 4
-    token = secrets.token_urlsafe(24)
-    service = ChimeraService()
-    server = ChimeraHttpServer(("127.0.0.1", 0), service, token)
-    port = int(server.server_address[1])
-    url = f"http://127.0.0.1:{port}/?token={token}"
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="chimera-ui-http")
-    server_thread.start()
+    service = None
+    server = None
+    server_thread = None
+    startup = WindowStartup()
     try:
+        desktop_lifecycle_log("startup_begin")
+        token = secrets.token_urlsafe(24)
+        service = ChimeraService()
+        server = ChimeraHttpServer(("127.0.0.1", 0), service, token)
+        port = int(server.server_address[1])
+        url = f"http://127.0.0.1:{port}/?token={token}"
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="chimera-ui-http")
+        server_thread.start()
         if args.no_window:
             desktop_log(url)
             while True:
                 time.sleep(0.5)
         import webview
 
+        class WebviewDiagnostics(logging.Handler):
+            def emit(self, record):
+                desktop_lifecycle_log("webview: " + record.getMessage(), record.exc_info[1] if record.exc_info else None)
+
+        logging.getLogger("pywebview").addHandler(WebviewDiagnostics(level=logging.WARNING))
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
         webview.settings["SHOW_DEFAULT_MENUS"] = False
         webview.settings["ALLOW_DOWNLOADS"] = True
         window = webview.create_window(
-            "Alliance Boss Strategy Studio",
+            f"{APP_NAME} {APP_VERSION}".strip(),
             url,
             width=1380,
             height=860,
@@ -2241,72 +2185,78 @@ def main() -> int:
             text_select=True,
         )
 
-        def reveal_ready_window() -> None:
-            # Moving a WinForms host while WebView2 is still creating its
-            # controller can leave a permanently blank surface.  Build and
-            # navigate the hidden window first, then reveal it as soon as the
-            # initial document is ready.  If the renderer itself cannot load a
-            # local document, fail visibly instead of exposing a blank form.
-            if not window.events.loaded.wait(15.0):
-                ctypes.windll.user32.MessageBoxW(
-                    None,
-                    "WebView2 未能完成初始化，请关闭工具后重新打开。",
-                    "联盟 Boss 策略中心",
-                    0x10,
-                )
-                try:
-                    window.destroy()
-                except Exception:
-                    pass
-                return
-            window.show()
+        def closing_window() -> None:
+            startup.close()
+            service.stopping.set()
+            server.stopping.set()
+            service.controller.request_shutdown()
+            desktop_lifecycle_log("window_close_requested")
 
-            # React mounts before making the slower bootstrap API request.  If
-            # the module failed to mount at all, retry the local navigation once
-            # rather than leaving the user on a bare background indefinitely.
-            time.sleep(2.0)
-            try:
-                mounted = bool(
-                    window.evaluate_js(
-                        "document.documentElement.dataset.appMounted === 'true'"
-                    )
-                )
-            except Exception:
-                mounted = False
-            if mounted:
+        window.events.closing += closing_window
+        window.events.closed += startup.close
+
+        def startup_failed(message: str) -> None:
+            if startup.closed.is_set():
                 return
+            desktop_lifecycle_log("window_startup_failed: " + message)
+            ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
             try:
-                window.load_url(url)
-            except Exception:
-                pass
+                window.destroy()
+            except Exception as error:
+                desktop_lifecycle_log("failed_window_cleanup", error)
+
+        def reveal_ready_window() -> None:
+            startup.reveal(window, url, startup_failed)
 
         webview.start(
             reveal_ready_window,
             gui="edgechromium",
             debug=False,
             private_mode=True,
+            icon=str(APP_ICON) if APP_ICON.is_file() else None,
         )
         return 0
+    except Exception as error:
+        if startup.closed.is_set():
+            desktop_lifecycle_log("initialization_cancelled_by_close", error)
+            return 0
+        raise
     finally:
-        server.stopping.set()
-        try:
-            service.shutdown()
-        finally:
-            server.shutdown()
-            server.server_close()
+        startup.close()
+        if server is not None:
+            server.stopping.set()
+        if service is not None:
+            try:
+                service.shutdown()
+            except Exception as error:
+                desktop_lifecycle_log("controller_shutdown_failed", error)
+        if server is not None:
+            try:
+                if server_thread is not None and server_thread.is_alive():
+                    server.shutdown()
+                server.server_close()
+            except Exception as error:
+                desktop_lifecycle_log("server_shutdown_failed", error)
         if mutex is not None:
             mutex.close()
+        desktop_lifecycle_log("shutdown_complete")
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        if "--self-test" not in sys.argv and "--no-window" not in sys.argv:
+        desktop_lifecycle_log("startup_failed", error)
+        if "--internal-worker" in sys.argv and sys.stderr is not None:
+            try:
+                print(str(error), file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                pass
+        if not any(flag in sys.argv for flag in ("--self-test", "--no-window", "--internal-worker")):
             ctypes.windll.user32.MessageBoxW(
                 None,
-                f"联盟 Boss 策略中心启动失败：\n\n{error}",
-                "联盟 Boss 策略中心",
+                f"{APP_NAME} 启动失败：\n\n{error}",
+                APP_NAME,
                 0x10,
             )
-        raise
+        raise SystemExit(1)

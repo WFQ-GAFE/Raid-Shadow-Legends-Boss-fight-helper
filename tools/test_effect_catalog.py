@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from chimera_icons import EFFECT_OPTIONS, EFFECT_TYPE_ICONS, runtime_effect_options
 
 
@@ -17,7 +19,10 @@ def main() -> int:
         {"id": 560, "name": "BlockPassiveSkills"},
         {"id": 99999, "name": "FutureGameEffect"},
     ]
-    options = runtime_effect_options(runtime)
+    # A clean source checkout has no game icon cache. Model both cache states
+    # explicitly so this offline test never relies on a developer's local data.
+    with patch("chimera_icons.native_effect_icon_names", return_value=frozenset({"MagmaShield", "BlockPassiveSkills"})):
+        options = runtime_effect_options(runtime)
     by_token = {option["token"]: option for option in options}
 
     assert len(by_token) == len(options), "effect tokens must remain unique"
@@ -34,6 +39,11 @@ def main() -> int:
     assert by_token["99999"]["icon"] == "Status_Effect_Temp"
     assert by_token["99999"]["label"] == "Future Game Effect"
     assert by_token["99999"]["labelEn"] == "Future Game Effect"
+    with patch("chimera_icons.native_effect_icon_names", return_value=frozenset()):
+        uncached = {option["token"]: option for option in runtime_effect_options(runtime)}
+    assert uncached["880"]["icon"] == "Status_Effect_Temp"
+    assert uncached["880"]["iconReady"] is False
+    assert uncached["880"]["label"] == "熔岩护盾"
     print("effect catalog tests passed")
     return 0
 

@@ -13,6 +13,8 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from hydra_state import hydra_head_is_devouring
+from strategy_storage import read_object
 
 
 PROJECT_ROOT = Path(
@@ -127,6 +129,7 @@ def hydra_head_has_native_markers(value: Any) -> bool:
 def normalize_hydra_head(value: dict[str, Any]) -> dict[str, Any]:
     """Add stable identity and inferred neck state without losing actor data."""
     result = dict(value)
+    result["isDevouring"] = hydra_head_is_devouring(value)
     canonical_type_id = canonical_hydra_head_type_id(value)
     if canonical_type_id is not None:
         result["canonicalTypeId"] = canonical_type_id
@@ -173,7 +176,6 @@ def strategy_template(mode: Any = "chimera") -> dict[str, Any]:
         objectives.update(
             {
                 "mandatoryTrialIds": [],
-                "earlyRetryConditions": [],
                 "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
             }
         )
@@ -203,12 +205,7 @@ def strategy_template(mode: Any = "chimera") -> dict[str, Any]:
     }
 
 
-def _read_object(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
+_read_object = read_object
 
 
 def default_store() -> dict[str, Any]:
@@ -375,6 +372,7 @@ def sanitize_strategy_for_mode(
 
     visit(result.get("rules"))
     visit(result.get("strategyTree"))
+    visit(result.get("strategyFlow"))
     return result
 
 

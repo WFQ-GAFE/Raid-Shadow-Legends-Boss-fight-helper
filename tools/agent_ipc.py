@@ -8,8 +8,8 @@ from typing import Any
 
 
 SHARED_STATE_MAGIC = 0x52434950
-SHARED_STATE_VERSION = 3
-AGENT_BUILD_ID = 2026083102
+SHARED_STATE_VERSION = 5
+AGENT_BUILD_ID = 2026092702
 COMMAND_VERSION = 4
 AGENT_STATE_INITIALIZING = 1
 AGENT_STATE_READY = 2
@@ -41,6 +41,8 @@ LifecycleJsonSlot = _slot_type(16384, "LifecycleJsonSlot")
 BattleLedgerJsonSlot = _slot_type(65536, "BattleLedgerJsonSlot")
 RotationCatalogJsonSlot = _slot_type(262144, "RotationCatalogJsonSlot")
 DiagnosticJsonSlot = _slot_type(8192, "DiagnosticJsonSlot")
+ReplayInputJsonSlot = _slot_type(2097152, "ReplayInputJsonSlot")
+TeamPreviewJsonSlot = _slot_type(524288, "TeamPreviewJsonSlot")
 
 
 class AgentSharedState(ctypes.Structure):
@@ -62,6 +64,8 @@ class AgentSharedState(ctypes.Structure):
         ("battle_ledger", BattleLedgerJsonSlot),
         ("rotation_catalog", RotationCatalogJsonSlot),
         ("diagnostic", DiagnosticJsonSlot),
+        ("replay_input", ReplayInputJsonSlot),
+        ("team_preview", TeamPreviewJsonSlot),
     ]
 
 
@@ -78,7 +82,26 @@ assert ctypes.sizeof(LifecycleJsonSlot) == 16400
 assert ctypes.sizeof(BattleLedgerJsonSlot) == 65552
 assert ctypes.sizeof(RotationCatalogJsonSlot) == 262160
 assert ctypes.sizeof(DiagnosticJsonSlot) == 8208
-assert ctypes.sizeof(AgentSharedState) == 622752
+assert ctypes.sizeof(ReplayInputJsonSlot) == 2097168
+assert ctypes.sizeof(TeamPreviewJsonSlot) == 524304
+assert ctypes.sizeof(AgentSharedState) == 3244224
+
+
+class AgentLayoutMismatch(OSError):
+    """The game holds an agent whose shared state has another layout.
+
+    Mapping this build's larger view over an older agent's smaller section
+    fails with ERROR_ACCESS_DENIED, so the header is checked first.
+    """
+
+
+def reload_block_reason(status: dict[str, Any] | None) -> str | None:
+    """Hot reload only a readable agent built for this exact tool version."""
+    if status is None:
+        return "agent_status_unavailable_restart_required"
+    if status.get("buildId") != AGENT_BUILD_ID or status.get("compatible") is not True:
+        return "incompatible_agent_restart_required"
+    return None
 
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -112,6 +135,23 @@ class AgentIpc:
         mapping = kernel32.OpenFileMappingW(FILE_MAP_READ, False, self.name)
         if not mapping:
             raise FileNotFoundError(ctypes.get_last_error(), self.name)
+        header_view = kernel32.MapViewOfFile(
+            mapping, FILE_MAP_READ, 0, 0, ctypes.sizeof(AgentSharedHeader)
+        )
+        if not header_view:
+            error = ctypes.get_last_error()
+            kernel32.CloseHandle(mapping)
+            raise ctypes.WinError(error)
+        header = AgentSharedHeader.from_address(int(header_view))
+        layout = (int(header.magic), int(header.shared_state_version), int(header.struct_size),
+                  int(header.build_id))
+        kernel32.UnmapViewOfFile(header_view)
+        if layout[:3] != (SHARED_STATE_MAGIC, SHARED_STATE_VERSION, ctypes.sizeof(AgentSharedState)):
+            kernel32.CloseHandle(mapping)
+            raise AgentLayoutMismatch(
+                f"游戏进程中是其他版本的代理（构建 {layout[3]}，共享状态版本 {layout[1]}）；"
+                "请完全退出并重新启动这个 Raid 客户端"
+            )
         view = kernel32.MapViewOfFile(
             mapping, FILE_MAP_READ, 0, 0, ctypes.sizeof(AgentSharedState)
         )
@@ -201,7 +241,24 @@ class AgentIpc:
         if text is None:
             return None
         value = json.loads(text)
+        if isinstance(value, dict) and value.get("type") == "ipc_error":
+            raise ValueError(f"代理状态容量不足（{slot_name}）：{value.get('requiredBytes')} / {value.get('capacity')} 字节，已停止使用此快照")
         return value if isinstance(value, dict) else None
+
+    def slot_usage(self) -> dict[str, Any]:
+        result = {}
+        for name in ("account", "decision", "acknowledgement", "lifecycle", "battle_ledger", "rotation_catalog", "diagnostic", "replay_input", "team_preview"):
+            slot = getattr(self.state, name)
+            for _ in range(8):
+                before = int(slot.sequence)
+                if before & 1:
+                    continue
+                size = int(slot.reserved)
+                capacity = ctypes.sizeof(type(slot)) - 16
+                if before == int(slot.sequence):
+                    result[name] = {"bytes": size, "capacity": capacity, "overflow": size >= capacity}
+                    break
+        return result
 
     def account(self) -> dict[str, Any] | None:
         return self.read_json("account")
@@ -223,6 +280,12 @@ class AgentIpc:
 
     def diagnostic(self) -> str | None:
         return self.read_text("diagnostic")
+
+    def replay_input(self) -> dict[str, Any] | None:
+        return self.read_json("replay_input")
+
+    def team_preview(self) -> dict[str, Any] | None:
+        return self.read_json("team_preview")
 
     def wait_until_ready(self, timeout_seconds: float = 15.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_seconds

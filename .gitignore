@@ -1,7 +1,10 @@
 build/
 out/
 cache/
+logs/
 config/*.user.json
+config/*.user.json.bak.*
+config/*.user.json.recovery-*.json
 *.dll
 *.exe
 *.pdb

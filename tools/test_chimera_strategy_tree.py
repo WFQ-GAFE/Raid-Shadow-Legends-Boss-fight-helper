@@ -200,10 +200,18 @@ class ResultIpc:
             "screen": "result",
             "takeoverState": "active",
             "sessionId": 123,
+            "battleGeneration": 1,
+            "result": {"confirmed": True, "battleFinished": True, "battleGeneration": 1,
+                       "openedAtTick": 100, "bossMode": "chimera",
+                       "source": "dialog_enabled_and_battle_finished"},
         }
 
     def decision(self) -> dict:
-        raise AssertionError("result screen must stop before reading another decision")
+        return {}  # Real result with the live decision buffer already cleared.
+
+    def battle_ledger(self) -> dict:
+        return {"confirmed": True, "battleGeneration": 1, "resultOpenedAtTick": 100,
+                "bossMode": "chimera"}
 
 
 class ActiveIpc:
@@ -867,13 +875,8 @@ def main() -> int:
             "mode": "execute",
             "objectives": {
                 "mandatoryTrialIds": [8000501],
-                "earlyRetryConditions": [
-                    {
-                        "bossTurnAtLeast": 5,
-                        "mode": "any",
-                        "trialIds": [8000502],
-                    }
-                ],
+                # Saved before 1.0.6: no longer used, still accepted.
+                "earlyRetryConditions": [{"bossTurnAtLeast": 5, "mode": "any", "trialIds": []}],
             },
             "rules": [],
         }
@@ -882,7 +885,6 @@ def main() -> int:
         {"mode": "execute", "objectives": {"maxRegroupRetries": -1}, "rules": []},
         {"mode": "execute", "objectives": {"minimumDamage": True}, "rules": []},
         {"mode": "execute", "objectives": {"mandatoryTrialIds": [1, 1]}, "rules": []},
-        {"mode": "execute", "objectives": {"mandatoryTrialIds": [1], "earlyRetryConditions": [{"bossTurnAtLeast": 5, "mode": "any", "trialIds": []}]}, "rules": []},
         {"mode": "execute", "objectives": {"onAllMetAtResult": "save"}, "rules": []},
         {"mode": "execute", "safety": {"maxCommandsPerTurn": 2}, "rules": []},
         {"mode": "typo", "rules": []},

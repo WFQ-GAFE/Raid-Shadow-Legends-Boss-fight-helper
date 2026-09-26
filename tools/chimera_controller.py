@@ -14,7 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from decision_observability import emit_telemetry, record_rule, decision_details, decision_context, devour_details, pick
 from agent_ipc import AgentIpc
+from lifecycle_observability import ObservedIpc
+from hydra_state import hydra_head_is_devouring, hydra_devouring_head_ids
 from boss_modes import (
     canonical_hydra_head_type_id,
     hydra_head_has_native_markers,
@@ -226,6 +229,30 @@ def validate_effect_condition(condition: Any, *, path: str) -> None:
             raise ValueError(f"{path}.heroTypeId 必须是正整数")
 
 
+def validate_effect_count_condition(condition: Any, *, path: str) -> None:
+    if not isinstance(condition, dict):
+        raise ValueError(f"{path} 必须是对象")
+    if condition.get("target") not in {"boss", "bossPriority", "bossAny", "bossAll", "ally"}:
+        raise ValueError(f"{path}.target 不受支持")
+    if condition.get("polarity") not in {"all", "buff", "debuff"}:
+        raise ValueError(f"{path}.polarity 必须是 all、buff 或 debuff")
+    lower, upper = condition.get("countAtLeast"), condition.get("countAtMost")
+    if lower is None and upper is None:
+        raise ValueError(f"{path} 至少填写一个效果数量范围")
+    for key in ("countAtLeast", "countAtMost"):
+        if key in condition and (not isinstance(condition[key], int) or isinstance(condition[key], bool) or condition[key] < 0):
+            raise ValueError(f"{path} 效果数量必须是非负整数")
+    if lower is not None and upper is not None and lower > upper:
+        raise ValueError(f"{path} 最少数量不能大于最多数量")
+    if condition.get("target") == "ally":
+        hero_id = condition.get("heroTypeId")
+        if not isinstance(hero_id, int) or isinstance(hero_id, bool) or hero_id <= 0:
+            raise ValueError(f"{path}.heroTypeId 必须是正整数")
+        position = condition.get("teamPosition")
+        if position is not None and (not isinstance(position, int) or isinstance(position, bool) or not 1 <= position <= 6):
+            raise ValueError(f"{path}.teamPosition 必须是 1–6 的整数")
+
+
 def validate_skill_cooldown_condition(condition: Any, *, path: str) -> None:
     if not isinstance(condition, dict):
         raise ValueError(f"{path} 必须是对象")
@@ -312,6 +339,9 @@ def validate_condition_tree(
         return
     if node_type == "effect":
         validate_effect_condition(node, path=path)
+        return
+    if node_type == "effectCount":
+        validate_effect_count_condition(node, path=path)
         return
     if node_type == "skillCooldown":
         validate_skill_cooldown_condition(node, path=path)
@@ -658,10 +688,9 @@ class SkillCapabilityMemory:
         memory.dirty = False
         return memory
 
-    def save_if_changed(self, path: Path) -> bool:
-        if not self.dirty:
-            return False
-        payload = {
+    def payload(self) -> dict[str, Any]:
+        """The persisted form (also used for simulation snapshots)."""
+        return {
             "version": 2,
             "updatedAt": datetime.now(timezone.utc).isoformat(),
             "skills": {
@@ -673,6 +702,11 @@ class SkillCapabilityMemory:
                 for skill_type_id, statistics in sorted(self._performance.items())
             },
         }
+
+    def save_if_changed(self, path: Path) -> bool:
+        if not self.dirty:
+            return False
+        payload = self.payload()
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(
@@ -894,16 +928,6 @@ class ObjectiveReport:
 
 
 @dataclass(frozen=True)
-class EarlyRetryTrigger:
-    condition_index: int
-    boss_turn: int
-    boss_turn_at_least: int
-    mode: str
-    trial_ids: tuple[int, ...]
-    incomplete_trial_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True)
 class HydraDevourRetryTrigger:
     condition_index: int
     mark_index: int
@@ -912,6 +936,37 @@ class HydraDevourRetryTrigger:
     actual_hero_type_id: int
     actual_hero_name: str
     observed_sequence: tuple[str, ...]
+    mark_limit: int | None = None
+
+
+# isAnyOf/isNoneOf constrain one mark position; neverMarked forbids the
+# selected heroes as any mark target (optionally within the first N marks).
+HYDRA_DEVOUR_RELATIONS = frozenset({"isAnyOf", "isNoneOf", "neverMarked"})
+
+
+def hydra_devour_relation(condition: dict[str, Any]) -> str:
+    relation = condition.get("relation")
+    return relation if relation in HYDRA_DEVOUR_RELATIONS else "isNoneOf"
+
+
+def hydra_devour_mark_limit(condition: dict[str, Any]) -> int | None:
+    limit = condition.get("markLimit")
+    return (
+        limit
+        if isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 100
+        else None
+    )
+
+
+def hydra_devour_requirement_text(
+    relation: str, hero_labels: str, mark_limit: int | None = None
+) -> str:
+    if relation == "isAnyOf":
+        return f"该位置必须是以下英雄之一：{hero_labels}"
+    if relation == "neverMarked":
+        scope = f"前 {mark_limit} 个标记内" if mark_limit else "整场战斗中"
+        return f"以下英雄{scope}不能成为吞噬目标：{hero_labels}"
+    return f"该位置不能是以下英雄之一：{hero_labels}"
 
 
 @dataclass(frozen=True)
@@ -1040,6 +1095,9 @@ def require_takeover_active(ipc: AgentIpc, session_id: int) -> None:
         )
     if state != "active":
         raise RuntimeError(f"代理未处于接管状态：{state}")
+    if lifecycle.get("resultConfirmationAvailable") is False:
+        emit_telemetry(lifecycle={"event": "result_confirmation_unavailable"})
+        raise RuntimeError("当前游戏的结算界面观察不可用，已暂停接管，未执行自动操作。")
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -1068,32 +1126,6 @@ def validate_strategy_config(
         trial_ids = configured_trial_ids(raw_trial_ids)
         if len(trial_ids) != len(raw_trial_items):
             raise ValueError("必要试炼 ID 必须是互不重复的正整数")
-        early_retry_conditions = objectives.get("earlyRetryConditions", [])
-        if not isinstance(early_retry_conditions, list):
-            raise ValueError("earlyRetryConditions 必须是数组")
-        if len(early_retry_conditions) > 20:
-            raise ValueError("提前重整条件最多允许 20 条")
-        for index, condition in enumerate(early_retry_conditions):
-            path = f"earlyRetryConditions[{index}]"
-            if not isinstance(condition, dict):
-                raise ValueError(f"{path} 必须是对象")
-            threshold = condition.get("bossTurnAtLeast")
-            if (
-                not isinstance(threshold, int)
-                or isinstance(threshold, bool)
-                or threshold < 0
-            ):
-                raise ValueError(f"{path}.bossTurnAtLeast 必须是非负整数")
-            if condition.get("mode", "any") not in {"any", "all"}:
-                raise ValueError(f"{path}.mode 只允许 any 或 all")
-            raw_ids = condition.get("trialIds", [])
-            condition_trial_ids = configured_trial_ids(raw_ids)
-            if (
-                not isinstance(raw_ids, list)
-                or not condition_trial_ids
-                or len(condition_trial_ids) != len(raw_ids)
-            ):
-                raise ValueError(f"{path}.trialIds 必须是非空且互不重复的正整数数组")
 
     minimum_damage = objectives.get("minimumDamage", 0)
     if (
@@ -1116,6 +1148,8 @@ def validate_strategy_config(
             "free_regroup_and_stop",
         }:
             raise ValueError("未知的必要试炼失败处理方式")
+        if not isinstance(objectives.get("battleForecast", True), bool):
+            raise ValueError("battleForecast 必须是布尔值")
     else:
         devour_conditions = objectives.get("devourOrderRetryConditions", [])
         if not isinstance(devour_conditions, list):
@@ -1126,18 +1160,27 @@ def validate_strategy_config(
             path = f"devourOrderRetryConditions[{index}]"
             if not isinstance(condition, dict):
                 raise ValueError(f"{path} 必须是对象")
-            mark_index = condition.get("markIndex")
-            if (
-                not isinstance(mark_index, int)
-                or isinstance(mark_index, bool)
-                or not 1 <= mark_index <= 100
-            ):
-                raise ValueError(f"{path}.markIndex 必须是 1 到 100 的整数")
-            if condition.get("relation", "isNoneOf") not in {
-                "isAnyOf",
-                "isNoneOf",
-            }:
-                raise ValueError(f"{path}.relation 只允许 isAnyOf 或 isNoneOf")
+            relation = condition.get("relation", "isNoneOf")
+            if relation not in HYDRA_DEVOUR_RELATIONS:
+                raise ValueError(
+                    f"{path}.relation 只允许 isAnyOf、isNoneOf 或 neverMarked"
+                )
+            if relation == "neverMarked":
+                mark_limit = condition.get("markLimit")
+                if mark_limit is not None and (
+                    not isinstance(mark_limit, int)
+                    or isinstance(mark_limit, bool)
+                    or not 1 <= mark_limit <= 100
+                ):
+                    raise ValueError(f"{path}.markLimit 必须是 1 到 100 的整数")
+            else:
+                mark_index = condition.get("markIndex")
+                if (
+                    not isinstance(mark_index, int)
+                    or isinstance(mark_index, bool)
+                    or not 1 <= mark_index <= 100
+                ):
+                    raise ValueError(f"{path}.markIndex 必须是 1 到 100 的整数")
             raw_ids = condition.get("heroTypeIds", [])
             hero_type_ids = tuple(
                 dict.fromkeys(
@@ -1152,6 +1195,9 @@ def validate_strategy_config(
                 raise ValueError(
                     f"{path}.heroTypeIds 必须是非空且互不重复的正整数数组"
                 )
+        forecast = objectives.get("devourOrderForecast", False)
+        if not isinstance(forecast, bool):
+            raise ValueError("devourOrderForecast 必须是布尔值")
         behavior = objectives.get(
             "onTeamDefeatedBeforeMinimumDamage",
             "free_regroup_and_retry_manual",
@@ -1183,6 +1229,7 @@ def validate_strategy_config(
 
     tree = config.get("strategyTree")
     rules = config.get("rules")
+    require_list_execution(config)
     if tree is not None and not isinstance(tree, dict):
         raise ValueError("strategyTree 必须是对象")
     if tree is None and not isinstance(rules, list):
@@ -1493,10 +1540,15 @@ def is_battle_decision_state(state: Any) -> bool:
 
 
 def latest_account_state(pid: int) -> dict[str, Any] | None:
+    """The agent's account slot, or None when no readable agent state exists.
+
+    An older agent (another shared-state layout) also reads as None, so the
+    caller's version check can explain it instead of a raw access error.
+    """
     try:
         with AgentIpc(pid) as ipc:
             return ipc.account()
-    except FileNotFoundError:
+    except OSError:
         return None
 
 
@@ -1685,6 +1737,41 @@ def evaluate_hydra_devour_retry_trigger(
     for index, condition in enumerate(conditions):
         if index in evaluated or not isinstance(condition, dict):
             continue
+        if hydra_devour_relation(condition) == "neverMarked":
+            forbidden = tuple(
+                value
+                for value in condition.get("heroTypeIds", [])
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            )
+            mark_limit = hydra_devour_mark_limit(condition)
+            considered = sequence if mark_limit is None else sequence[:mark_limit]
+            hit = next(
+                (
+                    (position, item)
+                    for position, item in enumerate(considered, 1)
+                    if item.get("heroTypeId") in forbidden
+                ),
+                None,
+            )
+            if hit is None:
+                if mark_limit is not None and len(sequence) >= mark_limit:
+                    evaluated.add(index)
+                continue
+            evaluated.add(index)
+            position, actual = hit
+            return HydraDevourRetryTrigger(
+                condition_index=index,
+                mark_index=position,
+                relation="neverMarked",
+                expected_hero_type_ids=forbidden,
+                actual_hero_type_id=actual["heroTypeId"],
+                actual_hero_name=str(actual.get("name") or f"英雄 {actual['heroTypeId']}"),
+                observed_sequence=tuple(
+                    str(item.get("name") or f"英雄 {item.get('heroTypeId', '?')}")
+                    for item in sequence
+                ),
+                mark_limit=mark_limit,
+            ), new_mark, armed
         mark_index = condition.get("markIndex")
         if (
             not isinstance(mark_index, int)
@@ -1723,74 +1810,6 @@ def evaluate_hydra_devour_retry_trigger(
                 ),
             ), new_mark, armed
     return None, new_mark, armed
-
-
-def hydra_head_is_devouring(entity: dict[str, Any]) -> bool:
-    devoured_id = entity.get("devouredHeroId")
-    if entity.get("isDevouring") is True or (
-        isinstance(devoured_id, int)
-        and not isinstance(devoured_id, bool)
-        and devoured_id >= 0
-    ):
-        return True
-    # Recent clients can leave BattleHero.get_IsDigestingNow and the mirrored
-    # top-level fields false even while the model still carries the Digestion
-    # effect.  The effect identity is the authoritative fallback and remains
-    # available even when the swallowed ally is absent from the UI actor map.
-    for effect in entity.get("effects", []):
-        if not isinstance(effect, dict):
-            continue
-        effect_devoured_id = effect.get("devouredHeroId")
-        if (
-            effect.get("effectKind") == "Digestion"
-            or effect.get("effectKindId") == 9025
-            or effect.get("effectTypeId") == 700
-            or (
-                effect.get("skillTypeId") == 260007
-                and isinstance(effect_devoured_id, int)
-                and not isinstance(effect_devoured_id, bool)
-                and effect_devoured_id >= 0
-            )
-        ):
-            return True
-    return False
-
-
-def hydra_devouring_head_ids(state: dict[str, Any]) -> set[int]:
-    """Return authoritative Hydra head actor IDs that currently hold a hero.
-
-    A newly spawned head can briefly be present in a skill's legal target IDs
-    before its UI metadata is published.  The Devoured effect on the victim
-    still identifies its producer (the head) and is therefore the most stable
-    link for rescue targeting.
-    """
-    result: set[int] = set()
-    for boss in state_entities(state, "bosses"):
-        actor_id = boss.get("id")
-        if (
-            isinstance(actor_id, int)
-            and not isinstance(actor_id, bool)
-            and actor_id >= 0
-            and boss.get("dead") is not True
-            and hydra_head_is_devouring(boss)
-        ):
-            result.add(actor_id)
-    for hero in state_entities(state, "heroes"):
-        for effect in hero.get("effects", []):
-            if not isinstance(effect, dict):
-                continue
-            if effect.get("effectKind") != "Devoured" and effect.get(
-                "effectKindId"
-            ) != 9024:
-                continue
-            producer_id = effect.get("producerId")
-            if (
-                isinstance(producer_id, int)
-                and not isinstance(producer_id, bool)
-                and producer_id >= 0
-            ):
-                result.add(producer_id)
-    return result
 
 
 def hydra_devouring_target_label(
@@ -2209,58 +2228,6 @@ def evaluate_objectives(
             else 0.0
         ),
     )
-
-
-def evaluate_early_retry_trigger(
-    config: dict[str, Any], state: dict[str, Any]
-) -> EarlyRetryTrigger | None:
-    """Return the first explicit turn/trial deadline that currently matches.
-
-    Trial state must be present in the live snapshot.  This prevents an
-    incomplete initialization snapshot from being interpreted as a failed
-    trial and triggering a regroup.
-    """
-    objectives = config.get("objectives", {})
-    if not isinstance(objectives, dict):
-        return None
-    conditions = objectives.get("earlyRetryConditions", [])
-    if not isinstance(conditions, list) or not conditions:
-        return None
-    boss_turn = state.get("chimera", {}).get("turnCount")
-    if not isinstance(boss_turn, int) or isinstance(boss_turn, bool):
-        return None
-    statuses = trial_status_by_id(state)
-    for index, condition in enumerate(conditions):
-        if not isinstance(condition, dict):
-            continue
-        threshold = condition.get("bossTurnAtLeast")
-        trial_ids = configured_trial_ids(condition.get("trialIds", []))
-        if (
-            not isinstance(threshold, int)
-            or isinstance(threshold, bool)
-            or threshold < 0
-            or boss_turn < threshold
-            or not trial_ids
-            or any(trial_id not in statuses for trial_id in trial_ids)
-        ):
-            continue
-        incomplete = tuple(
-            trial_id
-            for trial_id in trial_ids
-            if statuses[trial_id].get("completed") is not True
-        )
-        mode = "all" if condition.get("mode") == "all" else "any"
-        matched = bool(incomplete) if mode == "any" else len(incomplete) == len(trial_ids)
-        if matched:
-            return EarlyRetryTrigger(
-                condition_index=index,
-                boss_turn=boss_turn,
-                boss_turn_at_least=threshold,
-                mode=mode,
-                trial_ids=trial_ids,
-                incomplete_trial_ids=incomplete,
-            )
-    return None
 
 
 def match_effect_condition(
@@ -2690,6 +2657,50 @@ def pending_mythic_followup_decision(
     )
 
 
+def effect_count_checks(condition: dict, state: dict) -> list[dict]:
+    """Count observed slots per entity, without pooling targets or deduplicating poisons."""
+    try:
+        validate_effect_count_condition(condition, path="effectCount")
+    except ValueError:
+        return []
+    target = condition["target"]
+    if target == "ally":
+        entities = [hero for hero in state_entities(state, "heroes")
+                    if hero.get("typeId") == condition["heroTypeId"] and hero.get("dead") is not True]
+        position = condition.get("teamPosition")
+        if position is not None:
+            positioned = [hero for hero in entities if hero.get("teamPosition") == position]
+            if positioned:
+                entities = positioned
+            elif any("teamPosition" in hero for hero in entities):
+                entities = []
+        # Duplicate copies require an observed preparation position.
+        if len(entities) != 1:
+            entities = []
+    elif target in {"boss", "bossPriority"}:
+        boss = current_boss(state)
+        entities = [boss] if boss and boss.get("dead") is not True else []
+    else:
+        entities = [boss for boss in state_entities(state, "bosses") if boss.get("dead") is not True]
+    checks = []
+    for entity in entities:
+        observed = isinstance(entity.get("effects"), list)
+        buffs = buff_count(entity) if observed else None
+        debuffs = debuff_count(entity) if observed else None
+        total = effect_count(entity) if observed else None
+        count = {"all": total, "buff": buffs, "debuff": debuffs}[condition["polarity"]]
+        passed = count is not None and (
+            "countAtLeast" not in condition or count >= condition["countAtLeast"]
+        ) and ("countAtMost" not in condition or count <= condition["countAtMost"])
+        checks.append({"entityId": entity.get("id"), "name": entity.get("name"),
+                       "observed": observed, "buffs": buffs, "debuffs": debuffs,
+                       "other": total - buffs - debuffs if observed else None,
+                       "polarity": condition["polarity"], "count": count,
+                       "countAtLeast": condition.get("countAtLeast"),
+                       "countAtMost": condition.get("countAtMost"), "passed": passed})
+    return checks
+
+
 def match_condition_tree(
     node: Any,
     state: dict[str, Any],
@@ -2731,6 +2742,12 @@ def match_condition_tree(
             state_entities(state, "bosses"),
             state_entities(state, "heroes"),
         )
+    elif node_type == "effectCount":
+        checks = effect_count_checks(node, state)
+        if not checks or any(not check["observed"] for check in checks):
+            return False
+        matched = (all(check["passed"] for check in checks) if node.get("target") == "bossAll"
+                   else any(check["passed"] for check in checks))
     elif node_type == "skillCooldown":
         matched = match_skill_cooldown_conditions([node], state)
     elif node_type == "heroState":
@@ -3735,6 +3752,55 @@ def annotate_chimera_form_first_turn(
     tracker["lastPlayerTurn"] = player_turn
 
 
+def require_confirmed_result(ipc: AgentIpc, lifecycle: dict | None = None) -> tuple[dict, dict]:
+    """Reject unverified, cross-battle, or contradictory result observations.
+
+    A live snapshot before the dialog opened is normal; a newer running
+    snapshot contradicts the claimed result. Never infer a wipe from HP.
+    """
+    lifecycle = lifecycle if lifecycle is not None else (ipc.lifecycle() or {})
+    result = lifecycle.get("result")
+    result = result if isinstance(result, dict) else {}
+    ledger = ipc.battle_ledger()
+    ledger = ledger if isinstance(ledger, dict) else {}
+    current = ipc.decision()
+    current = current if isinstance(current, dict) else {}
+    after = ipc.lifecycle() or {}
+    reason = None
+    generation = result.get("battleGeneration")
+    opened = result.get("openedAtTick")
+    if lifecycle.get("screen") != "result" or not isinstance(result, dict):
+        reason = "result_screen_changed"
+    elif result.get("confirmed") is not True or result.get("battleFinished") is not True:
+        reason = "result_not_confirmed"
+    elif result.get("source") != "dialog_enabled_and_battle_finished":
+        reason = "result_confirmation_source_missing"
+    elif (type(generation) is not int or generation <= 0 or type(opened) is not int or opened <= 0
+          or lifecycle.get("battleGeneration") != generation):
+        reason = "result_battle_identity_missing"
+    elif (ledger.get("confirmed") is not True or ledger.get("battleGeneration") != generation
+          or ledger.get("resultOpenedAtTick") != opened
+          or ledger.get("bossMode") != result.get("bossMode")):
+        reason = "result_ledger_mismatch"
+    elif (after.get("screen") != "result" or after.get("sessionId") != lifecycle.get("sessionId")
+          or after.get("battleGeneration") != generation
+          or after.get("result") != result):
+        reason = "result_changed_during_read"
+    elif isinstance(current.get("battle"), dict):
+        observed = current.get("observedAtTick")
+        if current.get("battleGeneration") != generation or type(observed) is not int:
+            reason = "battle_snapshot_identity_missing_or_changed"
+        elif observed >= opened and current["battle"].get("finished") is not True:
+            reason = "newer_running_battle_conflicts_with_result"
+    if reason:
+        emit_telemetry(lifecycle={"event": "result_rejected", "reason": reason,
+            "result": pick(result, ("confirmed", "battleFinished", "battleGeneration", "openedAtTick", "source", "bossMode")),
+            "ledger": pick(ledger, ("confirmed", "battleGeneration", "resultOpenedAtTick", "damage", "completedChallengeIds")),
+            "context": decision_context(current)})
+        raise RuntimeError(f"结算状态未通过核对（{reason}）；已暂停，不执行自动重整。请确认游戏当前画面后再继续。")
+    return lifecycle, ledger
+
+
 def wait_for_turn_advance(
     ipc: AgentIpc,
     baseline: dict[str, Any],
@@ -3747,6 +3813,7 @@ def wait_for_turn_advance(
         require_takeover_active(ipc, session_id)
         lifecycle = ipc.lifecycle()
         if isinstance(lifecycle, dict) and lifecycle.get("screen") == "result":
+            require_confirmed_result(ipc, lifecycle)
             return None
         current = ipc.decision()
         if current and turn_key(current) != baseline_key:
@@ -4287,7 +4354,7 @@ def _restart_from_result(
     mode = normalize_mode(boss_mode)
     label = mode_spec(mode)["label"]
     team_size = mode_spec(mode)["teamSize"]
-    lifecycle = ipc.lifecycle() or {}
+    lifecycle, _ = require_confirmed_result(ipc)
     result_state = lifecycle.get("result") or {}
     context = result_state.get("context") if isinstance(result_state, dict) else None
     if (
@@ -4299,6 +4366,8 @@ def _restart_from_result(
         raise RuntimeError(f"{label}结算实例已经变化，未执行自动重整")
 
     restart_nonce = lifecycle_nonce(nonce, 400)
+    emit_telemetry(lifecycle={"event": "result_restart_requested", "bossMode": mode,
+        "battleGeneration": lifecycle.get("battleGeneration"), "nonce": restart_nonce})
     queued = queue_lifecycle_command(
         pid,
         agent,
@@ -4308,6 +4377,8 @@ def _restart_from_result(
         nonce=restart_nonce,
     )
     if not queued.get("queued"):
+        emit_telemetry(lifecycle={"event": "result_restart_queue_rejected", "bossMode": mode,
+            "reason": queued.get("reason", "queue_rejected")})
         raise RuntimeError(f"代理拒绝{label}自动重整请求：{queued}")
     acknowledgement = wait_for_command_ack(
         ipc,
@@ -4315,17 +4386,38 @@ def _restart_from_result(
         nonce=restart_nonce,
         timeout_seconds=5.0,
     )
+    emit_telemetry(lifecycle={"event": "result_restart_acknowledged", "bossMode": mode,
+        "acknowledgement": pick(acknowledgement, ("status", "reason", "nonce"))
+            if acknowledgement else {"status": "timeout"}})
     if not acknowledgement or acknowledgement.get("status") != "submitted":
         reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
         raise RuntimeError(f"{label}自动重整没有通过安全检查：{reason}")
 
-    deadline = time.monotonic() + 30.0
+    restart_started = time.monotonic()
+    deadline = restart_started + 30.0
     stable_selection_key: tuple[Any, ...] | None = None
     stable_since = 0.0
+    saw_selection = False
+    last_progress_key = None
+    last_progress_at = restart_started - 5.0
     while time.monotonic() < deadline:
         require_takeover_active(ipc, session_id)
         current = ipc.lifecycle() or {}
         screen = current.get("screen")
+        now = time.monotonic()
+        saw_selection = saw_selection or screen == "team_selection"
+        selection_summary = pick(current.get("selection"), ("valid", "filled", "bossMode", "areaTypeId", "stageId", "heroTypeIds", "autoBattle", "quickBattle"))
+        result_summary = pick(current.get("result"), ("confirmed", "battleFinished", "battleGeneration"))
+        progress_key = json.dumps([screen, selection_summary, result_summary], sort_keys=True)
+        if progress_key != last_progress_key or now - last_progress_at >= 5.0:
+            emit_telemetry(lifecycle={"event": "result_restart_progress", "bossMode": mode,
+                "elapsedSeconds": round(now - restart_started, 3), "screen": screen,
+                "sawTeamSelection": saw_selection, "selection": selection_summary,
+                "result": result_summary, "lastNativeReason": current.get("reason")})
+            last_progress_key, last_progress_at = progress_key, now
+        if screen != "team_selection":
+            stable_selection_key = None
+            stable_since = 0.0
         if screen == "team_selection":
             selection = current.get("selection") or {}
             if not isinstance(selection, dict):
@@ -4336,6 +4428,9 @@ def _restart_from_result(
                 selection.get("areaTypeId"),
                 selection.get("stageId"),
                 selection.get("valid"),
+                selection.get("bossMode"),
+                selection.get("autoBattle"),
+                selection.get("quickBattle"),
                 tuple(selection.get("heroIds") or []),
                 tuple(selection.get("heroTypeIds") or []),
             )
@@ -4367,6 +4462,8 @@ def _restart_from_result(
                 boss_mode=mode,
             )
             if started:
+                emit_telemetry(lifecycle={"event": "result_restart_completed", "bossMode": mode,
+                    "via": "team_selection", "elapsedSeconds": round(time.monotonic() - restart_started, 3)})
                 return True
         elif screen == "battle":
             battle = current.get("battle") or {}
@@ -4389,11 +4486,22 @@ def _restart_from_result(
                 raise RuntimeError(f"自动重整后的{team_size}人队伍与策略组不一致（具体英雄副本）")
             if actual_team_is_full and desired_hero_type_ids and actual_types != desired_hero_type_ids:
                 raise RuntimeError(f"自动重整后的{team_size}人队伍与策略组不一致（英雄身份或顺序）")
+            emit_telemetry(lifecycle={"event": "result_restart_completed", "bossMode": mode,
+                "via": "battle", "elapsedSeconds": round(time.monotonic() - restart_started, 3)})
             return True
         time.sleep(0.05)
     current = ipc.lifecycle() or {}
+    emit_telemetry(lifecycle={"event": "result_restart_timeout", "bossMode": mode,
+        "elapsedSeconds": round(time.monotonic() - restart_started, 3),
+        "screen": current.get("screen"), "sawTeamSelection": saw_selection,
+        "lastNativeReason": current.get("reason"),
+        "selection": pick(current.get("selection"), ("valid", "filled", "bossMode", "heroTypeIds", "autoBattle", "quickBattle")),
+        "result": pick(current.get("result"), ("confirmed", "battleFinished", "battleGeneration"))})
     if current.get("screen") == "team_selection":
         return False
+    if saw_selection:
+        raise RuntimeError(f"{label}自动重整后曾进入准备界面，但未能完成重新开战；"
+                           f"30 秒后最后识别状态：{current.get('screen', 'unknown')}。详情已写入重整诊断日志")
     raise RuntimeError(f"{label}自动重整后 30 秒内没有进入准备界面或新战斗")
 
 
@@ -4460,7 +4568,10 @@ def result_screen_reached(
     lifecycle = ipc.lifecycle()
     if not lifecycle or lifecycle.get("screen") != "result":
         return False
-    ledger = ipc.battle_ledger() or {}
+    lifecycle, ledger = require_confirmed_result(ipc, lifecycle)
+    emit_telemetry(lifecycle={"event": "result_confirmed",
+        "result": pick(lifecycle.get("result"), ("confirmed", "battleFinished", "battleGeneration", "openedAtTick", "source", "bossMode")),
+        "ledger": pick(ledger, ("damage", "completedChallengeIds", "battleGeneration", "resultOpenedAtTick"))})
     detected_mode = normalize_mode(
         boss_mode or ledger.get("bossMode") or ACTIVE_BOSS_MODE
     )
@@ -4539,6 +4650,9 @@ def result_screen_reached(
         missing_label = (
             ", ".join(map(str, missing_ids)) if missing_ids else "无"
         )
+        emit_telemetry(lifecycle={"event": "result_objectives_unmet", "damage": damage,
+            "minimumDamage": minimum_damage, "missingTrialIds": list(missing_ids),
+            "behavior": behavior, "execute": execute, "retriesUsed": runtime.get("regroupRetries", 0)})
         if behavior != "free_regroup_and_retry_manual" or not execute:
             print(
                 "奇美拉结算目标未全部达成："
@@ -4576,6 +4690,7 @@ def result_screen_reached(
             desired_hero_type_ids=desired_hero_type_ids,
         )
         runtime["regroupRetries"] = used + 1
+        emit_telemetry(retriesUsed=used + 1)
         runtime.pop("lastObjectiveReport", None)
         if restarted:
             print("奇美拉已用当前队伍重新进入手动战斗。", flush=True)
@@ -4643,6 +4758,7 @@ def result_screen_reached(
         desired_hero_type_ids=desired_hero_type_ids,
     )
     runtime["regroupRetries"] = used + 1
+    emit_telemetry(retriesUsed=used + 1)
     if restarted:
         print("六头蛇已用当前队伍重新进入手动战斗。", flush=True)
     else:
@@ -6279,6 +6395,29 @@ STRICT_RESERVATION_SCOPE_KEYS = DEFAULT_POLICY_SCOPE_KEYS | frozenset(
 )
 
 
+def is_basic_skill(action: dict[str, Any], state: dict[str, Any]) -> bool:
+    """A basic (slot 1, no cooldown) skill is never reserved for a rule.
+
+    It has no cooldown to preserve, and it is the one skill an actor can
+    always use: reserving it for a future strict or trial condition leaves the
+    actor with no action whenever its other skills are cooling down.
+    """
+    if action.get("skillSlot") == 1:
+        return True
+    skill_type_id = action.get("skillTypeId")
+    live_skill = next(
+        (
+            skill
+            for skill in state.get("skills", [])
+            if isinstance(skill, dict) and skill.get("typeId") == skill_type_id
+        ),
+        None,
+    )
+    if not isinstance(live_skill, dict):
+        return False
+    return live_skill.get("slot") == 1 or live_skill.get("defaultCooldown") == 0
+
+
 def strict_rule_reserved_skill_ids(
     rules: list[Any], state: dict[str, Any]
 ) -> set[int]:
@@ -6299,28 +6438,52 @@ def strict_rule_reserved_skill_ids(
             state,
         ):
             continue
-        # A basic skill has no cooldown to preserve. Reserving an A1 for a
-        # future strict condition can deadlock the actor when every other skill
-        # is cooling down, even though that A1 will still be available in the
-        # intended trigger window.
-        skill_slot = action.get("skillSlot")
-        if skill_slot == 1:
+        if is_basic_skill(action, state):
             continue
         skill_type_id = action.get("skillTypeId")
         if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
-            live_skill = next(
-                (
-                    skill
-                    for skill in state.get("skills", [])
-                    if isinstance(skill, dict)
-                    and skill.get("typeId") == skill_type_id
-                ),
-                None,
-            )
-            if isinstance(live_skill, dict) and live_skill.get("slot") == 1:
-                continue
             reserved.add(skill_type_id)
     return reserved
+
+
+def trial_rule_skill_owners(rules: list[Any], state: dict[str, Any]) -> dict[int, list[dict]]:
+    """Trial-specific casts own their skill while their trial scope applies."""
+    owners: dict[int, list[dict]] = {}
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        when = rule.get("when")
+        if not isinstance(when, dict):
+            continue
+        trial_scope = {key: value for key, value in when.items()
+                       if key.endswith(("TrialsAll", "TrialsAny")) and value}
+        if not trial_scope or not matches(trial_scope, state):
+            continue
+        if not matches({key: value for key, value in when.items() if key in DEFAULT_POLICY_SCOPE_KEYS}, state):
+            continue
+        action = rule.get("action", {})
+        if not isinstance(action, dict) or action.get("type") not in {"cast", "transform"}:
+            continue
+        if is_basic_skill(action, state):
+            continue
+        skill_id = action.get("skillTypeId")
+        if isinstance(skill_id, int) and not isinstance(skill_id, bool):
+            owners.setdefault(skill_id, []).append(rule)
+    return owners
+
+
+def protect_trial_skill(decision: Decision | None, rule: Any, state: dict[str, Any]) -> Decision | None:
+    if decision is None:
+        return None
+    owners = state.get("_trialSkillOwners", {}).get(decision.skill.get("typeId"), [])
+    if not owners or any(owner is rule for owner in owners):
+        return decision
+    if isinstance(state.get("_decisionTrace"), list) and len(state["_decisionTrace"]) < 100:
+        state["_decisionTrace"].append({"rule": decision.rule, "name": decision.rule,
+            "kind": "reservation", "outcome": "reserved_for_trial", "conditions": [], "matched": False,
+            "reason": "skill_reserved_for_trial_rule", "skillTypeId": decision.skill.get("typeId"),
+            "reservedByRules": [str(owner.get("name", "试炼专用规则")) for owner in owners]})
+    return None
 
 
 def default_skill_policy_for_state(
@@ -6511,7 +6674,7 @@ def first_turn_default_decision(
             entry,
             state,
         )
-        if decision is not None:
+        if decision is not None and protect_trial_skill(decision, rule, state) is not None:
             return decision
     return None
 
@@ -6581,7 +6744,14 @@ def decision_from_action(
     )
 
 
-def evaluate_strategy_node(
+def evaluate_strategy_node(node: Any, state: dict[str, Any], **kwargs: Any) -> Decision | None:
+    decision = _evaluate_strategy_node(node, state, **kwargs)
+    if isinstance(node, dict) and node.get("type", "rule") in {"priority", "selector", "branch", "condition"}:
+        return decision  # Leaf rules already checked their ownership.
+    return protect_trial_skill(decision, node, state)
+
+
+def _evaluate_strategy_node(
     node: Any,
     state: dict[str, Any],
     *,
@@ -6709,14 +6879,25 @@ def evaluate_strategy_node(
     )
 
 
+def require_list_execution(config: dict[str, Any]) -> None:
+    if config.get("executionMode", "list") != "list":
+        raise ValueError("1.0.6 已移除流程图执行。请使用原列表策略；旧流程文件已保留，不会自动替换为其他动作。")
+
+
 def evaluate(
     config: dict[str, Any],
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory | None = None,
     planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
+    require_list_execution(config)
+    state.pop("_flowTrace", None)
+    state.pop("_flowRevision", None)
     automatic_trial_ids = objective_trial_ids(config, state)
     rules = config.get("rules", [])
+    input_state = state
+    # Keep this evaluation's ownership separate from subsequent live snapshots.
+    state = {**state, "_trialSkillOwners": trial_rule_skill_owners(rules, state) if isinstance(rules, list) else {}}
     if isinstance(rules, list):
         first_turn = first_turn_default_decision(rules, state)
         if first_turn is not None:
@@ -6738,12 +6919,15 @@ def evaluate(
         )
     if not isinstance(rules, list):
         return None
-    reserved = strict_rule_reserved_skill_ids(rules, state)
+    reserved = strict_rule_reserved_skill_ids(rules, state) | set(state.get("_trialSkillOwners", {}))
+    if isinstance(state.get("_decisionTrace"), list):
+        state["_reservedStrictSkillTypeIds"] = sorted(reserved)
+        input_state["_reservedStrictSkillTypeIds"] = sorted(reserved)
 
     # Explicit cast/transform/effect rules are strict regardless of where the
     # editor happens to display an automatic-trial rule. Preserve their mutual
     # order, but always evaluate them before trial automation.
-    for rule in rules:
+    for rule_index, rule in enumerate(rules):
         action = rule.get("action") if isinstance(rule, dict) else None
         action_type = action.get("type") if isinstance(action, dict) else None
         if action_type in {"defaultSkillPriority", "executeTrialRecipe"}:
@@ -6757,11 +6941,12 @@ def evaluate(
             preferred_skill_type_ids=preferred_skill_type_ids,
             planner_state=planner_state,
         )
+        record_rule(state, rule, rule_index, decision, matches, states_for_rule_targets, effect_count_checks)
         if decision is not None:
             return decision
 
     matched_trial_policy_name: str | None = None
-    for rule in rules:
+    for rule_index, rule in enumerate(rules):
         action = rule.get("action") if isinstance(rule, dict) else None
         if not isinstance(action, dict) or action.get("type") != "executeTrialRecipe":
             continue
@@ -6784,10 +6969,11 @@ def evaluate(
             preferred_skill_type_ids=preferred_skill_type_ids,
             planner_state=planner_state,
         )
+        record_rule(state, rule, rule_index, decision, matches, states_for_rule_targets, effect_count_checks)
         if decision is not None:
             return decision
 
-    for rule in rules:
+    for rule_index, rule in enumerate(rules):
         action = rule.get("action") if isinstance(rule, dict) else None
         if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
             continue
@@ -6800,27 +6986,75 @@ def evaluate(
             preferred_skill_type_ids=preferred_skill_type_ids,
             planner_state=planner_state,
         )
+        record_rule(state, rule, rule_index, decision, matches, states_for_rule_targets, effect_count_checks)
         if decision is not None:
             return decision
     if matched_trial_policy_name is not None:
         memory = capability_memory or SkillCapabilityMemory()
         memory.observe_state(state)
-        return adaptive_combat_decision(
+        decision = adaptive_combat_decision(
             f"{matched_trial_policy_name} · 当前无可执行试炼专用动作",
             state,
             memory,
             excluded_skill_type_ids=reserved,
         )
+        if decision is not None:
+            return decision
+    if reserved:
+        return reserved_skill_fallback_decision(rules, state, reserved)
     return None
 
 
-def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str:
-    """Summarise why the active hero's flat rules did not yield an action."""
+def reserved_skill_fallback_decision(
+    rules: list[Any], state: dict[str, Any], reserved: set[int]
+) -> Decision | None:
+    """Use a reserved skill rather than leave the actor with nothing to do.
+
+    Reservation keeps a cooldown skill for a strict or trial rule's window.
+    When every unreserved skill is unusable, waiting would stall the battle,
+    so the default priority is evaluated once more without reservations.
+    """
+    for rule_index, rule in enumerate(rules):
+        action = rule.get("action") if isinstance(rule, dict) else None
+        if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
+            continue
+        when = rule.get("when", {})
+        if not isinstance(when, dict) or not matches(when, state):
+            continue
+        decision = default_skill_priority_decision(
+            f"{rule.get('name', '默认技能顺序')} · 保留技能已无替代，按默认顺序使用",
+            action,
+            state,
+        )
+        if decision is None:
+            continue
+        if isinstance(state.get("_decisionTrace"), list) and len(state["_decisionTrace"]) < 100:
+            state["_decisionTrace"].append({
+                "rule": decision.rule, "name": decision.rule, "index": rule_index + 1,
+                "kind": "reservation", "outcome": "reservation_released", "conditions": [],
+                "matched": True, "reason": "no_unreserved_skill_available",
+                "skillTypeId": decision.skill.get("typeId")})
+        return decision
+    return None
+
+
+NO_DECISION_REASON_TEXT = {
+    "hero_form_mismatch": "要求英雄形态 {expected}，当前为 {actual}",
+    "chimera_form_mismatch": "奇美拉形态条件不满足（当前 {actual}）",
+    "conditions_not_met": "触发条件不满足",
+    "default_no_ready_skill": "条件满足，但优先列表中没有已就绪且目标合法的技能",
+    "trial_no_action": "条件满足，但当前没有可安全执行的试炼动作或基础技能",
+    "skill_unavailable": "条件满足，但指定技能未就绪或没有合法目标",
+}
+
+
+def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Why each of the active hero's flat rules did not yield an action."""
     rules = config.get("rules")
     if not isinstance(rules, list):
-        return "策略树没有产生可执行动作"
-    candidates: list[str] = []
-    for rule in rules:
+        return []
+    report: list[dict[str, Any]] = []
+    for rule_index, rule in enumerate(rules, 1):
         if not isinstance(rule, dict):
             continue
         when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
@@ -6831,32 +7065,47 @@ def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str
         }
         if hero_scope and not matches(hero_scope, state):
             continue
-        name = str(rule.get("name") or "未命名规则")
-        scoped_states = states_for_rule_targets(
-            state,
-            rule.get("action") if isinstance(rule.get("action"), dict) else {},
-        )
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        entry: dict[str, Any] = {
+            "ruleIndex": rule_index,
+            "name": str(rule.get("name") or "未命名规则"),
+            "actionType": action.get("type"),
+        }
+        scoped_states = states_for_rule_targets(state, action)
         if not any(matches(when, scoped_state) for scoped_state in scoped_states):
             expected_form = when.get("activeHeroFormIndex")
-            actual_form = state.get("activeHeroFormIndex")
             if expected_form is not None and not matches(
                 {"activeHeroFormIndex": expected_form}, state
             ):
-                reason = f"要求英雄形态 {expected_form}，当前为 {actual_form}"
+                entry.update(code="hero_form_mismatch", expected=expected_form,
+                             actual=state.get("activeHeroFormIndex"))
             elif "form" in when and not matches({"form": when["form"]}, state):
-                reason = f"奇美拉形态条件不满足（当前 {state.get('form', '未知')}）"
+                current_form = canonical_chimera_form(
+                    state.get("chimera", {}).get("currentForm")
+                    if isinstance(state.get("chimera"), dict)
+                    else None
+                )
+                entry.update(code="chimera_form_mismatch", expected=when["form"],
+                             actual=current_form or "未知")
             else:
-                reason = "触发条件不满足"
+                entry["code"] = "conditions_not_met"
+        elif action.get("type") == "defaultSkillPriority":
+            entry["code"] = "default_no_ready_skill"
+        elif action.get("type") == "executeTrialRecipe":
+            entry["code"] = "trial_no_action"
         else:
-            action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
-            action_type = action.get("type")
-            if action_type == "defaultSkillPriority":
-                reason = "条件满足，但优先列表中没有已就绪且目标合法的技能"
-            elif action_type == "executeTrialRecipe":
-                reason = "条件满足，但当前没有可安全执行的试炼动作或基础技能"
-            else:
-                reason = "条件满足，但指定技能未就绪或没有合法目标"
-        candidates.append(f"“{name}”：{reason}")
+            entry["code"] = "skill_unavailable"
+        entry["reason"] = NO_DECISION_REASON_TEXT[entry["code"]].format(
+            expected=entry.get("expected"), actual=entry.get("actual"))
+        report.append(entry)
+    return report
+
+
+def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str:
+    """Summarise why the active hero's flat rules did not yield an action."""
+    if not isinstance(config.get("rules"), list):
+        return "策略树没有产生可执行动作"
+    candidates = [f"“{entry['name']}”：{entry['reason']}" for entry in no_decision_report(config, state)]
     if not candidates:
         return "没有为当前英雄配置规则"
     shown = candidates[:3]
@@ -6913,6 +7162,93 @@ def remember_trial_contributor(
         used.append(skill_type_id)
 
 
+_HYDRA_FORECAST_MONITOR: Any = None
+_CHIMERA_CAPTURE_MONITOR: Any = None
+_CHIMERA_CAPTURE_TELEMETRY: Any = None
+
+
+def chimera_capture_monitor() -> Any:
+    """Saves each Chimera battle's start data and decision trace (diagnostic)."""
+    global _CHIMERA_CAPTURE_MONITOR
+    if _CHIMERA_CAPTURE_MONITOR is None:
+        from chimera_capture_live import ChimeraCaptureMonitor
+
+        _CHIMERA_CAPTURE_MONITOR = ChimeraCaptureMonitor()
+    return _CHIMERA_CAPTURE_MONITOR
+
+
+def observe_chimera_capture(
+    state: dict[str, Any],
+    ipc: AgentIpc,
+    config: dict[str, Any] | None = None,
+    capability_memory: SkillCapabilityMemory | None = None,
+) -> None:
+    global _CHIMERA_CAPTURE_TELEMETRY
+    try:
+        monitor = chimera_capture_monitor()
+        monitor.observe_decision(state, ipc=ipc, config=config,
+                                 capability_memory=capability_memory)
+        telemetry = monitor.telemetry()
+    except Exception as error:  # Diagnostic capture must never stop control.
+        telemetry = {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"}
+    # Report only status changes, not every recorded decision.
+    key = (
+        {name: telemetry.get(name) for name in ("status", "reason", "folder")}
+        if telemetry is not None
+        else None
+    )
+    if key is not None and key != _CHIMERA_CAPTURE_TELEMETRY:
+        _CHIMERA_CAPTURE_TELEMETRY = key
+        emit_telemetry(chimeraCapture=telemetry)
+
+
+_CHIMERA_FORECAST_MONITOR: Any = None
+_CHIMERA_FORECAST_TELEMETRY: Any = None
+
+
+def chimera_forecast_monitor() -> Any:
+    """One battle-start whole-battle simulation monitor per controller process."""
+    global _CHIMERA_FORECAST_MONITOR
+    if _CHIMERA_FORECAST_MONITOR is None:
+        # Imported lazily: the simulation modules import this controller.
+        from chimera_forecast_live import ChimeraForecastMonitor
+
+        _CHIMERA_FORECAST_MONITOR = ChimeraForecastMonitor()
+    return _CHIMERA_FORECAST_MONITOR
+
+
+def observe_chimera_forecast(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory | None,
+) -> Any:
+    """Consult the battle-start simulation; a returned retry asks for a regroup."""
+    global _CHIMERA_FORECAST_TELEMETRY
+    try:
+        monitor = chimera_forecast_monitor()
+        retry = monitor.observe(config, state, capture=chimera_capture_monitor(),
+                                capability_memory=capability_memory)
+        telemetry = monitor.telemetry()
+    except Exception as error:  # The forecast must never stop control.
+        retry = None
+        telemetry = {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"}
+    if telemetry is not None and telemetry != _CHIMERA_FORECAST_TELEMETRY:
+        _CHIMERA_FORECAST_TELEMETRY = telemetry
+        emit_telemetry(battleForecast=telemetry)
+    return retry
+
+
+def hydra_forecast_monitor() -> Any:
+    """One battle-start forecast monitor per controller process."""
+    global _HYDRA_FORECAST_MONITOR
+    if _HYDRA_FORECAST_MONITOR is None:
+        # Imported lazily: the forecast modules import this controller.
+        from hydra_forecast_live import HydraForecastMonitor
+
+        _HYDRA_FORECAST_MONITOR = HydraForecastMonitor()
+    return _HYDRA_FORECAST_MONITOR
+
+
 def request_chimera_regroup_retry(
     config: dict[str, Any],
     state: dict[str, Any],
@@ -6956,6 +7292,7 @@ def request_chimera_regroup_retry(
         boss_mode=boss_mode,
     )
     runtime["regroupRetries"] = used + 1
+    emit_telemetry(retriesUsed=used + 1)
 
 
 def process_state(
@@ -6984,10 +7321,39 @@ def process_state(
     if reason:
         print(f"暂停：{reason}", flush=True)
         return False
+    if ACTIVE_BOSS_MODE == "chimera":
+        observe_chimera_capture(state, ipc, config, capability_memory)
+        forecast_retry = observe_chimera_forecast(config, state, capability_memory)
+        if forecast_retry is not None:
+            emit_telemetry(lifecycle={"event": "battle_forecast_retry", "cause": forecast_retry.cause,
+                                      "recordId": forecast_retry.record_id, "context": decision_context(state)})
+            execute = execute_requested and config.get("mode") == "execute"
+            if not execute:
+                print("观察模式：不会实际触发免费重整。", flush=True)
+            elif forecast_retry.behavior == "free_regroup_and_stop":
+                free_regroup_and_stop(
+                    ipc,
+                    pid=int(state["pid"]),
+                    agent=agent,
+                    session_id=session_id,
+                )
+                raise FreeRegroupCompleted()
+            else:
+                request_chimera_regroup_retry(
+                    config,
+                    state,
+                    agent=agent,
+                    ipc=ipc,
+                    session_id=session_id,
+                    nonce=nonce,
+                    runtime_state=runtime_state,
+                )
+            return False
     if ACTIVE_BOSS_MODE == "hydra" and runtime_state is not None:
         devour_retry, new_mark, devour_tracking_armed = (
             evaluate_hydra_devour_retry_trigger(config, state, runtime_state)
         )
+        emit_telemetry(devour=devour_details(runtime_state, config, devour_retry))
         tracker = runtime_state.get("hydraDevourTracker", {})
         sequence = tracker.get("sequence", []) if isinstance(tracker, dict) else []
         if new_mark is not None:
@@ -7026,15 +7392,13 @@ def process_state(
                 hero_names_by_type.get(type_id, f"英雄 {type_id}")
                 for type_id in devour_retry.expected_hero_type_ids
             )
-            requirement = (
-                f"必须是以下英雄之一：{expected_labels}"
-                if devour_retry.relation == "isAnyOf"
-                else f"不能是以下英雄之一：{expected_labels}"
+            requirement = hydra_devour_requirement_text(
+                devour_retry.relation, expected_labels, devour_retry.mark_limit
             )
             print(
                 f"六头蛇吞噬顺序重整条件 {devour_retry.condition_index + 1} 已触发："
                 f"第 {devour_retry.mark_index} 个标记目标为"
-                f"“{devour_retry.actual_hero_name}”，但该位置{requirement}；"
+                f"“{devour_retry.actual_hero_name}”，但{requirement}；"
                 f"当前已观察顺序：{' → '.join(devour_retry.observed_sequence)}。",
                 flush=True,
             )
@@ -7054,6 +7418,69 @@ def process_state(
             else:
                 print("观察模式：不会实际触发免费重整。", flush=True)
             return False
+        if isinstance(tracker, dict):
+            monitor = hydra_forecast_monitor()
+            forecast_retry = monitor.observe(
+                config,
+                state,
+                ipc=ipc,
+                capability_memory=capability_memory,
+                marked_target=hydra_marked_target,
+                tracker_armed=tracker.get("armed") is True,
+            )
+            forecast_telemetry = monitor.telemetry()
+            if forecast_telemetry is not None:
+                emit_telemetry(devourForecast=forecast_telemetry)
+            if forecast_retry is not None and forecast_retry.cause == "damage":
+                print(
+                    "六头蛇开局推演触发重整：预计整场伤害 "
+                    f"{forecast_retry.predicted_damage / 1e8:.1f} 亿，低于最低伤害 "
+                    f"{forecast_retry.minimum_damage / 1e8:.1f} 亿。",
+                    flush=True,
+                )
+            elif forecast_retry is not None:
+                hero_names_by_type = {
+                    hero.get("typeId"): str(
+                        hero.get("name") or f"英雄 {hero.get('typeId')}"
+                    )
+                    for hero in state_entities(state, "heroes")
+                    if isinstance(hero.get("typeId"), int)
+                }
+                expected_labels = ", ".join(
+                    hero_names_by_type.get(type_id, f"英雄 {type_id}")
+                    for type_id in forecast_retry.expected_hero_type_ids
+                )
+                requirement = hydra_devour_requirement_text(
+                    forecast_retry.relation, expected_labels, forecast_retry.mark_limit
+                )
+                actual_label = hero_names_by_type.get(
+                    forecast_retry.actual_hero_type_id,
+                    f"英雄 {forecast_retry.actual_hero_type_id}",
+                )
+                print(
+                    f"六头蛇开局推演触发重整条件 {forecast_retry.condition_index + 1}："
+                    f"预计第 {forecast_retry.mark_index} 个标记（约第 "
+                    f"{forecast_retry.apply_turn} 回合）为“{actual_label}”，"
+                    f"但{requirement}。",
+                    flush=True,
+                )
+            if forecast_retry is not None:
+                execute = execute_requested and config.get("mode") == "execute"
+                if execute:
+                    runtime_state.pop("hydraDevourTracker", None)
+                    request_chimera_regroup_retry(
+                        config,
+                        state,
+                        agent=agent,
+                        ipc=ipc,
+                        session_id=session_id,
+                        nonce=nonce,
+                        runtime_state=runtime_state,
+                        boss_mode="hydra",
+                    )
+                else:
+                    print("观察模式：不会实际触发免费重整。", flush=True)
+                return False
     objective_report = evaluate_objectives(config, state)
     if runtime_state is not None and ACTIVE_BOSS_MODE == "chimera":
         runtime_state["lastObjectiveReport"] = {
@@ -7075,33 +7502,9 @@ def process_state(
             f"{objective_report.minimum_damage:g}",
             flush=True,
         )
-    if ACTIVE_BOSS_MODE == "chimera":
-        early_retry = evaluate_early_retry_trigger(config, state)
-        if early_retry is not None:
-            relation = "任一" if early_retry.mode == "any" else "全部"
-            print(
-                f"提前重整条件 {early_retry.condition_index + 1} 已触发："
-                f"Boss 回合 {early_retry.boss_turn} ≥ "
-                f"{early_retry.boss_turn_at_least}，指定试炼中{relation}未完成；"
-                "未完成试炼 "
-                + ", ".join(map(str, early_retry.incomplete_trial_ids)),
-                flush=True,
-            )
-            execute = execute_requested and config.get("mode") == "execute"
-            if execute:
-                request_chimera_regroup_retry(
-                    config,
-                    state,
-                    agent=agent,
-                    ipc=ipc,
-                    session_id=session_id,
-                    nonce=nonce,
-                    runtime_state=runtime_state,
-                )
-            else:
-                print("观察模式：不会实际触发免费重整。", flush=True)
-            return False
     if objective_report.mandatory_impossible:
+        emit_telemetry(lifecycle={"event": "mandatory_trials_impossible",
+            "impossibleTrialIds": list(objective_report.impossible_trial_ids), "context": decision_context(state)})
         objectives = config.get("objectives", {})
         behavior = (
             objectives.get(
@@ -7145,6 +7548,8 @@ def process_state(
         annotate_chimera_form_first_turn(
             state, runtime_state if runtime_state is not None else {}
         )
+    state["_decisionTrace"] = []
+    state["_reservedStrictSkillTypeIds"] = []
     decision = (
         pending_mythic_followup_decision(runtime_state, state)
         if runtime_state is not None
@@ -7152,6 +7557,7 @@ def process_state(
     )
     if decision is None:
         decision = evaluate(config, state, capability_memory, runtime_state)
+    emit_telemetry(decision=decision_details(state, decision), command=None)
     active_hero_label = str(
         state.get("activeHeroName")
         or (
@@ -7246,6 +7652,7 @@ def process_state(
     )
     if acknowledgement is None:
         raise RuntimeError(f"代理回执超时（请求 {nonce}）")
+    emit_telemetry(command={"status": acknowledgement.get("status"), "reason": acknowledgement.get("reason")})
     expected_status = "submitted" if execute else "validated"
     if acknowledgement.get("status") != expected_status:
         if recoverable_command_rejection(acknowledgement):
@@ -7277,6 +7684,16 @@ def process_state(
         raise RuntimeError(
             f"代理拒绝请求：{acknowledgement.get('reason') or acknowledgement.get('status')}"
         )
+    if ACTIVE_BOSS_MODE == "chimera":
+        try:
+            chimera_capture_monitor().observe_command(
+                state, skill_type_id=skill.get("typeId"), target_id=decision.target_id,
+                rule=decision.rule, status=acknowledgement.get("status"), executed=execute)
+            if execute:
+                chimera_forecast_monitor().observe_command(
+                    state, skill_type_id=skill.get("typeId"), target_id=decision.target_id)
+        except Exception:
+            pass  # Diagnostic trace and forecast check only.
     if execute and runtime_state is not None:
         if (
             isinstance(decision.mythic_followup_action, dict)
@@ -7300,6 +7717,7 @@ def process_state(
         if advanced is None:
             lifecycle_after = ipc.lifecycle() or {}
             if lifecycle_after.get("screen") == "result":
+                require_confirmed_result(ipc, lifecycle_after)
                 print(
                     f"执行成功：英雄“{active_hero_label}”已按规则“{decision.rule}”"
                     f"施放“{skill_label}”，随后战斗进入结算画面。",
@@ -7401,6 +7819,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="奇美拉策略控制器")
     parser.add_argument("--pid", required=True, type=int)
     parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--pause-token", default="", help=argparse.SUPPRESS)
     parser.add_argument(
         "--account-name",
         help="界面选定的游戏内用户名；控制器会与共享状态精确核对",
@@ -7502,12 +7921,17 @@ def main() -> int:
         return 4
     session_id = 0
     takeover_armed = False
-    pause_event = ControllerPauseEvent(args.pid)
+    pause_event = ControllerPauseEvent(args.pid, args.pause_token)
     try:
-        pause_event.open()
+        pause_event.open(reset=not bool(args.pause_token))
         _PAUSE_EVENT = pause_event
-        with AgentIpc(args.pid) as ipc:
+        if pause_event.is_set():
+            raise ControllerPaused()
+        with AgentIpc(args.pid) as raw_ipc:
+            ipc = ObservedIpc(raw_ipc)
             header = ipc.header()
+            emit_telemetry(lifecycle={"event": "agent_attached", "agent": pick(header,
+                ("buildId", "instanceId", "commandVersion", "sharedStateVersion", "compatible", "hooksReady", "ready"))})
             if not header.get("ready"):
                 print(f"代理版本不匹配或尚未就绪：{header}", flush=True)
                 return 5
@@ -7530,6 +7954,8 @@ def main() -> int:
                 )
                 return 5
             session_id = secrets.randbits(63) or 1
+            if pause_event.is_set():
+                raise ControllerPaused()
             takeover = set_takeover(
                 args.pid,
                 agent,
@@ -7719,20 +8145,25 @@ def main() -> int:
         print("已停止。")
         return 0
     except ControllerPaused:
+        emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "user_paused"})
         print("已按用户要求暂停接管；游戏保持在当前状态。", flush=True)
         return 0
     except ParentProcessExited:
+        emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "parent_exited"})
         print("主工具已经关闭；控制器已解除接管并退出。", flush=True)
         return 0
     except GamePaused:
+        emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "game_paused"})
         print("检测到游戏内暂停按钮；工具已解除接管。", flush=True)
         return 8
     except TakeoverInterrupted as error:
+        emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "takeover_interrupted"})
         print(str(error), flush=True)
         return 6
     except FreeRegroupCompleted:
         return 7
     except Exception as error:
+        emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "exception", "errorType": type(error).__name__})
         print(f"控制器为安全起见已停止：{error}", flush=True)
         return 5
     finally:

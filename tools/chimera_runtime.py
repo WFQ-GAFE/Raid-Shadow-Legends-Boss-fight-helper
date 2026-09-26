@@ -11,10 +11,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agent_ipc import AgentIpc
+from agent_ipc import AgentIpc, reload_block_reason
 from boss_modes import STRATEGY_STORE, strategy_template as boss_strategy_template
 from chimera_catalog_cache import load_hero_catalog, save_hero_catalog
 from chimera_controller import latest_account_state
+from desktop_lifecycle import persistent_agent
 
 
 PROJECT_ROOT = Path(
@@ -37,6 +38,8 @@ AGENT = next(
     PROJECT_ROOT / "build" / "agent-1236" / "Release" / "RaidChimeraAgent.dll",
 )
 USER_STRATEGY = STRATEGY_STORE
+if getattr(sys, "frozen", False):
+    AGENT = persistent_agent(AGENT, PROJECT_ROOT)
 
 
 def worker_command(worker: str) -> list[str]:
@@ -267,6 +270,12 @@ def identify_account(pid: int) -> dict[str, Any] | None:
         )
     check_payload = json.loads(check.stdout)
     if check_payload.get("agentLoaded"):
+        reload_reason = reload_block_reason(check_payload.get("agentStatus"))
+        if reload_reason:
+            raise RuntimeError(
+                "旧版或状态不明的代理仍驻留在游戏进程中。请完全退出并重新启动 Raid 客户端；"
+                "为避免再次闪退，工具已阻止在线卸载或重载。"
+            )
         if not check_payload.get("agentCompatible") or not check_payload.get("agentReady"):
             lifecycle: dict[str, Any] = {}
             try:

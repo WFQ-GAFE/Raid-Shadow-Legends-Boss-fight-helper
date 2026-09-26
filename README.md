@@ -1,14 +1,22 @@
-# RAID Alliance Boss Strategy Studio
+# RSL-Boss-helper
 
-**RAID 联盟 Boss 策略工作室**
+<img src="branding/alliance-boss-strategy-icon-v3.png" alt="RSL-Boss-helper" width="96">
+
+**RAID: Shadow Legends 联盟 Boss 战斗助手**
 
 A local Windows strategy editor and battle controller for the Alliance Chimera and Hydra encounters in **RAID: Shadow Legends**.
 
 一款面向 **RAID: Shadow Legends** 联盟奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
 
-Current release: **1.0.5**.
+Current release: **1.1.0**. See the [1.1.0 release notes](docs/1.1.0-release-notes.md).
 
-当前版本：**1.0.5**。
+当前版本：**1.1.0**，更新内容见 [1.1.0 发布说明](docs/1.1.0-release-notes.md)。
+
+本地固定启动入口：`build\release\RSL-Boss-helper.exe`。桌面快捷方式指向这个文件；后续发布更新同一路径，快捷方式无需重建。1.1.0 起工具改名，旧入口 `AllianceBossStrategyStudio.exe` 不再更新，请把快捷方式改为指向新文件（策略、日志和缓存位置不变）。发布时如文件被占用，请关闭工具后重试。构建与发布说明见 [通用 release](docs/release-workflow.md)。
+
+规则数量条件：[仅统计增益或减益的设置方法](docs/1.0.5-effect-count-conditions.md)。
+
+Stability fixes and verification / 稳定性修复与验收：[1.0.5 修复说明](docs/1.0.5-stability-fixes.md).
 
 Download the .exe tool in release page.
 
@@ -53,8 +61,8 @@ The application reads live battle state from the selected RAID client, evaluates
   支持能够识别当前试炼的自动决策，以及针对已知试炼类型的结构化方案。
 - Handles Mythical champion transformations and keeps the two forms' skill catalogs separate.<br>
   支持神话英雄变形，并将两种形态的技能目录分开处理。
-- Can perform a guarded free regroup when a required trial becomes impossible or when a user-defined Boss-turn/trial deadline is reached, then verify the same five champions before re-entering battle.<br>
-  当必要试炼已不可能完成，或达到用户设定的 Boss 回合/试炼截止条件时，可以在安全校验下执行免费重整，并在重新进入战斗前确认仍为相同的五名英雄。
+- Can perform a guarded free regroup when a required trial becomes impossible or when the opening whole-battle simulation predicts that the goals cannot be met, then verify the same five champions before re-entering battle.<br>
+  当必要试炼已不可能完成，或开局整场模拟预计目标无法达成时，可以在安全校验下执行免费重整，并在重新进入战斗前确认仍为相同的五名英雄。
 
 ### Hydra / 六头蛇
 
@@ -70,6 +78,11 @@ The application reads live battle state from the selected RAID client, evaluates
   达成伤害目标时可以停留在结算界面；未达成时，可以在确认六名英雄队伍无误后安全地重新战斗。
 - Prioritizes dead allies for revive skills and falls back to automatic legal-target selection when no preferred target is available.<br>
   复活技能会优先选择已死亡的队友；没有可用的优先目标时，则回退到自动选择合法目标。
+- Experimental devour-order forecast: at battle start, the battle is simulated for up to 1,000 turns in an isolated copy of the game's own engine with the running strategy. After the forecast matches every live turn played so far, a predicted mark order that violates the devour-order conditions triggers a free regroup. See `docs/1.0.6-hydra-devour-forecast.md`.<br>
+  实验性吞噬顺序推演：开战后在隔离的原版引擎副本中用当前策略模拟最多 1000 回合；推演与已进行的实战回合逐项一致后，若预计的标记顺序违反吞噬顺序条件，即执行免费重整。详见 `docs/1.0.6-hydra-devour-forecast.md`。
+- Experimental Chimera strategy simulation: replay a saved Chimera opening in the isolated original engine with the rules being edited, once with the original seed and optionally with other seeds, and report completed trials, mandatory-trial progress, damage, deaths and per-rule usage. See `docs/1.0.6-chimera-strategy-simulation.md`.<br>
+  实验性奇美拉策略模拟：用已保存的奇美拉开局数据，在隔离的原版引擎中按正在编辑的规则重打整场（第 1 场为原战斗，其余换随机种子），报告能完成的试炼、必要试炼进度、伤害、阵亡和每条规则的使用情况；模拟严格按规则出手，规则让英雄无动作可用时该场中断并记录原因。接管时还会在开局后台模拟整场战斗，与实战逐项核对一致后，预计无法完成目标或规则会卡住即免费重整。详见 `docs/1.0.6-chimera-strategy-simulation.md`。
+- 队伍配置预览与分享：在 Boss 准备界面读取所选英雄在游戏英雄界面上的整体属性（基础与加成）、套装件数、专精、祝福和圣物（含游戏图标）；导出策略组时一并导出，导入后作为“作者的队伍”供参考。详见 `docs/1.0.6-team-preview.md`。
 
 ## Repository layout / 仓库结构
 
@@ -81,6 +94,8 @@ The application reads live battle state from the selected RAID client, evaluates
   `tools/chimera_web.py` — 本地 React 应用服务与控制器桥接层
 - `tools/boss_modes.py` — Chimera/Hydra mode and strategy-profile handling<br>
   `tools/boss_modes.py` — 奇美拉/六头蛇模式与策略组处理
+- `src/offline_runtime`, `tools/hydra_forecast.py`, `tools/hydra_forecast_live.py` — isolated original-engine Hydra forecast<br>
+  `src/offline_runtime`、`tools/hydra_forecast.py`、`tools/hydra_forecast_live.py` — 隔离原版引擎的六头蛇开局推演
 - `tools/chimera_inventory.py` — read-only offline inventory of the local RAID installation<br>
   `tools/chimera_inventory.py` — 对本地 RAID 安装内容进行只读离线清点
 - `ui` — React, TypeScript, and Vite interface<br>

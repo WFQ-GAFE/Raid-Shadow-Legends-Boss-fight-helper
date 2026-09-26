@@ -152,14 +152,14 @@ EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
     {"token": "350", "icon": "IncreaseDamageTaken2", "label": "虚弱 25%", "group": "减益"},
     {"token": "351", "icon": "IncreaseDamageTaken", "label": "虚弱 15%", "group": "减益"},
     {"token": "360", "icon": "BlockRevive", "label": "封锁复活", "group": "减益"},
-    {"token": "470", "icon": "FireMark", "label": "生命值燃烧", "group": "减益"},
+    {"token": "470", "icon": "AoEContinuousDamage", "label": "生命值燃烧", "group": "减益"},
     {"token": "490", "icon": "Fear", "label": "恐惧", "group": "减益"},
     {"token": "491", "icon": "Fear2", "label": "真实恐惧", "group": "减益"},
     {"token": "500", "icon": "IncreasePoisoning", "label": "中毒敏感 25%", "group": "减益"},
     {"token": "501", "icon": "IncreasePoisoning2", "label": "中毒敏感 50%", "group": "减益"},
     {"token": "720", "icon": "StatusReduceResistance", "label": "降低抗性 25%", "group": "减益"},
     {"token": "721", "icon": "StatusReduceResistance2", "label": "降低抗性 50%", "group": "减益"},
-    {"token": "740", "icon": "ElectricMark", "label": "重击（Smite）", "group": "减益"},
+    {"token": "740", "icon": "FireMark", "label": "重击（Smite）", "group": "减益"},
     {"token": "770", "icon": "Polymorph", "label": "变羊", "group": "减益"},
     {"token": "100", "icon": "BlockDebuff", "label": "封锁减益", "group": "增益"},
     {"token": "50", "icon": "StatusCounterattack", "label": "反击", "group": "增益"},
@@ -622,12 +622,12 @@ EFFECT_TYPE_ICONS: dict[int, str] = {
     350: "IncreaseDamageTaken2", 351: "IncreaseDamageTaken",
     360: "BlockRevive", 370: "Shield2",
     410: "ReflectDamage", 411: "ReflectDamage2", 460: "LifeDrainOnDamage",
-    470: "FireMark", 480: "Invisible", 481: "Invisible2", 490: "Fear",
+    470: "AoEContinuousDamage", 480: "Invisible", 481: "Invisible2", 490: "Fear",
     491: "Fear2", 500: "IncreasePoisoning", 501: "IncreasePoisoning2",
     510: "ReduceDamageTaken", 511: "ReduceDamageTaken2", 620: "StoneSkin",
     640: "MirrorDamage", 710: "StatusIncreaseResistance",
     711: "StatusIncreaseResistance2", 720: "StatusReduceResistance",
-    721: "StatusReduceResistance2", 740: "ElectricMark", 770: "Polymorph",
+    721: "StatusReduceResistance2", 740: "FireMark", 770: "Polymorph",
     840: "Negator", 860: "HuntersMark", 870: "Inspiration",
     910: "Duel", 920: "Duel", 930: "Necrosis", 940: "Necrosis",
 }
@@ -1166,15 +1166,17 @@ def game_skill_asset(hero_id: Any, hero: Any, skill: Any) -> Path | None:
 
 
 def preload_game_visuals(
-    catalog: dict[int, dict[str, Any]], hero_ids: Any = (),
+    catalog: dict[int, dict[str, Any]], hero_ids: Any = (), *, cancelled=lambda: False,
 ) -> dict[str, int]:
     """Warm native effect icons, portraits, rewards, and current-team skills."""
-    effects = ensure_icon_cache()
-    avatars = ensure_game_avatar_cache()
-    rewards = ensure_game_reward_cache()
+    effects = {} if cancelled() else ensure_icon_cache()
+    avatars = {} if cancelled() else ensure_game_avatar_cache()
+    rewards = {} if cancelled() else ensure_game_reward_cache()
     skill_count = 0
     visited: set[int] = set()
     for raw_id in hero_ids or ():
+        if cancelled():
+            break
         try:
             hero_id = int(raw_id)
         except (TypeError, ValueError):
@@ -1431,3 +1433,85 @@ class ChimeraIconRepository:
             return self.photo(option["icon"], size)
         text = str(token or "")
         return self.photo(EFFECT_TYPE_ICONS.get(int(text)) if text.isdigit() else text, size)
+
+
+# Team preview icons: artifact sets (the game's own icon name per set), blessings,
+# masteries (by mastery id) and relics (by relic type id).
+# Sprite families for the team preview; set and blessing sprites carry the
+# names of the game's own icon URLs ("UI/Sets/Protection" -> "Protection").
+TEAM_ICON_BUNDLES = {
+    "set": "ArtifactSets",
+    "blessing": "BlessingIcon",
+    "mastery": "MasteryIcons",
+    "relic": "RelicIcons_1",
+}
+_NAMED_SPRITE_INDEX: dict[str, dict[str, Any]] = {}
+
+
+def _latest_icon_bundle_source(prefix: str) -> Path | None:
+    """The newest bundle of an icon family: downloaded resources or the build's own StreamingAssets."""
+    candidates: list[tuple[tuple[int, ...], Path]] = []
+    downloaded = _latest_resource_bundle_source(prefix)
+    if downloaded is not None:
+        candidates.append((_version_tuple(downloaded.parents[1].name), downloaded))
+    build = game_build_directory()
+    shipped = build / "Raid_Data" / "StreamingAssets" / "AssetBundles" / prefix if build is not None else None
+    if shipped is not None and shipped.is_dir():
+        for directory in shipped.iterdir():
+            version = _version_tuple(f"_{directory.name}")
+            bundle = next((path for path in directory.rglob(f"{prefix}_*.unity3d") if path.is_file()), None)
+            if version and bundle is not None:
+                candidates.append((version, bundle))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _sprite_area(sprite: Any) -> float:
+    rect = getattr(sprite, "m_Rect", None)
+    try:
+        return float(rect.width) * float(rect.height)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def game_named_sprite(prefix: str, name: str) -> Path | None:
+    """One native sprite by name from the newest bundle of an icon family, cached as PNG."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", name or ""):
+        return None
+    source = _latest_icon_bundle_source(prefix)
+    if source is None:
+        return None
+    version = _safe_name(source.stem if source.suffix == ".unity3d" else source.parent.name)
+    target = ASSET_CACHE_DIR / f"native-{_safe_name(prefix)}-{version}-{_safe_name(name)}.png"
+    if target.is_file():
+        return target
+    with _GAME_ASSET_LOCK:
+        if target.is_file():
+            return target
+        index = _NAMED_SPRITE_INDEX.get(str(source))
+        if index is None:
+            try:
+                import UnityPy  # type: ignore
+                environment = UnityPy.load(str(source))
+                index = {}
+                for obj in environment.objects:
+                    if obj.type.name == "Sprite":
+                        sprite = obj.read()
+                        name_key = str(getattr(sprite, "m_Name", "") or "")
+                        # Some families hold a small and a large sprite of one name: keep the large one.
+                        if name_key not in index or _sprite_area(sprite) > _sprite_area(index[name_key]):
+                            index[name_key] = sprite
+            except Exception as error:
+                _record_asset_extraction_error(prefix, source, error)
+                index = {}
+            _NAMED_SPRITE_INDEX.clear()  # One bundle in memory at a time.
+            _NAMED_SPRITE_INDEX[str(source)] = index
+        sprite = index.get(name)
+        if sprite is None:
+            return None
+        try:
+            ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            sprite.image.save(target)
+        except Exception as error:
+            _record_asset_extraction_error(prefix, source, error)
+            return None
+        return target

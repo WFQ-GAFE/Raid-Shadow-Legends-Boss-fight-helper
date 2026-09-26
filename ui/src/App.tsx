@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SetStateAction } from 'react'
+import { DraftStore } from './draftStore'
+import { RequestScope, mergeLogDelta } from './requestScope'
+import { useSerialPoll } from './useSerialPoll'
+import { LogView } from './LogView'
+import { DecisionRows } from './DecisionRows'
+import { CollapsiblePanel } from './CollapsiblePanel'
+import { TeamPreviewDialog, TeamPreviewSummary, type TeamPreviewSummaryState, type TeamSnapshot } from './TeamPreview'
+import { BattleForecastPanel, ChimeraSimulationPanel, SimulationReport, ruleUsageByIndex, type BattleForecastTelemetry, type SimulationOverview, type SimulationSummary } from './ChimeraSimulation'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   Activity,
@@ -33,7 +41,7 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import { getInitialLanguage, installDocumentLocalization, saveLanguage, type UiLanguage } from './i18n'
+import { gameText, getInitialLanguage, installDocumentLocalization, saveLanguage, translateToolText, type UiLanguage } from './i18n'
 
 type JsonObject = Record<string, unknown>
 type BossMode = 'chimera' | 'hydra'
@@ -155,8 +163,9 @@ const ENGLISH_EFFECT_NAMES: Record<string, string> = {
   StatusIncreaseSpeed2: 'Increase Speed 30%',
   Invisible: 'Veil',
   Invisible2: 'Perfect Veil',
-  FireMark: 'HP Burn',
-  ElectricMark: 'Smite',
+  AoEContinuousDamage: 'HP Burn',
+  FireMark: 'Smite',
+  ElectricMark: 'Electric Mark',
 }
 
 function splitIdentifier(value: string) {
@@ -209,19 +218,23 @@ type DefaultSkillPolicyDraft = {
   hydraTargetSkillId?: number
 }
 
-type EarlyRetryCondition = {
-  bossTurnAtLeast: number
-  mode: 'any' | 'all'
-  trialIds: number[]
-}
-
 type HydraDevourRetryCondition = {
-  markIndex: number
-  relation: 'isAnyOf' | 'isNoneOf'
+  // Mark position for isAnyOf/isNoneOf. neverMarked applies to every mark,
+  // optionally only within the first markLimit marks.
+  markIndex?: number
+  relation: 'isAnyOf' | 'isNoneOf' | 'neverMarked'
   heroTypeIds: number[]
+  markLimit?: number
 }
 
-const EMPTY_EARLY_RETRY_CONDITIONS: EarlyRetryCondition[] = []
+function normalizedDevourRetryCondition(condition: HydraDevourRetryCondition): HydraDevourRetryCondition {
+  if (condition.relation === 'neverMarked') {
+    const limit = Math.floor(condition.markLimit ?? 0)
+    return { relation: 'neverMarked', heroTypeIds: condition.heroTypeIds, ...(limit > 0 ? { markLimit: Math.min(100, limit) } : {}) }
+  }
+  return { markIndex: Math.max(1, Math.min(100, Math.floor(condition.markIndex ?? 1))), relation: condition.relation, heroTypeIds: condition.heroTypeIds }
+}
+
 const EMPTY_HYDRA_DEVOUR_RETRY_CONDITIONS: HydraDevourRetryCondition[] = []
 
 type Strategy = {
@@ -230,15 +243,18 @@ type Strategy = {
   scope?: JsonObject
   objectives?: {
     mandatoryTrialIds?: number[]
-    earlyRetryConditions?: EarlyRetryCondition[]
     devourOrderRetryConditions?: HydraDevourRetryCondition[]
+    devourOrderForecast?: boolean
+    battleForecast?: boolean
     minimumDamage?: number
     maxRegroupRetries?: number
     [key: string]: unknown
   }
   safety?: JsonObject
   team?: { heroIds?: number[]; heroTypeIds?: number[]; heroInstanceIds?: number[] }
+  referenceTeam?: TeamSnapshot
   rules?: Rule[]
+  executionMode?: 'list'
 }
 
 type StrategyProfile = {
@@ -249,7 +265,10 @@ type StrategyProfile = {
   ruleCount: number
 }
 
+type StorageHealth = { ok: boolean; error?: string; backups: string[] }
+
 type StrategyBundle = {
+  revision: string
   config: Strategy
   activeStrategyId: string
   strategyProfiles: StrategyProfile[]
@@ -262,6 +281,7 @@ type StrategyExportDocument = {
   exportedAt: string
   bossMode: BossMode
   strategy: Strategy
+  teamSnapshot?: TeamSnapshot
 }
 
 type LiveState = {
@@ -289,7 +309,83 @@ type LiveState = {
   error?: string
 }
 
+type DecisionTrace = {
+  rule?: string; hero?: string; skill?: string | number; target?: string; targetId?: number
+  legalTargetIds?: number[]; status?: string
+  rules?: { index: number; name: string; kind: string; outcome: string; conditions: { key: string; passed: boolean }[] }[]
+}
+type HydraForecastTelemetry = {
+  status: 'waiting_input' | 'running' | 'applied' | 'unavailable' | 'not_opening' | 'unrecorded'
+  verdict?: 'retry' | 'continue' | 'unknown'
+  reason?: string | null
+  conclusion?: string | null
+  finishedAt?: string | null
+  checkedWindows?: number
+  horizon?: 'battle_finished' | 'turn_limit'
+  turn?: number
+  elapsedSeconds?: number
+  battleSetupId?: string
+  predictedDamage?: number | null
+  minimumDamage?: number | null
+  marks?: { markIndex: number; heroTypeId: number; applyTurn: number }[]
+}
+
+function formatHundredMillions(value: number) {
+  return `${(value / 1e8).toFixed(1)} 亿`
+}
+
+// A saved battle forecast read from the data directory, newest first.
+type HydraForecastSummary = HydraForecastTelemetry & { id: string; startedAt?: string }
+
+function hydraForecastStatusLabel(forecast: HydraForecastTelemetry) {
+  if (forecast.status === 'waiting_input') return '等待本局开局数据'
+  if (forecast.status === 'running') return '后台推演中，战斗照常进行'
+  if (forecast.status === 'not_opening') return '不是从开局接管，已跳过'
+  if (forecast.status === 'unavailable') return '无法判断，本场不据此重整'
+  if (forecast.status === 'unrecorded') return '未记录结论（旧版本或接管已停止）'
+  return forecast.verdict === 'retry' ? '预计违反条件，已触发免费重整' : '条件满足，继续战斗'
+}
+
+function HydraForecastEntry({ title, forecast, observed, heroes }: { title: string; forecast: HydraForecastTelemetry; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[] }) {
+  const name = (heroTypeId: number) => heroByRuntimeId(heroes, heroTypeId)?.name ?? `英雄 ${heroTypeId}`
+  const predicted = (forecast.marks ?? []).map((mark) => `${mark.markIndex}.${name(mark.heroTypeId)}（${mark.applyTurn}）`).join(' → ')
+  const actual = (observed ?? []).map((mark, index) => `${index + 1}.${mark.name || name(mark.heroTypeId)}`).join(' → ')
+  return (
+    <article className={`hydra-forecast-entry ${forecast.status}`}>
+      <header><strong>{title}</strong><span>{hydraForecastStatusLabel(forecast)}{forecast.finishedAt ? ` · ${forecast.finishedAt}` : ''}</span></header>
+      {forecast.conclusion && <p>{forecast.conclusion}</p>}
+      {typeof forecast.predictedDamage === 'number' && <p><span>预计整场伤害</span>：<span data-i18n-skip>{formatHundredMillions(forecast.predictedDamage)}{typeof forecast.minimumDamage === 'number' ? ` / ${formatHundredMillions(forecast.minimumDamage)}` : ''}</span></p>}
+      {predicted && <p><span>预计标记（回合）</span>：<span data-i18n-skip>{predicted}</span></p>}
+      {actual && <p><span>实际已出现</span>：<span data-i18n-skip>{actual}</span></p>}
+    </article>
+  )
+}
+
+function HydraForecastPanel({ forecast, history, observed, heroes }: { forecast?: HydraForecastTelemetry; history: HydraForecastSummary[]; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[] }) {
+  const previous = history.filter((entry) => !forecast || entry.battleSetupId !== forecast.battleSetupId)
+  const latest = forecast ?? history[0]
+  return (
+    <CollapsiblePanel id="hydra:forecast" title="开局吞噬顺序推演" hint={toolText(latest ? hydraForecastStatusLabel(latest) : '暂无记录')}>
+      <div className="hydra-forecast-body">
+        {forecast && <HydraForecastEntry title="本场" forecast={forecast} observed={observed} heroes={heroes} />}
+        {previous.map((entry) => <HydraForecastEntry key={entry.id} title={`${entry.startedAt ?? ''} 开局`} forecast={entry} heroes={heroes} />)}
+        {!forecast && !previous.length && <p className="hydra-forecast-empty">开启推演后，每场开局的推演结论会显示在这里，并保留最近 5 场。</p>}
+      </div>
+    </CollapsiblePanel>
+  )
+}
+
 type ControllerState = {
+  runningRevision?: string; strategyId?: string
+  logCursor?: string; logsReset?: boolean
+  telemetry?: {
+    decision?: DecisionTrace
+    command?: { status?: string; reason?: string }
+    retriesUsed?: number
+    devour?: { armed: boolean; sequence: { name: string; heroTypeId: number }[]; retriesUsed: number; retriesMaximum?: number; retriesRemaining?: number | null; trigger?: { conditionIndex: number; markIndex: number; hero: string } }
+    devourForecast?: HydraForecastTelemetry
+    battleForecast?: BattleForecastTelemetry
+  }
   running: boolean
   status: string
   pid?: number
@@ -300,6 +396,9 @@ type ControllerState = {
 }
 
 type Bootstrap = {
+  revision: string
+  storageHealth?: StorageHealth
+  catalogRevision?: string
   bossMode: BossMode
   modes: BossModeSpec[]
   processes: RaidProcess[]
@@ -325,10 +424,12 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body) headers.set('Content-Type', 'application/json')
   if (token) headers.set('X-Chimera-Token', token)
   const response = await fetch(path, { ...init, headers, cache: 'no-store' })
-  const payload = await response.json().catch(() => ({}))
+  const payload = await response.json().catch(() => undefined)
   if (!response.ok) {
-    throw new Error(payload.error || `请求失败（${response.status}）`)
+    throw new Error(payload?.error || `请求失败（${response.status}）`)
   }
+  // A body cut off in transfer must not look like an empty success.
+  if (payload === undefined) throw new Error('响应数据不完整，请重试')
   return payload as T
 }
 
@@ -409,6 +510,18 @@ type ConditionEffectNode = EffectConditionValue & {
   negate: boolean
 }
 
+type ConditionEffectCountNode = {
+  id: string
+  type: 'effectCount'
+  target: EffectConditionValue['target']
+  heroTypeId: string
+  teamPosition: string
+  polarity: 'all' | 'buff' | 'debuff'
+  countAtLeast: string
+  countAtMost: string
+  negate: boolean
+}
+
 type ConditionCooldownNode = SkillCooldownConditionValue & {
   type: 'skillCooldown'
   negate: boolean
@@ -427,12 +540,19 @@ type ConditionGroupNode = {
   children: ConditionTreeNode[]
 }
 
-type ConditionTreeNode = ConditionEffectNode | ConditionCooldownNode | ConditionHeroStateNode | ConditionGroupNode
+type ConditionTreeNode = ConditionEffectNode | ConditionEffectCountNode | ConditionCooldownNode | ConditionHeroStateNode | ConditionGroupNode
 
 let effectConditionSequence = 0
 let skillCooldownConditionSequence = 0
 let heroStateConditionSequence = 0
 let conditionGroupSequence = 0
+let effectCountSequence = 0
+
+function createConditionEffectCount(value: Partial<ConditionEffectCountNode> = {}): ConditionEffectCountNode {
+  effectCountSequence += 1
+  return { id: `effect-count-${effectCountSequence}`, type: 'effectCount', target: 'boss',
+    heroTypeId: '', teamPosition: '', polarity: 'debuff', countAtLeast: '10', countAtMost: '', negate: false, ...value }
+}
 
 function createEffectCondition(value: Partial<EffectConditionValue> = {}): EffectConditionValue {
   effectConditionSequence += 1
@@ -537,6 +657,16 @@ function hydrateConditionTree(raw: unknown): ConditionTreeNode | undefined {
     if (!children.length) return undefined
     return { ...createConditionGroup(children, value.operator === 'any' ? 'any' : 'all'), negate }
   }
+  if (value.type === 'effectCount') {
+    if (!['all', 'buff', 'debuff'].includes(String(value.polarity))) return undefined
+    const target = ['boss', 'bossPriority', 'bossAny', 'bossAll', 'ally'].includes(String(value.target))
+      ? value.target as ConditionEffectCountNode['target'] : 'boss'
+    return createConditionEffectCount({ target, polarity: value.polarity as ConditionEffectCountNode['polarity'],
+      heroTypeId: typeof value.heroTypeId === 'number' ? String(value.heroTypeId) : '',
+      teamPosition: typeof value.teamPosition === 'number' ? String(value.teamPosition) : '',
+      countAtLeast: value.countAtLeast == null ? '' : String(value.countAtLeast),
+      countAtMost: value.countAtMost == null ? '' : String(value.countAtMost), negate })
+  }
   if (value.type === 'effect') {
     const target = value.target === 'ally'
       ? 'ally'
@@ -594,11 +724,22 @@ function cleanText(value?: string) {
   return (value ?? '').replace(/<[^>]+>/g, '')
 }
 
+// Trial and skill descriptions are game text in the client's language; the
+// English phrase table must not rewrite parts of them.
+function gameDescription(value?: string) {
+  return gameText(cleanText(value))
+}
+
+// Tool text rendered where the document translator is switched off (panel
+// hints also carry player-named strategies, which stay as written).
+const APP_NAME = 'RSL-Boss-helper'
+
+function toolText(value: string) {
+  return document.documentElement.lang === 'en' ? translateToolText(value) : value
+}
+
 function configuredTrialDifficulty(strategy: Strategy): number | undefined {
-  const earlyRetryTrialIds = (strategy.objectives?.earlyRetryConditions ?? []).flatMap(
-    (condition) => condition.trialIds,
-  )
-  const trialId = [...(strategy.objectives?.mandatoryTrialIds ?? []), ...earlyRetryTrialIds].find(
+  const trialId = (strategy.objectives?.mandatoryTrialIds ?? []).find(
     (value) => Number.isInteger(value) && value > 8_000_000,
   )
   if (typeof trialId !== 'number') return undefined
@@ -857,7 +998,7 @@ function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[]
   const eligibleTrialIds = asNumberArray(when.eligibleTrialsAny)
   if (eligibleTrialIds.length) {
     const selectedTrial = trials.find((trial) => trial.id === eligibleTrialIds[0])
-    const description = cleanText(selectedTrial?.description) || `试炼 ${eligibleTrialIds[0]}`
+    const description = gameDescription(selectedTrial?.description) || `试炼 ${eligibleTrialIds[0]}`
     parts.push(`试炼激活：${description}`)
     summarized.add('eligibleTrialsAny')
   }
@@ -922,6 +1063,12 @@ function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[]
         const children = Array.isArray(node.children) ? node.children.map(describeTree).filter((child) => child.leaves > 0) : []
         const joiner = node.operator === 'any' ? ' OR ' : ' AND '
         return { leaves: children.reduce((sum, child) => sum + child.leaves, 0), text: `${negated}(${children.slice(0, 3).map((child) => child.text).join(joiner)}${children.length > 3 ? '…' : ''})` }
+      }
+      if (node.type === 'effectCount') {
+        const category = node.polarity === 'buff' ? '增益数量' : node.polarity === 'debuff' ? '减益数量' : '效果总数'
+        const range = node.countAtLeast === node.countAtMost ? `=${node.countAtLeast}`
+          : `${node.countAtLeast == null ? '' : `≥${node.countAtLeast}`}${node.countAtMost == null ? '' : ` ≤${node.countAtMost}`}`
+        return { leaves: 1, text: `${negated}${category}${range}` }
       }
       const leafLabel = node.type === 'skillCooldown'
         ? '冷却'
@@ -993,17 +1140,36 @@ function EffectIcon({ effect }: { effect: EffectOption }) {
   )
 }
 
+function effectPickerSelection(effects: EffectOption[], value: string): EffectOption | undefined {
+  if (!value) return undefined
+  const exact = effects.find((effect) => effect.token === value)
+  if (exact) return exact
+  // Saved kind predicates intentionally cover multiple strengths. Display the
+  // category without converting the saved token to a particular type ID.
+  const category = effects.find((effect) => effect.icon === value)
+  if (category) {
+    const withoutStrength = (text: string) => text.replace(/\s*\d+(?:\.\d+)?%/g, '').trim()
+    return { ...category, token: value,
+      label: `${withoutStrength(category.label)}（按效果种类）`,
+      labelEn: `${withoutStrength(category.labelEn ?? value)} (by effect kind)` }
+  }
+  return { token: value, icon: 'Status_Effect_Temp', iconReady: false,
+    label: `已保存效果：${value}`, labelEn: `Saved effect: ${value}`, group: '特殊' }
+}
+
 function EffectPicker({
   effects,
   value,
   onValue,
+  required = false,
 }: {
   effects: EffectOption[]
   value: string
   onValue: (value: string) => void
+  required?: boolean
 }) {
   const [search, setSearch] = useState('')
-  const selected = effects.find((effect) => effect.token === value)
+  const selected = effectPickerSelection(effects, value)
   const visible = effects.filter((effect) => {
     const display = effectDisplay(effect)
     return `${effect.label} ${effect.labelEn ?? ''} ${effect.nativeName ?? ''} ${effect.group} ${display.label} ${display.group} ${effect.token}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())
@@ -1020,13 +1186,13 @@ function EffectPicker({
     <details className="effect-picker">
       <summary>
         {selected ? <EffectIcon effect={selected} /> : <span className="effect-icon"><Sparkles size={14} /></span>}
-        <span>{selected ? <><strong>{selectedDisplay?.label}</strong><small>{selectedDisplay?.group}</small></> : <strong>不限</strong>}</span>
+        <span>{selected ? <><strong>{selectedDisplay?.label}</strong><small>{selectedDisplay?.group}</small></> : <strong>{required ? '请选择具体效果' : '不限'}</strong>}</span>
         <ChevronDown size={15} />
       </summary>
       <div className="effect-picker-menu">
         <label className="effect-picker-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} onClick={(event) => event.stopPropagation()} placeholder="搜索效果、类别或编号" /></label>
         <div className="effect-picker-options">
-          <button type="button" className={!value ? 'effect-picker-option active' : 'effect-picker-option'} onClick={(event) => choose(event, '')}><span className="effect-icon"><Sparkles size={14} /></span><span><strong>不限</strong><small>不判断此项</small></span></button>
+          <button type="button" className={!value ? 'effect-picker-option active' : 'effect-picker-option'} onClick={(event) => choose(event, '')}><span className="effect-icon"><Sparkles size={14} /></span><span><strong>{required ? '清空选择' : '不限'}</strong><small>{required ? '统计总数请添加“效果数量”条件' : '不判断此项'}</small></span></button>
           {visible.map((effect) => { const display = effectDisplay(effect); return <button type="button" key={effect.token} className={effect.token === value ? 'effect-picker-option active' : 'effect-picker-option'} onClick={(event) => choose(event, effect.token)}><EffectIcon effect={effect} /><span><strong>{display.label}</strong><small>{display.group} · ID {effect.token}</small></span></button> })}
         </div>
       </div>
@@ -1169,7 +1335,7 @@ function TrialPicker({
                       <em>{TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty}</em>
                       {trial.completed && <em className="success">已完成</em>}
                     </span>
-                    <strong>{cleanText(trial.description)}</strong>
+                    <strong>{gameDescription(trial.description)}</strong>
                     <span className="trial-reward-heading">当前轮换奖励</span>
                     <TrialRewards reward={trial.reward} />
                   </span>
@@ -1187,83 +1353,13 @@ function TrialPicker({
   )
 }
 
-function EarlyRetryPicker({
-  open,
-  onOpenChange,
-  trials,
-  conditions,
-  onApply,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  trials: Trial[]
-  conditions: EarlyRetryCondition[]
-  onApply: (conditions: EarlyRetryCondition[]) => void
-}) {
-  const [draft, setDraft] = useState<EarlyRetryCondition[]>(conditions)
-
-  useEffect(() => {
-    if (!open) return
-    setDraft(conditions)
-  }, [open, conditions])
-
-  function updateCondition(index: number, changes: Partial<EarlyRetryCondition>) {
-    setDraft((current) => current.map((condition, itemIndex) => itemIndex === index ? { ...condition, ...changes } : condition))
-  }
-
-  function addCondition() {
-    if (!trials.length) return
-    setDraft((current) => [...current, {
-      bossTurnAtLeast: 5,
-      mode: 'any',
-      trialIds: [trials[0].id],
-    }])
-  }
-
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content early-retry-dialog">
-          <div className="dialog-heading">
-            <div><Dialog.Title>奇美拉提前重整条件</Dialog.Title><Dialog.Description>到达你指定的 Boss 回合后，仅在所选试炼仍未完成时重整并重新开战；可选择当前难度的任意试炼。</Dialog.Description></div>
-            <Dialog.Close className="icon-button" aria-label="关闭"><X size={19} /></Dialog.Close>
-          </div>
-          <div className="early-retry-list">
-            {!trials.length && <div className="effect-condition-empty"><BookOpenCheck size={22} /><span><strong>当前难度暂无可用试炼</strong><small>请等待本轮试炼数据完成读取</small></span></div>}
-            {trials.length > 0 && !draft.length && <div className="effect-condition-empty"><Activity size={22} /><span><strong>尚未设置提前重整</strong><small>不设置时仍沿用试炼已不可能完成与结算页重整</small></span></div>}
-            {draft.map((condition, index) => (
-              <article className="early-retry-condition" key={index}>
-                <div className="early-retry-condition-heading"><strong>条件 {index + 1}</strong><button type="button" className="icon-button danger" aria-label={`删除提前重整条件 ${index + 1}`} onClick={() => setDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>
-                <div className="early-retry-fields">
-                  <label className="field"><span>Boss 回合达到</span><NumericInput value={condition.bossTurnAtLeast} onValue={(value) => updateCondition(index, { bossTurnAtLeast: value })} /></label>
-                  <label className="field"><span>未完成关系</span><select value={condition.mode} onChange={(event) => updateCondition(index, { mode: event.target.value === 'all' ? 'all' : 'any' })}><option value="any">任一所选试炼未完成</option><option value="all">全部所选试炼未完成</option></select></label>
-                </div>
-                <div className="early-retry-trials">
-                  {trials.map((trial) => {
-                    const checked = condition.trialIds.includes(trial.id)
-                    return <button type="button" key={trial.id} className={checked ? 'selected' : ''} onClick={() => updateCondition(index, { trialIds: checked ? condition.trialIds.filter((trialId) => trialId !== trial.id) : [...condition.trialIds, trial.id] })}><span className="check-box">{checked && <Check size={14} />}</span><span><small>{FORM_LABEL[trial.form ?? ''] ?? trial.form ?? '奇美拉'} · {TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty ?? '试炼'}</small><strong>{cleanText(trial.description) || `试炼 ${trial.id}`}</strong></span></button>
-                  })}
-                </div>
-              </article>
-            ))}
-          </div>
-          <div className="dialog-footer">
-            <button className="button ghost" disabled={!trials.length || draft.length >= 20} onClick={addCondition}><Plus size={15} />添加重整条件</button>
-            <div><Dialog.Close className="button ghost">取消</Dialog.Close><button className="button primary" onClick={() => { onApply(draft.filter((condition) => condition.trialIds.length).map((condition) => ({ ...condition, bossTurnAtLeast: Math.max(0, Math.floor(condition.bossTurnAtLeast)) }))); onOpenChange(false) }}>应用条件</button></div>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  )
-}
-
 function HydraDevourRetryPicker({
   open,
   onOpenChange,
   heroes,
   team,
   conditions,
+  forecast,
   onApply,
 }: {
   open: boolean
@@ -1271,15 +1367,18 @@ function HydraDevourRetryPicker({
   heroes: Hero[]
   team: number[]
   conditions: HydraDevourRetryCondition[]
-  onApply: (conditions: HydraDevourRetryCondition[]) => void
+  forecast: boolean
+  onApply: (conditions: HydraDevourRetryCondition[], forecast: boolean) => void
 }) {
   const [draft, setDraft] = useState<HydraDevourRetryCondition[]>(conditions)
+  const [draftForecast, setDraftForecast] = useState(forecast)
   const teamHeroTypeIds = [...new Set(team.filter((value) => Number.isInteger(value) && value > 0))]
 
   useEffect(() => {
     if (!open) return
     setDraft(conditions)
-  }, [open, conditions])
+    setDraftForecast(forecast)
+  }, [open, conditions, forecast])
 
   function updateCondition(index: number, changes: Partial<HydraDevourRetryCondition>) {
     setDraft((current) => current.map((condition, itemIndex) => itemIndex === index ? { ...condition, ...changes } : condition))
@@ -1304,15 +1403,25 @@ function HydraDevourRetryPicker({
             <Dialog.Close className="icon-button" aria-label="关闭"><X size={19} /></Dialog.Close>
           </div>
           <div className="early-retry-list">
+            <button type="button" className={`devour-forecast-toggle ${draftForecast ? 'selected' : ''}`} aria-pressed={draftForecast} onClick={() => setDraftForecast((current) => !current)}>
+              <span className="check-box">{draftForecast && <Check size={14} />}</span>
+              <span><strong>开局离线推演吞噬顺序（实验）</strong><small>开战后在后台用本局开局数据和当前策略模拟最多 1000 回合，推演结果与已进行的实战回合逐项核对一致后，若预计的标记顺序违反下列条件，或预计整场伤害低于“战斗目标”中的最低伤害，立即免费重整；推演失败或与实战不一致时不会重整，仍按实际情况判定。</small></span>
+            </button>
             {!teamHeroTypeIds.length && <div className="effect-condition-empty"><Waves size={22} /><span><strong>尚未读取准备队伍</strong><small>请先进入六头蛇准备界面，或保存当前准备队伍</small></span></div>}
             {teamHeroTypeIds.length > 0 && !draft.length && <div className="effect-condition-empty"><Activity size={22} /><span><strong>尚未设置吞噬顺序条件</strong><small>不设置时不会因吞噬目标提前重整</small></span></div>}
             {draft.map((condition, index) => (
               <article className="early-retry-condition" key={index}>
                 <div className="early-retry-condition-heading"><strong>条件 {index + 1}</strong><button type="button" className="icon-button danger" aria-label={`删除吞噬顺序条件 ${index + 1}`} onClick={() => setDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>
                 <div className="early-retry-fields">
-                  <label className="field"><span>第几个吞噬标记</span><NumericInput value={condition.markIndex} onValue={(value) => updateCondition(index, { markIndex: value })} /></label>
-                  <label className="field"><span>目标要求</span><select value={condition.relation} onChange={(event) => updateCondition(index, { relation: event.target.value === 'isAnyOf' ? 'isAnyOf' : 'isNoneOf' })}><option value="isNoneOf">不能是所选英雄</option><option value="isAnyOf">必须是所选英雄之一</option></select></label>
+                  {condition.relation === 'neverMarked'
+                    ? <label className="field"><span>判定范围：前几个标记（0 为整场战斗）</span><NumericInput value={condition.markLimit ?? 0} maximum={100} onValue={(value) => updateCondition(index, { markLimit: value })} /></label>
+                    : <label className="field"><span>第几个吞噬标记</span><NumericInput value={condition.markIndex ?? 1} onValue={(value) => updateCondition(index, { markIndex: value })} /></label>}
+                  <label className="field"><span>目标要求</span><select value={condition.relation} onChange={(event) => {
+                    const relation = event.target.value === 'isAnyOf' ? 'isAnyOf' : event.target.value === 'neverMarked' ? 'neverMarked' : 'isNoneOf'
+                    updateCondition(index, relation === 'neverMarked' ? { relation } : { relation, markIndex: condition.markIndex ?? Math.min(100, index + 1) })
+                  }}><option value="isNoneOf">不能是所选英雄</option><option value="isAnyOf">必须是所选英雄之一</option><option value="neverMarked">所选英雄从未被吞噬</option></select></label>
                 </div>
+                {condition.relation === 'neverMarked' && <p className="devour-condition-note">所选英雄只要成为吞噬标记的目标即视为被吞噬（包括被标记后先阵亡的情况）；实战中一出现就重整，开局推演预计会出现时也会重整。</p>}
                 <div className="devour-retry-heroes">
                   {teamHeroTypeIds.map((heroTypeId) => {
                     const hero = heroByRuntimeId(heroes, heroTypeId)
@@ -1325,7 +1434,7 @@ function HydraDevourRetryPicker({
           </div>
           <div className="dialog-footer">
             <button className="button ghost" disabled={!teamHeroTypeIds.length || draft.length >= 20} onClick={addCondition}><Plus size={15} />添加顺序条件</button>
-            <div><Dialog.Close className="button ghost">取消</Dialog.Close><button className="button primary" onClick={() => { onApply(draft.filter((condition) => condition.heroTypeIds.length).map((condition) => ({ ...condition, markIndex: Math.max(1, Math.min(100, Math.floor(condition.markIndex))) }))); onOpenChange(false) }}>应用条件</button></div>
+            <div><Dialog.Close className="button ghost">取消</Dialog.Close><button className="button primary" onClick={() => { onApply(draft.filter((condition) => condition.heroTypeIds.length).map(normalizedDevourRetryCondition), draftForecast); onOpenChange(false) }}>应用条件</button></div>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -1765,6 +1874,33 @@ function RuleEditor({
         children: node.children.map(serializeConditionNode),
       }
     }
+    if (node.type === 'effectCount') {
+      const condition: JsonObject = { type: 'effectCount', target: node.target, polarity: node.polarity,
+        ...(node.negate ? { negate: true } : {}) }
+      if (node.target === 'ally') {
+        const heroTypeId = Number(node.heroTypeId)
+        const position = Number(node.teamPosition)
+        if (!Number.isInteger(heroTypeId) || heroTypeId <= 0 || !team.slice(0, teamSize).includes(heroTypeId)) {
+          throw new Error('英雄效果条件必须从当前准备队伍中选择一名具体英雄')
+        }
+        condition.heroTypeId = heroTypeId
+        if (node.teamPosition) {
+          if (!Number.isInteger(position) || position < 1 || position > teamSize || team[position - 1] !== heroTypeId) {
+            throw new Error('英雄效果条件必须从当前准备队伍中选择一名具体英雄')
+          }
+          condition.teamPosition = position
+        }
+      }
+      for (const key of ['countAtLeast', 'countAtMost'] as const) {
+        if (!node[key].trim()) continue
+        const count = Number(node[key])
+        if (!Number.isSafeInteger(count) || count < 0) throw new Error('效果数量必须是非负整数')
+        condition[key] = count
+      }
+      if (condition.countAtLeast === undefined && condition.countAtMost === undefined) throw new Error('至少填写一个效果数量范围')
+      if (typeof condition.countAtLeast === 'number' && typeof condition.countAtMost === 'number' && condition.countAtLeast > condition.countAtMost) throw new Error('最少数量不能大于最多数量')
+      return condition
+    }
     if (node.type === 'effect') {
       if (!node.token) throw new Error('请为每一条效果条件选择具体效果，或删除未完成的条件')
       const selector: JsonObject = /^\d+$/.test(node.token)
@@ -2007,6 +2143,7 @@ function RuleEditor({
               <summary className="button ghost"><Plus size={14} />添加条件<ChevronDown size={14} /></summary>
               <div className="condition-add-menu-popover">
                 <button type="button" onClick={(event) => { appendConditionNode(node.id, createConditionEffect({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })); event.currentTarget.closest('details')?.removeAttribute('open') }}><ShieldCheck size={17} /><span><strong>效果状态</strong><small>增益、减益与剩余回合</small></span></button>
+                <button type="button" onClick={(event) => { appendConditionNode(node.id, createConditionEffectCount({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })); event.currentTarget.closest('details')?.removeAttribute('open') }}><Layers3 size={17} /><span><strong>效果数量</strong><small>仅增益、仅减益或全部效果的数量</small></span></button>
                 <button type="button" onClick={(event) => { appendConditionNode(node.id, defaultCooldownNode()); event.currentTarget.closest('details')?.removeAttribute('open') }}><Zap size={17} /><span><strong>技能冷却</strong><small>指定英雄当前技能的冷却</small></span></button>
                 <button type="button" onClick={(event) => { appendConditionNode(node.id, defaultHeroStateNode()); event.currentTarget.closest('details')?.removeAttribute('open') }}><Users size={17} /><span><strong>英雄存活状态</strong><small>指定队友必须存活或死亡</small></span></button>
                 <button type="button" onClick={(event) => { appendConditionNode(node.id, createConditionGroup([createConditionEffect({ target: bossMode === 'hydra' ? 'bossPriority' : 'boss' })])); event.currentTarget.closest('details')?.removeAttribute('open') }}><Layers3 size={17} /><span><strong>子逻辑组</strong><small>继续组合 AND、OR 与 NOT</small></span></button>
@@ -2018,8 +2155,31 @@ function RuleEditor({
         <div className="condition-tree-children">
           {node.children.length
             ? node.children.map((child, index) => renderConditionNode(child, depth + 1, path ? `${path}.${index + 1}` : String(index + 1)))
-            : <div className="effect-condition-empty"><ShieldCheck size={22} /><span><strong>这个逻辑组还没有条件</strong><small>可添加效果、冷却、英雄状态或子逻辑组</small></span></div>}
+            : <div className="effect-condition-empty"><ShieldCheck size={22} /><span><strong>这个逻辑组还没有条件</strong><small>可添加效果状态、效果数量、冷却、英雄状态或子逻辑组</small></span></div>}
         </div>
+      </div>
+    }
+    if (node.type === 'effectCount') {
+      const updateCount = (changes: Partial<ConditionEffectCountNode>) => mutateConditionNode(node.id, (current) => current.type === 'effectCount' ? { ...current, ...changes } : current)
+      const selectedHero = heroByRuntimeId(heroes, Number(node.heroTypeId))
+      const selectedPosition = node.teamPosition || String(team.slice(0, teamSize).findIndex((id) => id === Number(node.heroTypeId)) + 1)
+      const selection = node.target === 'ally' ? `ally:${selectedPosition}` : node.target
+      return <div className={`effect-count-condition-row condition-tree-leaf${node.negate ? ' negated' : ''}`} key={node.id}>
+        <span className="effect-condition-index">{path}</span>
+        <label className="field"><span>统计目标</span><select aria-label={`效果数量 ${path} 的目标`} value={selection} onChange={(event) => {
+          const [target, rawPosition] = event.target.value.split(':')
+          const position = Number(rawPosition)
+          updateCount({ target: target as ConditionEffectCountNode['target'], teamPosition: target === 'ally' ? rawPosition : '', heroTypeId: target === 'ally' ? String(team[position - 1]) : '' })
+        }}>
+          {bossMode === 'hydra' ? <><option value="bossPriority">规则优先目标蛇头</option><option value="bossAny">任一在场蛇头</option><option value="bossAll">全部在场蛇头</option></> : <option value="boss">奇美拉 Boss</option>}
+          {node.target === 'ally' && !team.slice(0, teamSize).includes(Number(node.heroTypeId)) && <option value={selection}>已保存英雄 {node.heroTypeId}</option>}
+          {team.slice(0, teamSize).map((id, index) => id > 0 && <option key={index} value={`ally:${index + 1}`}>{index + 1}. {heroByRuntimeId(heroes, id)?.name ?? `英雄 ${id}`}</option>)}
+        </select></label>
+        <label className="field"><span>统计范围</span><select value={node.polarity} onChange={(event) => updateCount({ polarity: event.target.value as ConditionEffectCountNode['polarity'] })}><option value="all">全部效果</option><option value="buff">仅增益（Buff）</option><option value="debuff">仅减益（Debuff）</option></select></label>
+        <label className="effect-turn-field"><span>数量 ≥</span><input aria-label={`效果数量 ${path} 的最少数量`} type="text" inputMode="numeric" value={node.countAtLeast} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCount({ countAtLeast: event.target.value })} placeholder="不限" /></label>
+        <label className="effect-turn-field"><span>数量 ≤</span><input aria-label={`效果数量 ${path} 的最多数量`} type="text" inputMode="numeric" value={node.countAtMost} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCount({ countAtMost: event.target.value })} placeholder="不限" /></label>
+        <div className="condition-leaf-actions"><button type="button" className={node.negate ? 'condition-negate active' : 'condition-negate'} title="对本条件取反" onClick={() => updateCount({ negate: !node.negate })}>NOT</button><button type="button" className="effect-condition-delete" aria-label={`删除效果数量条件 ${path}`} onClick={() => removeConditionNode(node.id)}><Trash2 size={15} /></button></div>
+        <p className="effect-count-hint">{node.target === 'ally' && selectedHero && <span data-i18n-skip>{selectedHero.name} · </span>}<span>每个目标单独计数；同一减益占多个槽位时分别计算。两个数量都填 10 表示恰好 10 个。</span></p>
       </div>
     }
     if (node.type === 'heroState') {
@@ -2063,7 +2223,7 @@ function RuleEditor({
         <span><select aria-label={`效果条件 ${path} 的目标`} value={node.target === 'ally' ? `ally:${node.heroTypeId}` : node.target} onChange={(event) => { const [targetType, rawHeroTypeId = ''] = event.target.value.split(':'); const bossTarget = targetType === 'bossAll' || targetType === 'bossAny' || targetType === 'bossPriority' ? targetType : 'boss'; updateCondition({ target: targetType === 'ally' ? 'ally' : bossTarget, heroTypeId: targetType === 'ally' ? rawHeroTypeId : '' }) }}>{bossMode === 'hydra' ? <><option value="bossPriority">规则优先目标蛇头</option><option value="bossAny">任一在场蛇头</option><option value="bossAll">全部在场蛇头</option></> : <option value="boss">奇美拉 Boss</option>}{savedHeroOutsideTeam && <option value={`ally:${node.heroTypeId}`}>已保存英雄 {node.heroTypeId}</option>}{team.slice(0, teamSize).map((typeId, teamIndex) => { const teamHero = heroByRuntimeId(heroes, typeId); return typeId > 0 ? <option key={`${typeId}-${teamIndex}`} value={`ally:${typeId}`}>{teamIndex + 1}. {teamHero?.name ?? `英雄 ${typeId}`}</option> : null })}</select></span>
       </div>
       <div className="effect-presence-toggle" role="group" aria-label={`效果条件 ${path} 的状态`}><button type="button" className={node.presence === 'has' ? 'active' : ''} onClick={() => updateCondition({ presence: 'has' })}>必须已有</button><button type="button" className={node.presence === 'missing' ? 'active missing' : ''} onClick={() => updateCondition({ presence: 'missing', turnsAtLeast: '', turnsAtMost: '' })}>必须缺少</button></div>
-      <EffectPicker effects={effects} value={node.token} onValue={(token) => updateCondition({ token })} />
+      <EffectPicker required effects={effects} value={node.token} onValue={(token) => updateCondition({ token })} />
       <label className="effect-turn-field"><span>剩余 ≥</span><input type="text" inputMode="numeric" value={node.turnsAtLeast} disabled={!node.token || node.presence === 'missing'} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtLeast: event.target.value })} placeholder={node.presence === 'missing' ? '不适用' : '不限'} /></label>
       <label className="effect-turn-field"><span>剩余 ≤</span><input type="text" inputMode="numeric" value={node.turnsAtMost} disabled={!node.token || node.presence === 'missing'} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && updateCondition({ turnsAtMost: event.target.value })} placeholder={node.presence === 'missing' ? '不适用' : '不限'} /></label>
       <div className="condition-leaf-actions"><button type="button" className={node.negate ? 'condition-negate active' : 'condition-negate'} title="对本条件取反" onClick={() => updateCondition({ negate: !node.negate })}>NOT</button><button type="button" className="effect-condition-delete" aria-label={`删除效果条件 ${path}`} onClick={() => removeConditionNode(node.id)}><Trash2 size={15} /></button></div>
@@ -2175,7 +2335,7 @@ function RuleEditor({
                 <div className="ally-target-heading"><Users size={15} /><span><strong>队友目标</strong></span></div>
                 <div className={`position-targets position-targets-${teamSize}`}>{Array.from({ length: teamSize }, (_, index) => { const member = teamHeroes[index]; const position = index + 1; return <button type="button" key={position} className={target === 'allyPosition' && targetPosition === position ? 'position-target active' : 'position-target'} onClick={() => { setTarget('allyPosition'); setTargetPosition(position) }}><span className="position-number">{position}</span><HeroAvatar hero={member} size="md" /><span><strong>{member?.name ?? '未读取'}</strong></span></button> })}</div>
               </fieldset>}
-              <div className="skill-detail span-2"><SkillIcon hero={hero} skill={selectedSkill} slot={slot} /><span><strong>{selectedSkill?.name || `技能 ${slot}`}{selectedSkill?.isTransform ? ' · 形态切换技能' : ''}</strong><em>{cleanText(selectedSkill?.description) || selectedSkill?.effectSummary || '暂未读取到技能说明'}</em></span></div>
+              <div className="skill-detail span-2"><SkillIcon hero={hero} skill={selectedSkill} slot={slot} /><span><strong>{selectedSkill?.name || `技能 ${slot}`}{selectedSkill?.isTransform ? ' · 形态切换技能' : ''}</strong><em>{gameDescription(selectedSkill?.description) || selectedSkill?.effectSummary || '暂未读取到技能说明'}</em></span></div>
             </>}
             <fieldset className="condition-builder span-2">
               <legend>常用触发条件</legend>
@@ -2185,7 +2345,7 @@ function RuleEditor({
                 {bossMode === 'chimera' && <label className="field"><span>距切换形态 ≤</span><input type="text" inputMode="numeric" value={switchWithin} onFocus={selectNumericInput} onChange={(event) => /^\d*$/.test(event.target.value) && Number(event.target.value || 0) <= 5 && setSwitchWithin(event.target.value)} placeholder="不限" /></label>}
                 {bossMode === 'chimera' && <label className="field"><span>下一形态</span><select value={nextForm} onChange={(event) => setNextForm(event.target.value)}><option value="">不限</option>{ALL_FORMS.map((form) => <option key={form} value={form}>{FORM_LABEL[form]}</option>)}</select></label>}
                 <label className="field"><span>当前伤害 ≥（M）</span><input type="text" inputMode="decimal" value={damageMin} onFocus={selectNumericInput} onChange={(event) => /^\d*(?:\.\d*)?$/.test(event.target.value) && setDamageMin(event.target.value)} placeholder="例如 150" /></label>
-                {bossMode === 'chimera' && <label className="field trial-active-condition"><span>仅当试炼当前激活 <small>已完成、尚未解锁或不在对应形态时忽略此规则</small></span><select value={eligibleTrialId || ''} onChange={(event) => setEligibleTrialId(Number(event.target.value) || 0)}><option value="">不限制试炼状态</option>{eligibleTrialId > 0 && !trials.some((trial) => trial.id === eligibleTrialId) && <option value={eligibleTrialId}>已保存试炼 {eligibleTrialId}</option>}{trials.map((trial) => <option key={trial.id} value={trial.id}>{FORM_LABEL[trial.form ?? ''] ?? trial.form ?? '奇美拉'} · {TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty ?? '试炼'} · {cleanText(trial.description) || `试炼 ${trial.id}`}</option>)}</select></label>}
+                {bossMode === 'chimera' && <label className="field trial-active-condition"><span>仅当试炼当前激活 <small>已完成、尚未解锁或不在对应形态时忽略此规则</small></span><select value={eligibleTrialId || ''} onChange={(event) => setEligibleTrialId(Number(event.target.value) || 0)}><option value="">不限制试炼状态</option>{eligibleTrialId > 0 && !trials.some((trial) => trial.id === eligibleTrialId) && <option value={eligibleTrialId}>已保存试炼 {eligibleTrialId}</option>}{trials.map((trial) => <option key={trial.id} value={trial.id}>{FORM_LABEL[trial.form ?? ''] ?? trial.form ?? '奇美拉'} · {TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty ?? '试炼'} · {gameDescription(trial.description) || `试炼 ${trial.id}`}</option>)}</select></label>}
               </div>
             </fieldset>
             <fieldset className="effect-condition-builder condition-tree-builder span-2">
@@ -2213,31 +2373,70 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [selectedPid, setSelectedPid] = useState<number | undefined>()
-  const [config, setConfig] = useState<Strategy>({})
+  const [config, setConfigState] = useState<Strategy>({})
+  const [savedRevision, setSavedRevision] = useState('')
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+  const [lastSync, setLastSync] = useState(0)
+  const [connectionError, setConnectionError] = useState('')
+  const [drafts] = useState(() => {
+    try { return new DraftStore<Strategy>(window.localStorage) } catch { return new DraftStore<Strategy>() }
+  })
+  const editorRef = useRef({ key: '', mode: 'chimera' as BossMode, value: {} as Strategy })
+  const loadScope = useRef(new RequestScope())
+  const pollScope = useRef(new RequestScope())
+  const catalogRevisionRef = useRef('')
+  const pollFenceRef = useRef(0)
+  const controllerRef = useRef<ControllerState>({ running: false, status: '已停止', logs: [] })
+  const [loadingContext, setLoadingContext] = useState(false)
+  function setConfig(update: SetStateAction<Strategy>) {
+    const next = typeof update === 'function' ? update(editorRef.current.value) : update
+    editorRef.current.value = next
+    drafts.edit(editorRef.current.key, next)
+    setConfigState(next)
+  }
+  function showDraft(mode: BossMode, id: string, value: Strategy, revision: string) {
+    const key = `${mode}:${id}`
+    const entry = drafts.open(key, value, revision)
+    editorRef.current = { key, mode, value: entry.value }
+    setConfigState(entry.value)
+    setSavedRevision(entry.revision)
+  }
   const [activeStrategyId, setActiveStrategyId] = useState('default')
   const [strategyProfiles, setStrategyProfiles] = useState<StrategyProfile[]>([])
   const [profileBusy, setProfileBusy] = useState(false)
   const [profileDialog, setProfileDialog] = useState<'create' | 'rename' | null>(null)
   const [profileName, setProfileName] = useState('')
   const [live, setLive] = useState<LiveState>({})
-  const [controller, setController] = useState<ControllerState>({ running: false, status: '已停止', logs: [] })
+  const [controller, setControllerState] = useState<ControllerState>({ running: false, status: '已停止', logs: [] })
+  const setController = useCallback((update: SetStateAction<ControllerState>) => {
+    const next = typeof update === 'function' ? update(controllerRef.current) : update
+    controllerRef.current = next
+    setControllerState(next)
+  }, [])
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [showLogs, setShowLogs] = useState(false)
   const [logsExpanded, setLogsExpanded] = useState(false)
-  const compactLogRef = useRef<HTMLPreElement | null>(null)
-  const expandedLogRef = useRef<HTMLPreElement | null>(null)
+  const [ruleSearch, setRuleSearch] = useState('')
   const strategyImportRef = useRef<HTMLInputElement | null>(null)
   const [trialOpen, setTrialOpen] = useState(false)
-  const [earlyRetryOpen, setEarlyRetryOpen] = useState(false)
   const [hydraDevourRetryOpen, setHydraDevourRetryOpen] = useState(false)
+  const [hydraForecasts, setHydraForecasts] = useState<HydraForecastSummary[]>([])
+  const [chimeraSimulation, setChimeraSimulation] = useState<SimulationOverview>()
+  const [teamPreviewRevision, setTeamPreviewRevision] = useState('')
+  const [teamPreview, setTeamPreview] = useState<TeamSnapshot | null>(null)
+  const [teamDialog, setTeamDialog] = useState<'live' | 'reference' | null>(null)
+  const [simulationSummary, setSimulationSummary] = useState<SimulationSummary | null>(null)
+  const [simulationReportId, setSimulationReportId] = useState<string | null>(null)
+  const [highlightRule, setHighlightRule] = useState<number | null>(null)
   const [ruleOpen, setRuleOpen] = useState(false)
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [trialSearchDifficulty, setTrialSearchDifficulty] = useState<number>(5)
 
   useLayoutEffect(() => {
     saveLanguage(language)
-    document.title = language === 'en' ? 'Alliance Boss Strategy Studio' : '联盟 Boss 策略中心'
+    document.title = APP_NAME
     const root = document.body
     return root ? installDocumentLocalization(root, language) : undefined
   }, [language])
@@ -2258,67 +2457,103 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      if (showLogs && compactLogRef.current) {
-        compactLogRef.current.scrollTop = compactLogRef.current.scrollHeight
-      }
-      if (logsExpanded && expandedLogRef.current) {
-        expandedLogRef.current.scrollTop = expandedLogRef.current.scrollHeight
-      }
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [controller.logs.length, controller.logs[controller.logs.length - 1], showLogs, logsExpanded])
+    const warn = (event: BeforeUnloadEvent) => {
+      if (drafts.hasUnsaved()) { event.preventDefault(); event.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', warn)
+    return () => { window.removeEventListener('beforeunload', warn); loadScope.current.invalidate(); pollScope.current.invalidate() }
+  }, [drafts])
 
-  const load = useCallback(async (pid?: number, quiet = false, requestedMode?: BossMode) => {
-    if (!quiet) setLoading(true)
+  const load = useCallback(async (pid?: number, quiet = false, requestedMode?: BossMode, discardKey?: string) => {
+    loadScope.current.invalidate()
+    pollScope.current.invalidate()
+    const ticket = loadScope.current.begin(30000)
+    setLoading(true)
+    setLoadingContext(true)
+    setLive({ statusLabel: '正在刷新状态…', modeReady: false })
     setError('')
     try {
       const mode = requestedMode ?? 'chimera'
       const params = new URLSearchParams({ mode })
       if (pid) params.set('pid', String(pid))
-      const next = await api<Bootstrap>(`/api/bootstrap?${params}`)
+      const next = await api<Bootstrap>(`/api/bootstrap?${params}`, { signal: ticket.signal })
+      if (!ticket.current()) return
       setData(next)
+      catalogRevisionRef.current = next.catalogRevision ?? ''
       if (next.language === 'en' || next.language === 'zh-CN') setLanguage(next.language)
       setBossMode(next.bossMode)
-      setConfig(next.config)
+      if (discardKey === `${next.bossMode}:${next.activeStrategyId ?? 'default'}`) drafts.forget(discardKey)
+      showDraft(next.bossMode, next.activeStrategyId ?? 'default', next.config, next.revision)
       setActiveStrategyId(next.activeStrategyId ?? 'default')
       setStrategyProfiles(next.strategyProfiles ?? [])
       setController(next.controller)
       setLive(next.state ?? {})
-      const resolvedPid = pid ?? next.selectedPid ?? next.processes[0]?.pid
-      setSelectedPid(resolvedPid)
+      setSelectedPid(next.selectedPid ?? next.processes[0]?.pid)
+      setLastSync(Date.now())
+      setConnectionError('')
       const inferredDifficulty = next.state?.chimeraDifficultyId ?? configuredTrialDifficulty(next.config)
       if (inferredDifficulty) setTrialSearchDifficulty(inferredDifficulty)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason))
+      if (ticket.current()) {
+        setError(reason instanceof Error ? reason.message : String(reason))
+        setConnectionError('状态刷新失败，请重试')
+      }
     } finally {
-      setLoading(false)
+      ticket.finish()
+      if (ticket.current()) { setLoading(false); setLoadingContext(false) }
     }
-  }, [])
+    void quiet
+  }, [drafts, setController])
 
   useEffect(() => { void load() }, [load])
 
+  // The preparation-screen team is fetched only when the agent published a
+  // new one or its battle stats finished computing.
   useEffect(() => {
-    if (!selectedPid || loading) return
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await api<{ state: LiveState; controller: ControllerState; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }>(`/api/state?pid=${selectedPid}&mode=${bossMode}`)
-        setLive(next.state)
-        setController(next.controller)
-        if (next.strategyProfiles) setStrategyProfiles(next.strategyProfiles)
-        if (next.heroes || next.hydraHeads || next.effects || next.difficulties) {
-          setData((current) => current ? {
-            ...current,
-            heroes: next.heroes ?? current.heroes,
-            hydraHeads: next.hydraHeads ?? current.hydraHeads,
-            effects: next.effects ?? current.effects,
-            difficulties: next.difficulties ?? current.difficulties,
-          } : current)
-        }
-      } catch { /* the next successful poll restores the status */ }
-    }, 1200)
-    return () => window.clearInterval(timer)
-  }, [selectedPid, loading, bossMode])
+    if (!teamPreviewRevision) {
+      setTeamPreview(null)
+      return
+    }
+    let cancelled = false
+    api<{ preview: TeamSnapshot | null }>(`/api/team-preview${selectedPid ? `?pid=${selectedPid}` : ''}`)
+      .then((value) => { if (!cancelled) setTeamPreview(value.preview) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [teamPreviewRevision, selectedPid])
+
+  type StateResponse = { _fence?: number; state: LiveState; controller: ControllerState; hydraForecasts?: HydraForecastSummary[]; chimeraSimulation?: SimulationOverview; teamPreview?: TeamPreviewSummaryState | null; storageHealth?: StorageHealth; catalogRevision?: string; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }
+  const pollRequest = useCallback((signal: AbortSignal) => {
+    const params = new URLSearchParams({ mode: bossMode, catalogRevision: catalogRevisionRef.current })
+    if (selectedPid) params.set('pid', String(selectedPid))
+    if (controllerRef.current.logCursor) params.set('logCursor', controllerRef.current.logCursor)
+    const fence = pollFenceRef.current
+    return api<StateResponse>(`/api/state?${params}`, { signal }).then(next => ({ ...next, _fence: fence }))
+  }, [bossMode, selectedPid])
+  const receivePoll = useCallback((next: StateResponse) => {
+    if (next._fence !== pollFenceRef.current) return
+    setLive(next.state)
+    setController(current => mergeLogDelta(current, next.controller))
+    if (next.hydraForecasts) setHydraForecasts(next.hydraForecasts)
+    if (next.chimeraSimulation) setChimeraSimulation(next.chimeraSimulation)
+    setTeamPreviewRevision(next.teamPreview?.revision ?? '')
+    if (next.strategyProfiles) setStrategyProfiles(next.strategyProfiles)
+    catalogRevisionRef.current = next.catalogRevision ?? catalogRevisionRef.current
+    setData(current => current ? {
+      ...current,
+      storageHealth: next.storageHealth ?? current.storageHealth,
+      heroes: next.heroes ?? current.heroes,
+      hydraHeads: next.hydraHeads ?? current.hydraHeads,
+      effects: next.effects ?? current.effects,
+      difficulties: next.difficulties ?? current.difficulties,
+    } : current)
+    setLastSync(Date.now())
+    setConnectionError(next.state.error ?? '')
+  }, [setController])
+  const pollFailed = useCallback((reason: unknown) => {
+    setConnectionError(reason instanceof Error ? reason.message : String(reason))
+    setLive(current => ({ ...current, modeReady: false, agentReady: false }))
+  }, [])
+  useSerialPoll(Boolean(data) && !loading, `${bossMode}:${selectedPid}`, pollScope.current, pollRequest, receivePoll, pollFailed)
 
   useEffect(() => {
     const difficultyId = live.chimeraDifficultyId
@@ -2335,7 +2570,6 @@ function App() {
   const difficulty = data?.difficulties.find((item) => item.difficultyId === trialSearchDifficulty)
   const trials = difficulty?.trials ?? []
   const selectedTrials = objectives.mandatoryTrialIds ?? []
-  const earlyRetryConditions = objectives.earlyRetryConditions ?? EMPTY_EARLY_RETRY_CONDITIONS
   const hydraDevourRetryConditions = objectives.devourOrderRetryConditions ?? EMPTY_HYDRA_DEVOUR_RETRY_CONDITIONS
   const selectedProcess = data?.processes.find((process) => process.pid === selectedPid)
   const team = (live.teamHeroIds?.length ? live.teamHeroIds : config.team?.heroTypeIds ?? config.team?.heroIds) ?? []
@@ -2354,6 +2588,18 @@ function App() {
     (data?.difficulties ?? []).flatMap((item) => item.trials).map((trial) => [trial.id, trial]),
   ), [data?.difficulties])
 
+  // Simulation usage per rule, only for the strategy that was simulated.
+  const ruleUsage = useMemo(() => (
+    simulationSummary && (!simulationSummary.strategy.id || simulationSummary.strategy.id === activeStrategyId)
+      ? ruleUsageByIndex(simulationSummary) : new Map<number, never>()
+  ), [simulationSummary, activeStrategyId])
+  const onSimulationSummary = useCallback((value: SimulationSummary | null) => setSimulationSummary(value), [])
+  const jumpToRule = useCallback((index: number) => {
+    setHighlightRule(index)
+    window.setTimeout(() => document.getElementById(`rule-row-${index}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 150)
+    window.setTimeout(() => setHighlightRule((current) => (current === index ? null : current)), 2800)
+  }, [])
+
   const completedTrials = useMemo(() => {
     const ids = new Set<number>(live.completedTrialIds ?? [])
     for (const trial of live.trials ?? []) if (trial.completed) ids.add(trial.id)
@@ -2361,11 +2607,11 @@ function App() {
   }, [live.completedTrialIds, live.trials, trialCatalogById])
 
   const selectedTrialDescriptions = useMemo(
-    () => trials.filter((trial) => selectedTrials.includes(trial.id)).map((trial) => cleanText(trial.description)),
+    () => trials.filter((trial) => selectedTrials.includes(trial.id)).map((trial) => gameDescription(trial.description)),
     [trials, selectedTrials],
   )
 
-  function updateObjective(key: string, value: number | number[] | EarlyRetryCondition[] | HydraDevourRetryCondition[]) {
+  function updateObjective(key: string, value: boolean | number | number[] | HydraDevourRetryCondition[]) {
     setConfig((current) => ({
       ...current,
       objectives: { ...(current.objectives ?? {}), [key]: value },
@@ -2389,13 +2635,12 @@ function App() {
       objectives: {
         ...(current.objectives ?? {}),
         mandatoryTrialIds: [],
-        earlyRetryConditions: [],
       },
     }))
   }
 
   function applyStrategyBundle(result: StrategyBundle) {
-    setConfig(result.config)
+    showDraft(editorRef.current.mode, result.activeStrategyId, result.config, result.revision)
     setActiveStrategyId(result.activeStrategyId)
     setStrategyProfiles(result.strategyProfiles)
     const inferredDifficulty = configuredTrialDifficulty(result.config)
@@ -2424,24 +2669,35 @@ function App() {
   }
 
   async function save(showMessage = true, capturePreparedTeam = true) {
+    if (savingRef.current || loadingContext || data?.storageHealth?.ok === false) return false
+    savingRef.current = true
+    setSaving(true)
     setError('')
+    const context = { ...editorRef.current }
+    const entry = drafts.get(context.key)
+    const generation = entry?.generation ?? 0
     try {
       const result = await api<StrategyBundle>('/api/config', {
         method: 'POST',
-        body: JSON.stringify({
-          bossMode,
-          strategyId: activeStrategyId,
-          config: configForSave(capturePreparedTeam),
-          capturePreparedTeam,
-          pid: selectedPid,
-        }),
+        body: JSON.stringify({ bossMode: context.mode, strategyId: activeStrategyId,
+          config: configForSave(capturePreparedTeam), capturePreparedTeam, pid: selectedPid,
+          expectedRevision: entry?.revision || undefined }),
       })
-      applyStrategyBundle(result)
-      if (showMessage) setNotice(result.message ?? '策略组已保存')
+      const updated = drafts.saved(context.key, generation, result.config, result.revision)
+      if (editorRef.current.key === context.key && updated) {
+        editorRef.current.value = updated.value
+        setConfigState(updated.value)
+        setSavedRevision(updated.revision)
+        setStrategyProfiles(result.strategyProfiles)
+        if (showMessage) setNotice(result.message ?? '策略组已保存')
+      }
       return true
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
       return false
+    } finally {
+      savingRef.current = false
+      setSaving(false)
     }
   }
 
@@ -2485,7 +2741,7 @@ function App() {
   }
 
   async function selectStrategyProfile(strategyId: string) {
-    if (strategyId === activeStrategyId || profileBusy || controller.running) return
+    if (strategyId === activeStrategyId || profileBusy || loading || controller.running) return
     setProfileBusy(true)
     setError('')
     try {
@@ -2517,6 +2773,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ action: 'delete', bossMode, strategyId: activeStrategyId }),
       })
+      drafts.forget(editorRef.current.key)
       applyStrategyBundle(result)
       setNotice(result.message ?? '策略组已删除')
     } catch (reason) {
@@ -2546,7 +2803,9 @@ function App() {
       link.click()
       link.remove()
       URL.revokeObjectURL(url)
-      setNotice('策略已导出')
+      setNotice(result.document.teamSnapshot
+        ? '策略已导出（含队伍配置：英雄属性与装备）'
+        : '策略已导出（未含队伍配置：请先在游戏准备界面选好这支队伍）')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -2566,6 +2825,12 @@ function App() {
     setError('')
     try {
       const document = JSON.parse(await file.text()) as unknown
+      if (data?.storageHealth?.ok === false) {
+        await api('/api/config/recover', { method: 'POST', body: JSON.stringify({ bossMode, document }) })
+        await load(selectedPid, false, bossMode)
+        setNotice('已恢复策略；原文件已保留')
+        return
+      }
       const result = await api<StrategyBundle>('/api/strategy/profile', {
         method: 'POST',
         body: JSON.stringify({ action: 'import', bossMode, document }),
@@ -2580,14 +2845,17 @@ function App() {
   }
 
   async function start() {
+    if (profileBusy || saving || loading || data?.storageHealth?.ok === false) return
     if (!selectedPid) return setError('请选择一个已识别的游戏内账户')
     // Starting must preserve this profile's saved team so the controller can
     // select it even when another team is currently shown in the game.
     if (!(await save(false, false))) return
+    pollFenceRef.current++
     setError('')
-    setController((current) => ({ ...current, status: '正在准备代理…' }))
+    setController((current) => ({ ...current, running: true, status: '正在准备代理…' }))
     try {
       const next = await api<{ controller: ControllerState }>('/api/start', { method: 'POST', body: JSON.stringify({ pid: selectedPid, bossMode }) })
+      pollFenceRef.current++
       setController(next.controller)
       setNotice('策略接管已启动')
     } catch (reason) {
@@ -2596,8 +2864,10 @@ function App() {
   }
 
   async function stop() {
+    pollFenceRef.current++
     try {
       const next = await api<{ controller: ControllerState }>('/api/stop', { method: 'POST', body: JSON.stringify({ pid: selectedPid, bossMode }) })
+      pollFenceRef.current++
       setController(next.controller)
       setNotice('已请求暂停接管')
     } catch (reason) {
@@ -2606,13 +2876,24 @@ function App() {
   }
 
   async function clearLogs() {
+    pollFenceRef.current++
     try {
       const next = await api<{ controller: ControllerState }>('/api/logs/clear', { method: 'POST', body: JSON.stringify({ bossMode }) })
+      pollFenceRef.current++
       setController(next.controller)
       setNotice(`已清空${activeModeSpec?.label ?? '当前模式'}运行记录`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
+  }
+
+  async function recoverConfig() {
+    setError('')
+    try {
+      await api('/api/config/recover', { method: 'POST', body: '{}' })
+      await load(selectedPid, false, bossMode)
+      setNotice('已恢复最近的有效备份；原文件已保留')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
 
   async function refreshAccounts() {
@@ -2621,11 +2902,17 @@ function App() {
     setRefreshing(false)
   }
 
+  async function discardDraft() {
+    if (!window.confirm(language === 'en'
+      ? 'Discard unsaved changes in this strategy group and load the saved version?'
+      : '放弃当前策略组的未保存修改，并载入已保存版本？')) return
+    await load(selectedPid, false, bossMode, editorRef.current.key)
+  }
+
   async function switchBossMode(nextMode: BossMode) {
-    if (nextMode === bossMode || controller.running) return
+    if (nextMode === bossMode || controller.running || profileBusy || saving || loadingContext) return
     setNotice('')
     setError('')
-    setBossMode(nextMode)
     await load(selectedPid, false, nextMode)
   }
 
@@ -2650,23 +2937,24 @@ function App() {
   }
 
   if (loading && !data) {
-    return <main className="loading-screen"><div className="language-switcher loading-language-switcher" data-i18n-skip role="group" aria-label="Language / 语言"><Languages size={18} /><span>Language</span><button type="button" className={language === 'en' ? 'active' : ''} onClick={() => changeLanguage('en')}>English</button><button type="button" className={language === 'zh-CN' ? 'active' : ''} onClick={() => changeLanguage('zh-CN')}>中文</button></div><span className="brand-mark"><Swords /></span><h1>正在建立联盟 Boss 资源缓存</h1><p>读取游戏内账户、英雄、技能与模式资料…</p><span className="loader" /></main>
+    return <main className="loading-screen"><div className="language-switcher loading-language-switcher" data-i18n-skip role="group" aria-label="Language / 语言"><Languages size={18} /><span>Language</span><button type="button" className={language === 'en' ? 'active' : ''} onClick={() => changeLanguage('en')}>English</button><button type="button" className={language === 'zh-CN' ? 'active' : ''} onClick={() => changeLanguage('zh-CN')}>中文</button></div><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><h1>正在建立联盟 Boss 资源缓存</h1><p>读取游戏内账户、英雄、技能与模式资料…</p><span className="loader" /></main>
   }
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand"><span className="brand-mark"><Swords size={23} /></span><span><strong>联盟 Boss 策略中心</strong><small>Raid Boss Strategy Studio</small></span></div>
+        <div className="brand" data-i18n-skip><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><span><strong>{APP_NAME}</strong><small>{__APP_VERSION__}</small></span></div>
         <div className="account-picker">
           <span className={`status-dot ${selectedProcess?.accountName ? 'online' : ''}`} />
-          <select value={selectedPid ?? ''} onChange={(event) => { const pid = Number(event.target.value); setSelectedPid(pid); void load(pid, true, bossMode) }} disabled={controller.running}>
+          <select value={selectedPid ?? ''} onChange={(event) => { const pid = Number(event.target.value); void load(pid, true, bossMode) }} disabled={controller.running || loadingContext || profileBusy || saving}>
             {!data?.processes.length && <option value="">没有找到 Raid 账户</option>}
             {data?.processes.map((process) => <option key={process.pid} value={process.pid}>{process.label}</option>)}
           </select>
           <button className="icon-button" onClick={() => void refreshAccounts()} disabled={refreshing || controller.running} title="刷新账户"><RefreshCw size={18} className={refreshing ? 'spin' : ''} /></button>
         </div>
         <div className="topbar-actions">
-          <div className="live-badge"><Activity size={16} /><span>{live.statusLabel || controller.status || '等待状态'}</span></div>
+          {controller.running && <button className="button pause" onClick={() => void stop()}><CirclePause size={17} />暂停接管</button>}
+          <div className={`live-badge${connectionError ? ' offline' : ''}`} title={connectionError || undefined}><Activity size={16} /><span>{connectionError ? '连接中断 · 显示的是上次状态' : live.statusLabel || controller.status || '等待状态'}</span></div>
           <div className="language-switcher" data-i18n-skip role="group" aria-label="Language / 语言">
             <Languages size={18} />
             <span>Language</span>
@@ -2678,7 +2966,7 @@ function App() {
 
       <nav className="mode-switcher" aria-label="联盟 Boss 模式">
         {(data?.modes ?? []).map((mode) => (
-          <button key={mode.id} type="button" className={bossMode === mode.id ? 'active' : ''} disabled={controller.running} onClick={() => void switchBossMode(mode.id)}>
+          <button key={mode.id} type="button" className={bossMode === mode.id ? 'active' : ''} disabled={controller.running || loadingContext || profileBusy || saving} onClick={() => void switchBossMode(mode.id)}>
             <span className="mode-icon">{mode.id === 'chimera' ? <Swords size={21} /> : <Waves size={21} />}</span>
             <span><strong>{mode.label}</strong></span>
             {mode.id === 'hydra' && mode.status !== 'ready' && !(bossMode === 'hydra' && live.modeReady) && <em>待实战标定</em>}
@@ -2691,7 +2979,8 @@ function App() {
 
       <main className="workspace">
         <aside className="control-column">
-          <section className="card team-card">
+          <CollapsiblePanel key={`${bossMode}:team`} id={`${bossMode}:team`} title="当前队伍" hint={`${team.filter((id) => id > 0).length}/${teamSize}`}>
+<section className="card team-card">
             <div className="section-heading"><span><Users size={18} />当前队伍</span><em>{team.filter((typeId) => typeId > 0).length}/{teamSize}</em></div>
             <div className={`team-row team-${teamSize}`}>
               {Array.from({ length: teamSize }, (_, index) => {
@@ -2699,9 +2988,13 @@ function App() {
                 return <div className="team-member" key={index}><HeroAvatar hero={hero} size="lg" /><small>{hero?.name ?? '待读取'}</small></div>
               })}
             </div>
+            <TeamPreviewSummary language={language} preview={teamPreview?.bossMode === bossMode ? teamPreview : null}
+              reference={config.referenceTeam} onOpenPreview={() => setTeamDialog('live')} onOpenReference={() => setTeamDialog('reference')} />
           </section>
+          </CollapsiblePanel>
 
-          <section className="card objectives-card">
+          <CollapsiblePanel key={`${bossMode}:objectives`} id={`${bossMode}:objectives`} title="战斗目标" >
+<section className="card objectives-card">
             <div className="section-heading"><span><Crosshair size={18} />战斗目标</span><em>自动追踪</em></div>
             <div className="two-fields">
               {bossMode === 'chimera' && <label className="field"><span>Boss 难度</span><select value={trialSearchDifficulty} onChange={(event) => changeTrialDifficulty(Number(event.target.value))}>{data?.difficulties.map((item) => <option key={item.difficultyId} value={item.difficultyId}>{BOSS_DIFFICULTY[item.difficulty] ?? item.difficulty}</option>)}</select></label>}
@@ -2713,37 +3006,40 @@ function App() {
               <span><small>必做试炼</small><strong>{selectedTrials.length ? `已选择 ${selectedTrials.length} 项` : '点击选择试炼'}</strong><em>{selectedTrialDescriptions[0] || '按当前难度读取完整试炼内容'}</em></span>
               <ChevronDown size={18} />
             </button>}
-            {bossMode === 'chimera' && <button className={`trial-trigger early-retry-trigger ${earlyRetryConditions.length ? 'has-selection' : ''}`} disabled={!trials.length} onClick={() => setEarlyRetryOpen(true)}>
-              <span className="trial-trigger-icon"><RefreshCw size={20} /></span>
-              <span><small>提前重整条件</small><strong>{earlyRetryConditions.length ? `已设置 ${earlyRetryConditions.length} 条` : '按回合与试炼设置'}</strong><em>{trials.length ? '可从当前难度全部试炼中选择' : '等待本轮试炼数据'}</em></span>
-              <ChevronDown size={18} />
+            {bossMode === 'chimera' && <button type="button" className={`devour-forecast-toggle ${objectives.battleForecast !== false ? 'selected' : ''}`} aria-pressed={objectives.battleForecast !== false} onClick={() => updateObjective('battleForecast', objectives.battleForecast === false)}>
+              <span className="check-box">{objectives.battleForecast !== false && <Check size={14} />}</span>
+              <span><strong>开局模拟整场战斗</strong><small>从开局接管时，在后台用离线原版引擎按当前规则模拟本场；与已进行的实战回合逐项核对一致后，若预计必要试炼或最低伤害无法完成，或规则会让英雄无技能可用而卡住，立即免费重整。</small></span>
             </button>}
             {bossMode === 'hydra' && <button className={`trial-trigger early-retry-trigger ${hydraDevourRetryConditions.length ? 'has-selection' : ''}`} disabled={!team.some((value) => value > 0)} onClick={() => setHydraDevourRetryOpen(true)}>
               <span className="trial-trigger-icon"><RefreshCw size={20} /></span>
-              <span><small>吞噬顺序重整</small><strong>{hydraDevourRetryConditions.length ? `已设置 ${hydraDevourRetryConditions.length} 条` : '按标记顺序与英雄设置'}</strong><em>首个目标开局读取，后续目标出现时判定</em></span>
+              <span><small>吞噬顺序重整</small><strong>{hydraDevourRetryConditions.length ? `已设置 ${hydraDevourRetryConditions.length} 条` : '按标记顺序与英雄设置'}</strong><em>{objectives.devourOrderForecast ? '开局离线推演并在标记出现时复核' : '首个目标开局读取，后续目标出现时判定'}</em></span>
               <ChevronDown size={18} />
             </button>}
             {bossMode === 'hydra' && !live.modeReady && <p className="mode-calibration"><Waves size={16} /><span><strong>等待首次实战标定</strong>进入六头蛇准备界面或手动战斗后，工具会读取区域、四个蛇头和六人队伍；读取成功前不会执行任何操作。</span></p>}
           </section>
+          </CollapsiblePanel>
 
-          <section className="run-card">
+          <CollapsiblePanel key={`${bossMode}:run`} id={`${bossMode}:run`} title="接管控制" hint={toolText(controller.status)}>
+<section className="run-card">
             <div className="run-status"><span className={controller.running ? 'pulse' : ''}><Bot size={19} /></span><span><small>接管状态</small><strong>{controller.status}</strong></span></div>
             <div className="run-actions">
               <button className="button pause" disabled={!controller.running} onClick={() => void stop()}><CirclePause size={19} />暂停</button>
-              <button className="button start" disabled={controller.running || !selectedProcess?.accountName || (bossMode === 'hydra' && !live.modeReady)} onClick={() => void start()}><CirclePlay size={19} />开始执行</button>
+              <button className="button start" disabled={saving || loadingContext || data?.storageHealth?.ok === false || Boolean(connectionError) || controller.running || !selectedProcess?.accountName || (bossMode === 'hydra' && !live.modeReady)} onClick={() => void start()}><CirclePlay size={19} />开始执行</button>
             </div>
           </section>
+          </CollapsiblePanel>
         </aside>
 
         <section className="strategy-column">
-          <section className="card strategy-profile-card">
+          <CollapsiblePanel key={`${bossMode}:profiles`} id={`${bossMode}:profiles`} title="策略组" hint={selectedStrategyName}>
+<section className="card strategy-profile-card">
             <div className="strategy-profile-identity">
               <span className="strategy-profile-icon"><Layers3 size={21} /></span>
               <span><small>当前策略组</small><strong data-i18n-skip>{selectedStrategyName}</strong></span>
             </div>
             <label className="strategy-profile-select">
               <span>切换策略组</span>
-              <select data-i18n-skip value={activeStrategyId} disabled={controller.running || profileBusy} onChange={(event) => void selectStrategyProfile(event.target.value)}>
+              <select data-i18n-skip value={activeStrategyId} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onChange={(event) => void selectStrategyProfile(event.target.value)}>
                 {strategyProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name === '默认策略' ? (language === 'en' ? 'Default Strategy' : '默认策略') : profile.name} · {profile.ruleCount} {language === 'en' ? 'rules' : '条规则'}</option>)}
               </select>
             </label>
@@ -2752,22 +3048,26 @@ function App() {
               <div>{savedStrategyTeam.slice(0, teamSize).map((typeId, index) => <HeroAvatar key={`${typeId}-${index}`} hero={heroByRuntimeId(heroes, typeId)} size="sm" />)}</div>
             </div>
             <div className="strategy-profile-actions">
-              <button className="button ghost profile-copy-button" title="创建副本" disabled={controller.running || profileBusy} onClick={() => openProfileNameDialog('create')}><Copy size={16} /><span>创建副本</span></button>
+              <button className="button ghost profile-copy-button" title="创建副本" disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => openProfileNameDialog('create')}><Copy size={16} /><span>创建副本</span></button>
               <input ref={strategyImportRef} className="sr-only" type="file" accept=".json,.raid-strategy.json,application/json" onChange={(event) => void importStrategyFile(event)} />
-              <button className="icon-button" title="导入策略" aria-label="导入策略" disabled={controller.running || profileBusy} onClick={() => strategyImportRef.current?.click()}><Upload size={16} /></button>
-              <button className="icon-button" title="导出策略" aria-label="导出策略" disabled={controller.running || profileBusy} onClick={() => void exportStrategyProfile()}><Download size={16} /></button>
-              <button className="icon-button" title="重命名策略组" disabled={controller.running || profileBusy} onClick={() => openProfileNameDialog('rename')}><Edit3 size={16} /></button>
-              <button className="icon-button danger" title="删除策略组" disabled={controller.running || profileBusy || strategyProfiles.length <= 1} onClick={() => void deleteStrategyProfile()}><Trash2 size={16} /></button>
+              <button className="icon-button" title="导入策略" aria-label="导入策略" disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => strategyImportRef.current?.click()}><Upload size={16} /></button>
+              <button className="icon-button" title="导出策略" aria-label="导出策略" disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => void exportStrategyProfile()}><Download size={16} /></button>
+              <button className="icon-button" title="重命名策略组" disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => openProfileNameDialog('rename')}><Edit3 size={16} /></button>
+              <button className="icon-button danger" title="删除策略组" disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy || strategyProfiles.length <= 1} onClick={() => void deleteStrategyProfile()}><Trash2 size={16} /></button>
             </div>
           </section>
+          </CollapsiblePanel>
 
+          <CollapsiblePanel key={`${bossMode}:overview`} id={`${bossMode}:overview`} title="战斗概览" hint={formatNumber(live.damage)}>
           <div className="overview-grid">
             <Metric label="当前伤害" value={formatNumber(live.damage)} icon={<Swords size={18} />} />
             <Metric label="Boss 回合" value={String(bossMode === 'chimera' ? live.chimeraTurn ?? 0 : live.hydraTurn ?? 0)} icon={<Activity size={18} />} />
             <Metric label={bossMode === 'chimera' ? '已完成试炼' : '当前目标'} value={bossMode === 'chimera' ? `${completedTrials.length}` : `${live.headCount ?? 0} 个蛇头`} icon={<Check size={20} />} />
           </div>
+          </CollapsiblePanel>
 
-          {bossMode === 'chimera' ? <section className="card completed-trials-card">
+          {bossMode === 'chimera' ? <CollapsiblePanel key={`${bossMode}:trials`} id={`${bossMode}:trials`} title="已完成试炼" hint={completedTrials.length}>
+<section className="card completed-trials-card">
             <div className="completed-trials-heading">
               <span><BookOpenCheck size={20} /><strong>本次已完成试炼与奖励</strong></span>
               <em>{completedTrials.length ? `已完成 ${completedTrials.length} 项` : '等待战斗进度'}</em>
@@ -2779,14 +3079,16 @@ function App() {
                     <span className="completed-check"><Check size={17} /></span>
                     <span className="completed-trial-copy">
                       <span className="trial-tags"><em>{FORM_LABEL[trial.form ?? ''] ?? trial.form ?? '奇美拉'}</em><em>{TRIAL_LEVEL[trial.difficulty ?? ''] ?? trial.difficulty ?? '试炼'}</em></span>
-                      <strong>{cleanText(trial.description) || '已完成试炼'}</strong>
+                      <strong>{gameDescription(trial.description) || '已完成试炼'}</strong>
                     </span>
                     <TrialRewards reward={trial.reward} compact />
                   </article>
                 ))}
               </div>
             ) : <div className="completed-trials-empty"><Check size={17} /><span>尚未完成试炼</span></div>}
-          </section> : <section className="card completed-trials-card hydra-summary">
+          </section>
+          </CollapsiblePanel> : <CollapsiblePanel key={`${bossMode}:heads`} id={`${bossMode}:heads`} title="六头蛇状态" >
+<section className="card completed-trials-card hydra-summary">
             <div className="completed-trials-heading"><span><Waves size={20} /><strong>六头蛇战斗重点</strong></span><em>{live.modeReady ? '状态已连接' : '等待六头蛇状态'}</em></div>
             {(live.heads?.length ?? 0) > 0 ? <div className="live-hydra-heads">{live.heads?.map((liveHead, index) => {
               const identity = liveHead.canonicalTypeId ?? liveHead.typeId
@@ -2795,27 +3097,65 @@ function App() {
               const stateLabel = head.dead ? '已死亡' : head.isHydraNeck || head.headState === 'exposed_neck' ? '暴露蛇颈' : head.isDevouring ? '正在吞噬' : '可作为目标'
               return <article className={`live-hydra-head${head.dead ? ' dead' : ''}`} key={`${head.id ?? head.typeId}-${index}`}><HydraHeadIcon head={head} size="lg" /><span><strong>{hydraHeadDisplayName(head)}</strong><small>{stateLabel}</small></span></article>
             })}</div> : <div className="hydra-head-catalog">{hydraHeads.map((head) => <span key={head.typeId}><HydraHeadIcon head={head} size="md" /><small>{hydraHeadDisplayName(head)}</small></span>)}</div>}
-          </section>}
+          </section>
+          </CollapsiblePanel>}
 
-          <section className="card rules-card">
+          {data?.storageHealth?.ok === false && <CollapsiblePanel key={`${bossMode}:recovery`} id={`${bossMode}:recovery`} title="策略恢复" >
+<section className="card recovery-card" role="alert">
+            <strong>策略文件需要恢复</strong><p>{data.storageHealth.error}</p>
+            <button className="button primary" disabled={controller.running || !data.storageHealth.backups.length} onClick={() => void recoverConfig()}>恢复最近的有效备份</button>
+            <button className="button ghost" disabled={controller.running || profileBusy} onClick={() => strategyImportRef.current?.click()}>从导出文件恢复当前模式</button>
+            {!data.storageHealth.backups.length && <p>没有有效备份，请保留原文件并从导出的策略恢复。</p>}
+          </section>
+          </CollapsiblePanel>}
+          {bossMode === 'hydra' && (objectives.devourOrderForecast === true || controller.telemetry?.devourForecast || hydraForecasts.length > 0) && <HydraForecastPanel forecast={controller.telemetry?.devourForecast} history={hydraForecasts} observed={controller.telemetry?.devour?.sequence} heroes={heroes} />}
+          {bossMode === 'chimera' && <BattleForecastPanel language={language} enabled={objectives.battleForecast !== false} forecast={controller.telemetry?.battleForecast}
+            history={chimeraSimulation?.battleForecasts ?? []} heroes={heroes} onOpenReport={setSimulationReportId} />}
+          {bossMode === 'chimera' && <ChimeraSimulationPanel language={language} overview={chimeraSimulation} heroes={heroes} trialById={trialCatalogById} request={api}
+            draft={config} strategyId={activeStrategyId} strategyName={selectedStrategyName} strategyTeam={savedStrategyTeam}
+            pid={selectedPid} onOpenReport={setSimulationReportId} onSummary={onSimulationSummary} />}
+          <CollapsiblePanel key={`${bossMode}:decision`} id={`${bossMode}:decision`} title="规则命中解释"
+            hint={controller.telemetry?.decision ? controller.telemetry.decision.hero : toolText('暂无记录')}>
+          <section className="card decision-panel">
+            {controller.telemetry?.decision ? <>
+              <p data-i18n-skip>{controller.telemetry.decision.hero} · {controller.telemetry.decision.rule ?? (language === 'en' ? 'Waiting for an available rule' : '等待可执行规则')}</p>
+              <p><span>技能与目标</span>：<span data-i18n-skip>{controller.telemetry.decision.skill ?? '—'} → {controller.telemetry.decision.target ?? '—'}</span></p>
+              <p>合法目标 ID：<span data-i18n-skip>{controller.telemetry.decision.legalTargetIds?.join(', ') || '—'}</span></p>
+              {controller.telemetry.command && <p>动作回执：<span data-i18n-skip>{controller.telemetry.command.status} {controller.telemetry.command.reason}</span></p>}
+              <p className="muted">首回合设置优先；随后按严格规则、试炼规则、默认技能规则依次评估，命中后停止。</p>
+              <DecisionRows rows={controller.telemetry.decision.rules} />
+            </> : <p>执行策略后显示最近一次决策的依据。</p>}
+          </section>
+          </CollapsiblePanel>
+
+
+          <CollapsiblePanel key={`${bossMode}:rules`} id={`${bossMode}:rules`} title="行动规则" rules hint={rules.length}>
+<section className="card rules-card">
             <div className="rules-header">
               <div><span className="eyebrow"><Sparkles size={14} />策略树</span><h2>行动规则</h2></div>
-              <div className="toolbar"><button className="button ghost" onClick={() => void save()}><Save size={17} />保存</button><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />添加规则</button></div>
+              <div className="toolbar">{drafts.dirty(editorRef.current.key) && <><span className="draft-dirty">未保存</span><button className="button ghost" disabled={saving || profileBusy || loadingContext || data?.storageHealth?.ok === false} onClick={() => void discardDraft()}>载入已保存版本</button></>}<button className="button ghost" disabled={saving || loadingContext || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={17} />保存</button><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />添加规则</button></div>
             </div>
+            <label className="rule-search"><Search size={16} /><input value={ruleSearch} onChange={(event) => setRuleSearch(event.target.value)} placeholder={language === 'en' ? 'Find hero, skill or rule…' : '查找英雄、技能或规则…'} aria-label="查找行动规则" />{ruleSearch && <button type="button" className="icon-button" onClick={() => setRuleSearch('')} aria-label="清除搜索"><X size={15} /></button>}</label>
             <div className="rules-list">
               {!rules.length && <div className="empty-state"><Database size={34} /><strong>还没有策略规则</strong><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />添加规则</button></div>}
               {rules.map((rule, index) => {
                 const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
+                if (ruleSearch.trim() && ![rule.name, hero?.name, actionLabel(rule, heroes), conditionLabel(rule, effects, heroes, trials)].join(" ").toLocaleLowerCase().includes(ruleSearch.trim().toLocaleLowerCase())) return null
                 const action = rule.action ?? {}
                 const firstPriority = Array.isArray(action.prioritySkills) && action.prioritySkills[0] && typeof action.prioritySkills[0] === 'object' ? action.prioritySkills[0] as JsonObject : undefined
                 const slot = typeof action.skillSlot === 'number' ? action.skillSlot : typeof firstPriority?.skillSlot === 'number' ? firstPriority.skillSlot : undefined
                 const skillTypeId = typeof action.skillTypeId === 'number' ? action.skillTypeId : typeof firstPriority?.skillTypeId === 'number' ? firstPriority.skillTypeId : undefined
                 const skill = hero?.skills.find((item) => skillTypeId ? item.typeId === skillTypeId : item.slot === slot)
+                const usage = ruleUsage.get(index + 1)
+                const usageMatches = usage !== undefined && usage.rule === (rule.name || `规则 ${index + 1}`)
                 return (
-                  <article className="rule-row" key={`${index}-${rule.name ?? ''}`}>
+                  <article className={`rule-row${highlightRule === index + 1 ? ' highlight' : ''}`} id={`rule-row-${index + 1}`} key={`${index}-${rule.name ?? ''}`}>
                     <span className="priority">{String(index + 1).padStart(2, '0')}</span>
                     <HeroAvatar hero={hero} />
-                    <div className="rule-primary"><strong>{rule.name || `规则 ${index + 1}`}</strong><span>{hero?.name ?? (action.type === 'executeTrialRecipe' ? '任意行动英雄' : '未指定英雄')}</span></div>
+                    <div className="rule-primary"><strong>{rule.name || `规则 ${index + 1}`}</strong><span>{hero?.name ?? (action.type === 'executeTrialRecipe' ? '任意行动英雄' : '未指定英雄')}</span>
+                      {bossMode === 'chimera' && usageMatches && <em className={`sim-usage${usage.uses > 0 ? '' : ' unused'}`} title={language === 'en' ? 'From the latest strategy simulation' : '来自最近一次策略模拟'} data-i18n-skip>{usage.uses > 0
+                        ? (language === 'en' ? `Simulated ${usage.usesPerRun}/run` : `模拟 ${usage.usesPerRun} 次/场`)
+                        : (language === 'en' ? 'Unused in simulation' : '模拟中未使用')}</em>}</div>
                     <div className="form-pills">{bossMode === 'chimera' ? ruleForms(rule).slice(0, 4).map((form) => <span key={form}>{FORM_LABEL[form] ?? form}</span>) : <span>六头蛇全程</span>}</div>
                     <div className="rule-action"><SkillIcon hero={hero} skill={skill} slot={slot} /><span><small>行动</small><strong>{actionLabel(rule, heroes)}</strong></span></div>
                     <div className="rule-target"><Crosshair size={16} /><span><small>目标</small><strong>{targetLabel(rule, heroes, hydraHeads)}</strong></span></div>
@@ -2831,13 +3171,14 @@ function App() {
               })}
             </div>
           </section>
+          </CollapsiblePanel>
 
           <section className={`log-drawer ${showLogs ? 'open' : ''}`}>
             <div className="log-handle">
               <button className="log-toggle" onClick={() => setShowLogs((value) => !value)}><span><Activity size={16} />{activeModeSpec?.label ?? '当前模式'}运行记录 <em>{controller.logs.length}</em></span><ChevronDown size={17} /></button>
               <button className="log-maximize" title="放大运行记录" aria-label="放大运行记录" onClick={() => setLogsExpanded(true)}><Maximize2 size={16} /></button>
             </div>
-            {showLogs && <pre ref={compactLogRef} tabIndex={0}>{controller.logs.length ? controller.logs.slice(-200).join('\n') : '尚无运行记录'}</pre>}
+            {showLogs && <LogView key={bossMode} logs={controller.logs.slice(-200)} />}
           </section>
         </section>
       </main>
@@ -2857,9 +3198,20 @@ function App() {
       </Dialog.Root>
 
       {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={applyRequiredTrials} />}
-      {bossMode === 'chimera' && <EarlyRetryPicker open={earlyRetryOpen} onOpenChange={setEarlyRetryOpen} trials={trials} conditions={earlyRetryConditions} onApply={(conditions) => updateObjective('earlyRetryConditions', conditions)} />}
-      {bossMode === 'hydra' && <HydraDevourRetryPicker open={hydraDevourRetryOpen} onOpenChange={setHydraDevourRetryOpen} heroes={heroes} team={team} conditions={hydraDevourRetryConditions} onApply={(conditions) => updateObjective('devourOrderRetryConditions', conditions)} />}
+      {bossMode === 'hydra' && <HydraDevourRetryPicker open={hydraDevourRetryOpen} onOpenChange={setHydraDevourRetryOpen} heroes={heroes} team={team} conditions={hydraDevourRetryConditions} forecast={objectives.devourOrderForecast === true} onApply={(conditions, forecast) => setConfig((current) => ({ ...current, objectives: { ...(current.objectives ?? {}), devourOrderRetryConditions: conditions, devourOrderForecast: forecast } }))} />}
       <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} onSave={saveRule} />
+      <TeamPreviewDialog language={language}
+        snapshot={teamDialog === 'live' ? teamPreview : teamDialog === 'reference' ? config.referenceTeam ?? null : null}
+        title={teamDialog === 'reference' ? (language === 'en' ? "Author's team setup" : '作者的队伍配置') : (language === 'en' ? 'Current team setup' : '当前队伍配置')}
+        description={teamDialog === 'reference'
+          ? (language === 'en' ? `Shared with this strategy · captured ${config.referenceTeam?.capturedAt ?? ''}` : `随策略导入 · 读取于 ${config.referenceTeam?.capturedAt ?? ''}`)
+          : (language === 'en' ? `Preparation screen · read ${teamPreview?.capturedAt ?? ''}; exported with the strategy that uses this team` : `准备界面 · 读取于 ${teamPreview?.capturedAt ?? ''}；导出使用这支队伍的策略组时会一并导出`)}
+        onClose={() => setTeamDialog(null)}
+        heroName={(typeId) => heroByRuntimeId(heroes, typeId)?.name ?? (language === 'en' ? `Champion ${typeId}` : `英雄 ${typeId}`)}
+        heroAvatar={(typeId) => <HeroAvatar hero={heroByRuntimeId(heroes, typeId)} size="md" />}
+        skillName={(heroTypeId, skillTypeId) => heroByRuntimeId(heroes, heroTypeId)?.skills.find((skill) => skill.typeId === skillTypeId)?.name ?? `${skillTypeId}`} />
+      <SimulationReport language={language} simulationId={simulationReportId} onClose={() => setSimulationReportId(null)} heroes={heroes}
+        trialById={trialCatalogById} request={api} onJumpToRule={jumpToRule} />
       <Dialog.Root open={logsExpanded} onOpenChange={setLogsExpanded}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
@@ -2869,7 +3221,7 @@ function App() {
               <Dialog.Close className="icon-button" aria-label="关闭完整运行记录"><X size={19} /></Dialog.Close>
             </div>
             <div className="log-dialog-status"><span className={`status-dot ${controller.running ? 'online' : ''}`} /><strong>{controller.status}</strong><em>{controller.logs.length} 条记录</em></div>
-            <pre ref={expandedLogRef} tabIndex={0}>{controller.logs.length ? controller.logs.join('\n') : '尚无运行记录'}</pre>
+            <LogView key={bossMode} logs={controller.logs} />
             <div className="dialog-footer"><span>每种 Boss 模式分别保留当前会话最近 800 条记录。</span><div><button className="button ghost" onClick={() => void clearLogs()}><Trash2 size={15} />清空当前模式</button><Dialog.Close className="button primary">收起运行记录</Dialog.Close></div></div>
           </Dialog.Content>
         </Dialog.Portal>

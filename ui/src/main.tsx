@@ -2,6 +2,13 @@ import { StrictMode, useLayoutEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import './styles.css'
+import './rulePanelScroll.css'
+import { UiErrorBoundary, reportUiError } from './UiErrorBoundary'
+
+window.addEventListener('error', (event) => {
+  if (event.message) reportUiError('javascript', event.error ?? event.message)
+})
+window.addEventListener('unhandledrejection', (event) => reportUiError('promise', event.reason))
 
 function MountedApp() {
   useLayoutEffect(() => {
@@ -19,6 +26,6 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <MountedApp />
+    <UiErrorBoundary><MountedApp /></UiErrorBoundary>
   </StrictMode>,
 )
