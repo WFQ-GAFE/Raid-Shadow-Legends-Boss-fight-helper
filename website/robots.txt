@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://wfq-gafe.github.io/Raid-Shadow-Legends-Boss-fight-helper/sitemap.xml
