@@ -4,9 +4,7 @@
 
 **RAID: Shadow Legends Boss 战斗助手**
 
-**请在 Release 页面下载 .exe 工具。**
-
-**Download the .exe tool in release page.**
+**[下载最新版 / Download the latest release](https://github.com/WFQ-GAFE/Raid-Shadow-Legends-Boss-fight-helper/releases/latest)** · **[加入 Discord 社区 / Join the Discord community](https://discord.gg/Tv2rWKgbVr)**
 
 A local Windows strategy editor and battle controller for the Chimera and Hydra encounters in **RAID: Shadow Legends**.
 
