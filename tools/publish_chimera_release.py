@@ -16,7 +16,7 @@ from pathlib import Path
 from strategy_storage import atomic_write_bytes, atomic_write_json
 
 
-APPLICATION = "AllianceBossStrategyStudio"
+APPLICATION = "RSL-Boss-helper"
 DEFAULT_RELEASE = Path(__file__).resolve().parent.parent / "build" / "release"
 
 

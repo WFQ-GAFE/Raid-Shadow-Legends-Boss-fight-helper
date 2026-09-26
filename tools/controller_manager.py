@@ -15,7 +15,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Any
-from agent_ipc import AgentIpc
+from agent_ipc import AgentIpc, reload_block_reason
 from boss_modes import MODE_SPECS, normalize_mode, mode_spec
 from chimera_runtime import AGENT, PROJECT_ROOT, RESOURCE_ROOT as BUNDLE_ROOT, USER_STRATEGY, worker_command, require_expected_account
 from controller_pause import ControllerPauseEvent, signal_controller_pause
@@ -242,7 +242,8 @@ class ControllerManager:
             self.record_diagnostic("start", boss_mode, strategyName=config.get("name") if config else None,
                 objectives=copy.deepcopy(config.get("objectives", {})) if config else {},
                 strategy={key: copy.deepcopy(config[key]) for key in
-                    ('name', 'mode', 'bossMode', 'scope', 'objectives', 'safety', 'rules', 'team', 'trialRecipes')
+                    ('name', 'mode', 'bossMode', 'scope', 'objectives', 'safety', 'rules', 'team', 'trialRecipes',
+                     'executionMode', 'strategyFlow', 'strategyTree')
                     if config and key in config},
                 build=diagnostic_build_identity(),
                 logFormat=2)
@@ -320,6 +321,14 @@ class ControllerManager:
             if check.returncode:
                 raise RuntimeError(check_payload.get("reason") or check.stderr.strip() or "代理检查失败")
 
+            if check_payload.get("agentLoaded"):
+                reload_reason = reload_block_reason(check_payload.get("agentStatus"))
+                if reload_reason:
+                    raise RuntimeError(
+                        "旧版或状态不明的代理仍驻留在游戏进程中。请完全退出并重新启动 Raid 客户端；"
+                        "为避免再次闪退，工具已阻止在线卸载或重载。"
+                    )
+
             if check_payload.get("agentLoaded") and (
                 not check_payload.get("agentCompatible") or not check_payload.get("agentReady")
             ):
@@ -327,7 +336,7 @@ class ControllerManager:
                 try:
                     with AgentIpc(pid) as ipc:
                         previous_lifecycle = ipc.lifecycle() or {}
-                except (FileNotFoundError, ValueError):
+                except (FileNotFoundError, ValueError, OSError):
                     pass
                 if previous_lifecycle.get("screen") == "result":
                     raise RuntimeError("当前停留在战绩结算画面，不会在此时更新代理")

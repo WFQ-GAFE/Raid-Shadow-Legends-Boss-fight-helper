@@ -1433,3 +1433,85 @@ class ChimeraIconRepository:
             return self.photo(option["icon"], size)
         text = str(token or "")
         return self.photo(EFFECT_TYPE_ICONS.get(int(text)) if text.isdigit() else text, size)
+
+
+# Team preview icons: artifact sets (the game's own icon name per set), blessings,
+# masteries (by mastery id) and relics (by relic type id).
+# Sprite families for the team preview; set and blessing sprites carry the
+# names of the game's own icon URLs ("UI/Sets/Protection" -> "Protection").
+TEAM_ICON_BUNDLES = {
+    "set": "ArtifactSets",
+    "blessing": "BlessingIcon",
+    "mastery": "MasteryIcons",
+    "relic": "RelicIcons_1",
+}
+_NAMED_SPRITE_INDEX: dict[str, dict[str, Any]] = {}
+
+
+def _latest_icon_bundle_source(prefix: str) -> Path | None:
+    """The newest bundle of an icon family: downloaded resources or the build's own StreamingAssets."""
+    candidates: list[tuple[tuple[int, ...], Path]] = []
+    downloaded = _latest_resource_bundle_source(prefix)
+    if downloaded is not None:
+        candidates.append((_version_tuple(downloaded.parents[1].name), downloaded))
+    build = game_build_directory()
+    shipped = build / "Raid_Data" / "StreamingAssets" / "AssetBundles" / prefix if build is not None else None
+    if shipped is not None and shipped.is_dir():
+        for directory in shipped.iterdir():
+            version = _version_tuple(f"_{directory.name}")
+            bundle = next((path for path in directory.rglob(f"{prefix}_*.unity3d") if path.is_file()), None)
+            if version and bundle is not None:
+                candidates.append((version, bundle))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _sprite_area(sprite: Any) -> float:
+    rect = getattr(sprite, "m_Rect", None)
+    try:
+        return float(rect.width) * float(rect.height)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def game_named_sprite(prefix: str, name: str) -> Path | None:
+    """One native sprite by name from the newest bundle of an icon family, cached as PNG."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", name or ""):
+        return None
+    source = _latest_icon_bundle_source(prefix)
+    if source is None:
+        return None
+    version = _safe_name(source.stem if source.suffix == ".unity3d" else source.parent.name)
+    target = ASSET_CACHE_DIR / f"native-{_safe_name(prefix)}-{version}-{_safe_name(name)}.png"
+    if target.is_file():
+        return target
+    with _GAME_ASSET_LOCK:
+        if target.is_file():
+            return target
+        index = _NAMED_SPRITE_INDEX.get(str(source))
+        if index is None:
+            try:
+                import UnityPy  # type: ignore
+                environment = UnityPy.load(str(source))
+                index = {}
+                for obj in environment.objects:
+                    if obj.type.name == "Sprite":
+                        sprite = obj.read()
+                        name_key = str(getattr(sprite, "m_Name", "") or "")
+                        # Some families hold a small and a large sprite of one name: keep the large one.
+                        if name_key not in index or _sprite_area(sprite) > _sprite_area(index[name_key]):
+                            index[name_key] = sprite
+            except Exception as error:
+                _record_asset_extraction_error(prefix, source, error)
+                index = {}
+            _NAMED_SPRITE_INDEX.clear()  # One bundle in memory at a time.
+            _NAMED_SPRITE_INDEX[str(source)] = index
+        sprite = index.get(name)
+        if sprite is None:
+            return None
+        try:
+            ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            sprite.image.save(target)
+        except Exception as error:
+            _record_asset_extraction_error(prefix, source, error)
+            return None
+        return target

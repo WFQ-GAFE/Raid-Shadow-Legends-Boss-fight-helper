@@ -90,6 +90,10 @@ def _runtime_project_root() -> Path:
                 / "WFQ-GAFE"
                 / "RaidBossStrategyStudio"
             )
+        from preview_runtime import preview_root, seed_preview
+        preview = preview_root(root)
+        seed_preview(root, preview)
+        root = preview
         root.mkdir(parents=True, exist_ok=True)
         return root.resolve()
 
@@ -118,6 +122,12 @@ from controller_manager import ControllerManager, controller_exit_label, utf8_su
 from strategy_storage import atomic_write_json, write_strategy_store, storage_health, recover_strategy_store, restore_strategy_value, revision, StrategyStoreError
 from catalog_stream import static_entity, merge_skill_catalog
 from hydra_state import hydra_devouring_head_ids
+from hydra_forecast_live import recent_forecasts as recent_hydra_forecasts
+from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService,
+                                        list_captures as list_chimera_captures,
+                                        recent_simulations as recent_chimera_simulations)
+from team_preview import (TeamSnapshotStore, decode_preview, public_preview,  # noqa: E402
+                          sanitize_reference_team)
 from agent_ipc import AgentIpc  # noqa: E402
 from boss_modes import (  # noqa: E402
     HYDRA_HEAD_TYPE_IDS,
@@ -163,6 +173,8 @@ from chimera_icons import (  # noqa: E402
     ensure_icon_cache,
     game_hero_asset,
     game_reward_asset,
+    game_named_sprite,
+    TEAM_ICON_BUNDLES,
     game_skill_asset,
     preload_game_visuals,
     runtime_effect_options,
@@ -183,6 +195,24 @@ DIST_DIR = (
     BUNDLED_DIST_DIR
     if (BUNDLED_DIST_DIR / "index.html").is_file()
     else PROJECT_ROOT / "ui" / "dist"
+)
+APP_NAME = "RSL-Boss-helper"
+# The packaged build carries VERSION and the icon next to the interface.
+APP_VERSION = next(
+    (
+        (root / "VERSION").read_text(encoding="utf-8").strip()
+        for root in (BUNDLE_ROOT, PROJECT_ROOT)
+        if (root / "VERSION").is_file()
+    ),
+    "",
+)
+APP_ICON = next(
+    (
+        root / "branding" / "alliance-boss-strategy-icon-v3.ico"
+        for root in (BUNDLE_ROOT, PROJECT_ROOT)
+        if (root / "branding" / "alliance-boss-strategy-icon-v3.ico").is_file()
+    ),
+    BUNDLE_ROOT / "branding" / "alliance-boss-strategy-icon-v3.ico",
 )
 HERO_CATALOG = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
 UI_PREFERENCES = PROJECT_ROOT / "config" / "raid-boss-ui-preferences.user.json"
@@ -309,8 +339,9 @@ def normalized_strategy(
         objectives["onMandatoryTrialImpossible"] = "free_regroup_and_retry_manual"
     else:
         objectives.pop("mandatoryTrialIds", None)
-        objectives.pop("earlyRetryConditions", None)
         objectives.pop("onMandatoryTrialImpossible", None)
+    # Replaced by the opening whole-battle forecast in 1.0.6.
+    objectives.pop("earlyRetryConditions", None)
     objectives.pop("minimumCompetitionPoints", None)
     for key in ("minimumDamage", "maxRegroupRetries"):
         raw = objectives.get(key, 0)
@@ -325,38 +356,9 @@ def normalized_strategy(
         ):
             raise ValueError("必做试炼设置无效")
         objectives["mandatoryTrialIds"] = list(dict.fromkeys(trial_ids))
-        early_retry_conditions = objectives.get("earlyRetryConditions", [])
-        if not isinstance(early_retry_conditions, list):
-            raise ValueError("提前重整条件设置无效")
-        normalized_early_retry_conditions: list[dict[str, Any]] = []
-        for condition in early_retry_conditions[:20]:
-            if not isinstance(condition, dict):
-                continue
-            threshold = condition.get("bossTurnAtLeast")
-            if (
-                not isinstance(threshold, int)
-                or isinstance(threshold, bool)
-                or threshold < 0
-            ):
-                continue
-            condition_trial_ids = condition.get("trialIds", [])
-            if not isinstance(condition_trial_ids, list):
-                continue
-            filtered_trial_ids = list(dict.fromkeys(
-                trial_id
-                for trial_id in condition_trial_ids
-                if isinstance(trial_id, int)
-                and not isinstance(trial_id, bool)
-                and trial_id > 0
-            ))
-            if not filtered_trial_ids:
-                continue
-            normalized_early_retry_conditions.append({
-                "bossTurnAtLeast": threshold,
-                "mode": "all" if condition.get("mode") == "all" else "any",
-                "trialIds": filtered_trial_ids,
-            })
-        objectives["earlyRetryConditions"] = normalized_early_retry_conditions
+        # On unless the player turned it off: strategies saved before 1.0.6
+        # have no such key.
+        objectives["battleForecast"] = objectives.get("battleForecast", True) is not False
     else:
         devour_conditions = objectives.get("devourOrderRetryConditions", [])
         if not isinstance(devour_conditions, list):
@@ -365,8 +367,17 @@ def normalized_strategy(
         for condition in devour_conditions[:20]:
             if not isinstance(condition, dict):
                 continue
+            never_marked = condition.get("relation") == "neverMarked"
             mark_index = condition.get("markIndex")
-            if (
+            mark_limit = condition.get("markLimit")
+            if never_marked:
+                if not (
+                    isinstance(mark_limit, int)
+                    and not isinstance(mark_limit, bool)
+                    and 1 <= mark_limit <= 100
+                ):
+                    mark_limit = None
+            elif (
                 not isinstance(mark_index, int)
                 or isinstance(mark_index, bool)
                 or not 1 <= mark_index <= 100
@@ -384,6 +395,13 @@ def normalized_strategy(
             ))
             if not filtered_hero_type_ids:
                 continue
+            if never_marked:
+                normalized_devour_conditions.append({
+                    "relation": "neverMarked",
+                    "heroTypeIds": filtered_hero_type_ids,
+                    **({"markLimit": mark_limit} if mark_limit is not None else {}),
+                })
+                continue
             normalized_devour_conditions.append({
                 "markIndex": mark_index,
                 "relation": (
@@ -394,6 +412,7 @@ def normalized_strategy(
                 "heroTypeIds": filtered_hero_type_ids,
             })
         objectives["devourOrderRetryConditions"] = normalized_devour_conditions
+        objectives["devourOrderForecast"] = objectives.get("devourOrderForecast") is True
     result["objectives"] = objectives
     team = result.get("team")
     if isinstance(team, dict):
@@ -424,6 +443,9 @@ class ChimeraService:
         self.first_client = threading.Event()
         self.active_clients = 0
         self.controller = ControllerManager()
+        self.simulations = SimulationService()
+        self.team_snapshots = TeamSnapshotStore()
+        self.team_previews: dict[int, dict[str, Any]] = {}
         self.catalog_epoch = 0
         self.catalog_session = secrets.token_hex(8)
         self.processes: dict[int, dict[str, Any]] = {}
@@ -640,7 +662,7 @@ class ChimeraService:
                 return
             boss_mode = normalize_mode(boss_mode)
             if (not isinstance(document, dict) or document.get("format") != "raid-boss-strategy"
-                    or type(document.get("version")) is not int or document["version"] != 1
+                    or type(document.get("version")) is not int or document["version"] not in {1, 2}
                     or not isinstance(document.get("strategy"), dict)):
                 raise ValueError("请选择有效的导出策略文件")
             if document.get("bossMode") != boss_mode:
@@ -768,16 +790,21 @@ class ChimeraService:
             ).strip()
             strategy = strategy_for_mode(store, boss_mode, selected_id)
         team = strategy.get("team")
+        snapshot = None
         if isinstance(team, dict):
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             strategy["team"] = portable_team
+            snapshot = self.team_snapshots.find(portable_team.get("heroTypeIds"))
+        # An imported strategy passes its author's team on unchanged.
+        snapshot = snapshot or sanitize_reference_team(strategy.get("referenceTeam"))
         return {
             "format": "raid-boss-strategy",
-            "version": 1,
+            "version": 2 if strategy.get("strategyFlow") is not None else 1,
             "exportedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "bossMode": boss_mode,
             "strategy": strategy,
+            **({"teamSnapshot": snapshot} if snapshot else {}),
         }
 
     def import_strategy_profile(
@@ -789,7 +816,7 @@ class ChimeraService:
             raise ValueError("导入文件的根节点必须是对象")
         if document.get("format") == "raid-boss-strategy":
             version = document.get("version")
-            if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+            if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2}:
                 raise ValueError("不支持此策略导出版本")
             value = document.get("strategy")
             declared_mode = document.get("bossMode")
@@ -809,6 +836,12 @@ class ChimeraService:
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             portable["team"] = portable_team
+        # The author's heroes and gear stay with the strategy for reference.
+        reference = sanitize_reference_team(document.get("teamSnapshot")) or \
+            sanitize_reference_team(portable.get("referenceTeam"))
+        portable.pop("referenceTeam", None)
+        if reference:
+            portable["referenceTeam"] = reference
         config = normalized_strategy(
             portable, strategy_template(boss_mode), boss_mode
         )
@@ -856,8 +889,12 @@ class ChimeraService:
                         f"[account] PID {item['pid']} -> 账户模型尚未就绪"
                     )
             except Exception as error:
+                # One unreadable client must not hide the others.
                 item["error"] = str(error)
-                item["account"] = latest_account_state(int(item["pid"]))
+                try:
+                    item["account"] = latest_account_state(int(item["pid"]))
+                except Exception:
+                    item["account"] = None
                 desktop_log(
                     f"[account] PID {item['pid']} 读取失败：{error}"
                 )
@@ -1395,8 +1432,61 @@ class ChimeraService:
             "controller": self.controller.snapshot(boss_mode, after=log_cursor),
             "strategyProfiles": strategy_profiles_for_mode(store, boss_mode),
             "storageHealth": health,
+            **({"hydraForecasts": recent_hydra_forecasts()} if boss_mode == "hydra" else {}),
+            **({"chimeraSimulation": self.simulation_overview()} if boss_mode == "chimera" else {}),
+            "teamPreview": self.team_preview_summary(pid),
             **self.catalog_payload(catalog_revision),
         }
+
+    def team_preview(self, pid: int | None) -> dict[str, Any] | None:
+        """The preparation-screen team of this account (hero-screen stats, sets, masteries)."""
+        if not isinstance(pid, int):
+            return None
+        try:
+            with AgentIpc(pid) as ipc:
+                raw = ipc.team_preview()
+        except (FileNotFoundError, ValueError, OSError):
+            raw = None
+        cached = self.team_previews.get(pid)
+        tick = raw.get("observedAtTick") if isinstance(raw, dict) else None
+        if raw is not None and (cached is None or cached.get("tick") != tick):
+            preview = decode_preview(raw)
+            if preview is not None:
+                preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            cached = {"tick": tick, "preview": preview}
+            self.team_previews[pid] = cached
+        preview = cached.get("preview") if cached else None
+        if preview is None:
+            return None
+        public = public_preview(preview)
+        if public is not None:
+            self.team_snapshots.remember(public)
+        return public
+
+    def team_preview_summary(self, pid: int | None) -> dict[str, Any] | None:
+        preview = self.team_preview(pid)
+        if preview is None:
+            return None
+        return {"revision": str(preview.get("teamKey") or preview.get("observedAtTick")),
+                "status": preview.get("status"), "bossMode": preview.get("bossMode"),
+                "heroes": len(preview.get("heroes") or [])}
+
+    def simulation_overview(self) -> dict[str, Any]:
+        return {"captures": list_chimera_captures(8), "job": self.simulations.status(),
+                "recent": recent_chimera_simulations(8),
+                "battleForecasts": recent_chimera_simulations(6, root=BATTLE_FORECAST_ROOT)}
+
+    def start_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
+        config = normalized_strategy(body.get("config"), {}, "chimera")
+        runs = body.get("runs")
+        if not isinstance(runs, int) or isinstance(runs, bool):
+            raise ValueError("模拟场数无效")
+        pid = body.get("pid")
+        return self.simulations.start(
+            config,
+            {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
+            str(body.get("captureId") or ""), runs,
+            pid if isinstance(pid, int) and not isinstance(pid, bool) else None)
 
     def bootstrap(
         self, pid: int | None = None, force: bool = False,
@@ -1472,6 +1562,8 @@ class ChimeraService:
         return self.controller.snapshot(boss_mode)
 
     def asset(self, kind: str, parts: list[str]) -> Path | None:
+        if kind in TEAM_ICON_BUNDLES and len(parts) == 1:
+            return game_named_sprite(TEAM_ICON_BUNDLES[kind], parts[0])
         if kind == "hero" and len(parts) == 1 and parts[0].isdigit():
             requested_hero_id = int(parts[0])
             hero = self.hero_catalog.get(requested_hero_id)
@@ -1508,7 +1600,20 @@ class ChimeraService:
             )
         if kind == "skill" and len(parts) == 2 and all(value.isdigit() for value in parts):
             hero_id, identity = map(int, parts)
-            hero = self.hero_catalog.get(hero_id, {})
+            hero = self.hero_catalog.get(hero_id)
+            if hero is None:
+                # A live hero type id (rank/ascension variant) from the team preview.
+                hero = next(
+                    (
+                        candidate
+                        for candidate in self.hero_catalog.values()
+                        if isinstance(candidate, dict)
+                        and hero_id in candidate.get("runtimeTypeIds", [])
+                    ),
+                    {},
+                )
+                # Hero type ids are the base id plus the rank digit.
+                hero_id = hero_catalog_identity(hero_id, hero) if hero else hero_id - hero_id % 10
             if isinstance(hero, dict):
                 skill = next(
                     (
@@ -1527,6 +1632,9 @@ class ChimeraService:
                         ),
                         None,
                     )
+                if skill is None and identity >= 100:
+                    # A skill the catalog leaves out (passives): its type id ends in the slot.
+                    skill = {"typeId": identity, "slot": identity % 100}
                 if isinstance(skill, dict):
                     asset_identity = skill.get("typeId") or f"{hero_id}-{identity}"
                     native = game_skill_asset(hero_id, hero, skill)
@@ -1619,6 +1727,25 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     query.get("catalogRevision", [None])[0],
                     query.get("logCursor", [None])[0],
                 ))
+                return
+            if parsed.path == "/api/team-preview":
+                if not self._write_authorized():
+                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    return
+                raw_pid = query.get("pid", [None])[0]
+                pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
+                self._json({"preview": self.server.service.team_preview(pid)})
+                return
+            if parsed.path == "/api/chimera-simulation":
+                if not self._write_authorized():
+                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    return
+                simulation_id = query.get("id", [""])[0]
+                raw_run = query.get("run", [None])[0]
+                if raw_run is not None and str(raw_run).isdigit():
+                    self._json(self.server.service.simulations.load_run(simulation_id, int(raw_run)))
+                else:
+                    self._json(self.server.service.simulations.load(simulation_id))
                 return
             if parsed.path.startswith("/api/asset/"):
                 parts = [part for part in parsed.path.split("/") if part][2:]
@@ -1761,6 +1888,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 self.server.service.controller.stop(pid if isinstance(pid, int) else None)
                 self._json({"controller": self.server.service.controller.snapshot(boss_mode)})
                 return
+            if self.path == "/api/chimera-simulation/start":
+                self._json({"job": self.server.service.start_simulation(body)})
+                return
+            if self.path == "/api/chimera-simulation/stop":
+                self.server.service.simulations.stop()
+                self._json({"job": self.server.service.simulations.status()})
+                return
             if self.path == "/api/logs/clear":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
                 self.server.service.controller.clear_logs(boss_mode)
@@ -1874,26 +2008,21 @@ def self_test() -> int:
     config = normalized_strategy(service.strategy(), service.strategy())
     assert config["mode"] == "execute"
     assert config["objectives"]["onAllMetAtResult"] == "hold_for_user"
-    early_retry_config = normalized_strategy(
+    old_early_retry_config = normalized_strategy(
         {
             **config,
             "objectives": {
                 **config["objectives"],
                 "mandatoryTrialIds": [8000607],
                 "earlyRetryConditions": [
-                    {
-                        "bossTurnAtLeast": 5,
-                        "mode": "any",
-                        "trialIds": [8000607, 8000608],
-                    }
+                    {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607]}
                 ],
             },
         },
         config,
     )
-    assert early_retry_config["objectives"]["earlyRetryConditions"] == [
-        {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607, 8000608]}
-    ]
+    assert "earlyRetryConditions" not in old_early_retry_config["objectives"]
+    assert old_early_retry_config["objectives"]["mandatoryTrialIds"] == [8000607]
     hydra_config = default_strategy("hydra")
     hydra_retry_config = normalized_strategy(
         {
@@ -2013,8 +2142,8 @@ def main() -> int:
         except RuntimeError:
             ctypes.windll.user32.MessageBoxW(
                 None,
-                "奇美拉工具已经在运行，请使用现有窗口。",
-                "联盟 Boss 策略中心",
+                f"{APP_NAME} 已经在运行，请使用现有窗口。",
+                APP_NAME,
                 0x40,
             )
             return 4
@@ -2046,7 +2175,7 @@ def main() -> int:
         webview.settings["SHOW_DEFAULT_MENUS"] = False
         webview.settings["ALLOW_DOWNLOADS"] = True
         window = webview.create_window(
-            "Alliance Boss Strategy Studio",
+            f"{APP_NAME} {APP_VERSION}".strip(),
             url,
             width=1380,
             height=860,
@@ -2070,7 +2199,7 @@ def main() -> int:
             if startup.closed.is_set():
                 return
             desktop_lifecycle_log("window_startup_failed: " + message)
-            ctypes.windll.user32.MessageBoxW(None, message, "联盟 Boss 策略中心", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, message, APP_NAME, 0x10)
             try:
                 window.destroy()
             except Exception as error:
@@ -2084,6 +2213,7 @@ def main() -> int:
             gui="edgechromium",
             debug=False,
             private_mode=True,
+            icon=str(APP_ICON) if APP_ICON.is_file() else None,
         )
         return 0
     except Exception as error:
@@ -2125,8 +2255,8 @@ if __name__ == "__main__":
         if not any(flag in sys.argv for flag in ("--self-test", "--no-window", "--internal-worker")):
             ctypes.windll.user32.MessageBoxW(
                 None,
-                f"联盟 Boss 策略中心启动失败：\n\n{error}",
-                "联盟 Boss 策略中心",
+                f"{APP_NAME} 启动失败：\n\n{error}",
+                APP_NAME,
                 0x10,
             )
         raise SystemExit(1)

@@ -2,6 +2,15 @@
 #include "shared_json_payload.hpp"
 #include "result_confirmation.hpp"
 #include "event_history.hpp"
+#include "battle_random_observation.hpp"
+#include "selection_observation.hpp"
+
+#if defined(RAID_HYDRA_SELECTOR_HOOK)
+#error "The live Hydra selector hook is retired after repeated game-client crashes; use the offline simulator."
+#endif
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE)
+#error "Live Hydra research input capture is retired after a repeatable GameAssembly access violation in the MessagePack/GC handle path; use offline capture and simulation."
+#endif
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -11,8 +20,11 @@
 #include <atomic>
 #include <climits>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -57,8 +69,8 @@ constexpr std::uint32_t kCommandVersion = 4;
 constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
-constexpr std::uint32_t kSharedStateVersion = 3;
-constexpr std::uint64_t kAgentBuildId = 2026091301ULL;
+constexpr std::uint32_t kSharedStateVersion = 5;
+constexpr std::uint64_t kAgentBuildId = 2026092702ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -79,6 +91,8 @@ using LifecycleJsonSlot = SharedJsonSlot<16384>;
 using BattleLedgerJsonSlot = SharedJsonSlot<65536>;
 using RotationCatalogJsonSlot = SharedJsonSlot<262144>;
 using DiagnosticJsonSlot = SharedJsonSlot<8192>;
+using ReplayInputJsonSlot = SharedJsonSlot<2097152>;
+using TeamPreviewJsonSlot = SharedJsonSlot<524288>;
 
 struct alignas(8) AgentSharedState {
     std::uint32_t magic{};
@@ -98,6 +112,8 @@ struct alignas(8) AgentSharedState {
     BattleLedgerJsonSlot battle_ledger{};
     RotationCatalogJsonSlot rotation_catalog{};
     DiagnosticJsonSlot diagnostic{};
+    ReplayInputJsonSlot replay_input{};
+    TeamPreviewJsonSlot team_preview{};
 };
 
 static_assert(offsetof(AgentSharedState, account) == 48);
@@ -108,7 +124,9 @@ static_assert(sizeof(LifecycleJsonSlot) == 16400);
 static_assert(sizeof(BattleLedgerJsonSlot) == 65552);
 static_assert(sizeof(RotationCatalogJsonSlot) == 262160);
 static_assert(sizeof(DiagnosticJsonSlot) == 8208);
-static_assert(sizeof(AgentSharedState) == 622752);
+static_assert(sizeof(ReplayInputJsonSlot) == 2097168);
+static_assert(sizeof(TeamPreviewJsonSlot) == 524304);
+static_assert(sizeof(AgentSharedState) == 3244224);
 
 constexpr std::uint32_t kControlMagic = 0x5243544C;  // RCTL
 constexpr std::uint32_t kControlVersion = 1;
@@ -439,6 +457,13 @@ InstanceInt64Getter g_original_result_total_damage{};
 InstanceInt64Getter g_original_hydra_result_total_damage{};
 InstanceInt64IntVoidMethod g_original_hydra_damage_counter_change{};
 std::atomic<bool> g_hydra_damage_counter_hook_installed{};
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE) && defined(RAID_HYDRA_SELECTOR_HOOK)
+InstancePointerReturnPointerMethod g_original_hydra_mark_selector{};
+std::atomic<bool> g_hydra_mark_selector_hook_installed{};
+std::atomic<std::uint64_t> g_hydra_mark_event_sequence{};
+raid::observation::SelectionHistory g_hydra_mark_history;
+SRWLOCK g_hydra_mark_history_lock = SRWLOCK_INIT;
+#endif
 const MethodInfo* g_selection_filled_method{};
 const MethodInfo* g_selection_heroes_method{};
 const MethodInfo* g_selection_hero_method{};
@@ -4990,6 +5015,25 @@ void append_model_challenges(std::ostringstream& output, void* hero) {
     output << ']';
 }
 
+void append_actor_numeric_observation(std::ostringstream& output, void* hero) {
+    void* stats = nullptr;
+    const bool stats_read = hero && safe_read_field(
+        hero, "<Stats>k__BackingField", "Stats", stats) && stats;
+    const char* names[] = {"Health", "Attack", "Defence", "Speed", "Resistance",
+                           "Accuracy", "CriticalChance", "CriticalDamage"};
+    output << ",\"numericObservation\":{\"schema\":1,\"format\":\"signed_Q32.32_decimal_string\""
+           << ",\"statsObjectAvailable\":" << (stats_read ? "true" : "false")
+           << ",\"statsRaw\":{";
+    for (std::size_t i = 0; i < std::size(names); ++i) {
+        if (i) output << ',';
+        output << '"' << names[i] << "\":";
+        std::int64_t raw = 0;
+        if (stats_read && safe_read_field(stats, names[i], nullptr, raw)) output << '"' << raw << '"';
+        else output << "null";
+    }
+    output << "}}";
+}
+
 void append_actor_state(std::ostringstream& output, void* mode,
                         const IntObjectDictionaryItems& actors,
                         const char* side, bool living_only = false, bool diagnostic_only = false) {
@@ -5020,7 +5064,7 @@ void append_actor_state(std::ostringstream& output, void* mode,
         bool is_digesting_now = false;
         std::int32_t devoured_hero_id = -1;
         std::int32_t digestion_turns = -1;
-        std::int32_t battle_position = 0;
+        std::int32_t battle_position = -1;
         void* hero_state = nullptr;
         if (hero) {
             safe_read_field(hero, "TypeId", nullptr, model_type_id);
@@ -5050,13 +5094,13 @@ void append_actor_state(std::ostringstream& output, void* mode,
             }
             safe_read_field(hero, "IsHydraHead", nullptr, is_hydra_head);
             safe_read_field(hero, "IsHydraNeck", nullptr, is_hydra_neck);
-            if (!safe_read_field(hero, "BattlePosition", nullptr,
+            if (!safe_read_field(hero, "SlotId", nullptr,
+                                 battle_position) &&
+                !safe_read_field(hero, "BattlePosition", nullptr,
+                                 battle_position) &&
+                !safe_read_field(hero, "TeamPosition", nullptr,
                                  battle_position)) {
-                if (!safe_read_field(hero, "TeamPosition", nullptr,
-                                     battle_position)) {
-                    safe_read_field(hero, "Slot", nullptr,
-                                    battle_position);
-                }
+                safe_read_field(hero, "Slot", nullptr, battle_position);
             }
             read_hydra_digestion_state(hero, &devoured_hero_id,
                                        &digestion_turns);
@@ -5143,6 +5187,7 @@ void append_actor_state(std::ostringstream& output, void* mode,
                << ",\"duelTarget\":" << (duel_target ? "true" : "false")
                << ",\"enfeeble\":" << (enfeeble ? "true" : "false")
                << ",\"rages\":" << (rages ? "true" : "false") << '}';
+        append_actor_numeric_observation(output, hero);
         output << ",\"skills\":";
         if (diagnostic_only) output << "[]";
         else append_model_skills(output, hero);
@@ -5206,6 +5251,312 @@ bool battle_model_objects(void* mode, void** context, void** state) {
                            *context) && *context &&
            safe_read_field(*context, "State", nullptr, *state) && *state;
 }
+
+bool read_random_frame(void* context, raid::observation::RandomFrame& frame) {
+    void* state = nullptr;
+    void* random = nullptr;
+    void* setup = nullptr;
+    if (!context || !safe_read_field(context, "State", nullptr, state) || !state ||
+        !safe_read_field(state, "Random", nullptr, random) || !random ||
+        !safe_read_field(state, "CurrentTurn", nullptr, frame.turn) ||
+        !safe_read_field(state, "PlayerTurnCount", nullptr, frame.player_turn)) return false;
+    // Do not invoke GetRandom/Next/Clone or write any live RNG field.
+    const char* fields[] = {"_x", "_y", "_z", "_w"};
+    for (std::size_t i = 0; i < frame.words.size(); ++i) {
+        if (!safe_read_field(random, fields[i], nullptr, frame.words[i])) return false;
+    }
+    frame.context = reinterpret_cast<std::uintptr_t>(context);
+    frame.state = reinterpret_cast<std::uintptr_t>(state);
+    frame.random = reinterpret_cast<std::uintptr_t>(random);
+    frame.seed_available = safe_read_field(context, "Setup", nullptr, setup) && setup &&
+        safe_read_field(setup, "RandomSeed", nullptr, frame.seed);
+    frame.setup_id_available = setup && safe_read_field(setup, "Id", nullptr, frame.setup_id) &&
+        frame.setup_id != std::array<std::uint8_t, 16>{};
+    return true;
+}
+
+void append_random_observation(std::ostringstream& output,
+    const raid::observation::RandomObservation& observation, const char* capture_point) {
+    output << "{\"schema\":1,\"source\":\"BattleState.Random_fields\""
+           << ",\"available\":" << (observation.available ? "true" : "false")
+           << ",\"readStatus\":\"" << observation.reason << "\""
+           << ",\"capturePoint\":\"" << capture_point << "\",\"predictionReady\":false";
+    if (observation.available) {
+        const auto& frame = observation.frame;
+        output << ",\"modelContext\":\"" << frame.context << "\",\"modelState\":\"" << frame.state << '"'
+               << ",\"turn\":" << frame.turn << ",\"playerTurnCount\":" << frame.player_turn
+               << ",\"words\":[" << frame.words[0] << ',' << frame.words[1] << ','
+               << frame.words[2] << ',' << frame.words[3] << ']'
+               << ",\"seedAvailable\":" << (frame.seed_available ? "true" : "false");
+        if (frame.seed_available) output << ",\"seed\":" << frame.seed;
+        output << ",\"battleSetupIdAvailable\":" << (frame.setup_id_available ? "true" : "false");
+        if (frame.setup_id_available) {
+            // Raw Guid bytes, consistently encoded; no live Guid.ToString call.
+            constexpr char hex[] = "0123456789abcdef";
+            output << ",\"battleSetupId\":\"";
+            for (const auto byte : frame.setup_id) output << hex[byte >> 4] << hex[byte & 15];
+            output << '"';
+        }
+    }
+    output << '}';
+}
+
+void append_battle_random_observation(std::ostringstream& output, void* mode) {
+    const auto observation = raid::observation::observe_random(
+        [mode](raid::observation::RandomFrame& frame) {
+            void* context = nullptr;
+            void* state = nullptr;
+            return battle_model_objects(mode, &context, &state) && read_random_frame(context, frame);
+        });
+    output << ",\"battleRandom\":";
+    append_random_observation(output, observation, "published_snapshot");
+}
+
+// Capture the exact setup already retained by the active BattleContext, plus
+// the current login's BattleSettings. JsonMain is the game's ordinary cache
+// serializer. This avoids the retired in-game generic MessagePack/reflection
+// path; MessagePack conversion happens only in the isolated offline runner.
+const Il2CppImage* replay_image(const char* wanted) {
+    if (!g_api.domain_get || !g_api.domain_get_assemblies ||
+        !g_api.assembly_get_image || !g_api.image_get_name) return nullptr;
+    Il2CppDomain* domain = g_api.domain_get();
+    if (!domain) return nullptr;
+    std::size_t count = 0;
+    const Il2CppAssembly** assemblies = g_api.domain_get_assemblies(domain, &count);
+    for (std::size_t index = 0; assemblies && index < count; ++index) {
+        const Il2CppImage* image = g_api.assembly_get_image(assemblies[index]);
+        const char* name = image ? g_api.image_get_name(image) : nullptr;
+        if (name && std::strcmp(name, wanted) == 0) return image;
+    }
+    return nullptr;
+}
+
+bool raw_replay_json_invoke(const MethodInfo* method, void* model,
+                            void** result, void** exception) {
+    if (!method || !model || !result || !exception || !g_api.runtime_invoke)
+        return false;
+    *result = nullptr;
+    *exception = nullptr;
+    bool ignore_names = false;
+    void* arguments[2] = {model, &ignore_names};
+    __try {
+        *result = g_api.runtime_invoke(method, nullptr, arguments, exception);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool raw_replay_string_view(void* value, const wchar_t** characters,
+                            std::int32_t* length) {
+    if (!value || !characters || !length || !g_api.string_length ||
+        !g_api.string_chars) return false;
+    __try {
+        *length = g_api.string_length(reinterpret_cast<Il2CppString*>(value));
+        *characters = g_api.string_chars(reinterpret_cast<Il2CppString*>(value));
+        return *characters && *length > 0 && *length <= 1024 * 1024;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool raw_replay_utf8(const wchar_t* characters, int length, char* destination,
+                     int capacity, int* written) {
+    if (!characters || !destination || !written || length <= 0 || capacity <= 0)
+        return false;
+    __try {
+        *written = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                       characters, length, destination,
+                                       capacity, nullptr, nullptr);
+        return *written > 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool serialize_replay_json(const MethodInfo* method, void* model,
+                           std::string& output, const char** reason) {
+    void* result = nullptr;
+    void* exception = nullptr;
+    if (!raw_replay_json_invoke(method, model, &result, &exception)) {
+        *reason = "json_serializer_native_failure";
+        return false;
+    }
+    if (exception || !result) {
+        *reason = exception ? "json_serializer_managed_exception"
+                            : "json_serializer_returned_null";
+        return false;
+    }
+    const wchar_t* characters = nullptr;
+    std::int32_t length = 0;
+    if (!raw_replay_string_view(result, &characters, &length)) {
+        *reason = "json_string_length_or_view_invalid";
+        return false;
+    }
+    // A separate raw helper catches invalid managed pointers without putting
+    // an SEH frame into this C++ function with destructible strings.
+    output.resize(static_cast<std::size_t>(length) * 4);
+    int written = 0;
+    if (!raw_replay_utf8(characters, length, output.data(),
+                         static_cast<int>(output.size()), &written)) {
+        *reason = "json_utf8_conversion_failed";
+        return false;
+    }
+    output.resize(static_cast<std::size_t>(written));
+    return true;
+}
+
+std::atomic<std::uint64_t> g_hydra_replay_captured_generation{};
+std::atomic<std::uint64_t> g_hydra_replay_attempted_generation{};
+std::atomic<std::uint64_t> g_hydra_replay_next_attempt_tick{};
+std::atomic<int> g_hydra_replay_attempt_count{};
+std::atomic_flag g_hydra_replay_capture_busy = ATOMIC_FLAG_INIT;
+
+void publish_hydra_replay_failure(std::uint64_t generation, const char* reason,
+                                  const char* type_name = "hydra_replay_source") {
+    if (!g_shared_state) return;
+    std::ostringstream output;
+    output << "{\"schema\":1,\"type\":\"" << type_name << "\""
+           << ",\"status\":\"unavailable\",\"battleGeneration\":"
+           << generation << ",\"reason\":\"" << reason << "\"}";
+    publish_shared_json(g_shared_state->replay_input, output.str());
+}
+
+// Hydra (KindId 5) and Chimera (KindId 8) share this capture; the caller
+// passes the kind its verified boss identity requires.
+void capture_hydra_replay_source(void* mode, std::uint64_t generation,
+                                 std::int32_t expected_kind = 5,
+                                 const char* type_name = "hydra_replay_source") {
+    if (!g_shared_state || !mode || !generation ||
+        g_hydra_replay_captured_generation.load(std::memory_order_acquire) == generation ||
+        g_hydra_replay_capture_busy.test_and_set(std::memory_order_acquire)) return;
+    struct BusyRelease {
+        ~BusyRelease() { g_hydra_replay_capture_busy.clear(std::memory_order_release); }
+    } release;
+    if (g_hydra_replay_attempted_generation.load(std::memory_order_acquire) != generation) {
+        g_hydra_replay_attempted_generation.store(generation, std::memory_order_release);
+        g_hydra_replay_attempt_count.store(0, std::memory_order_release);
+        g_hydra_replay_next_attempt_tick.store(0, std::memory_order_release);
+    }
+    const auto now = GetTickCount64();
+    if (g_hydra_replay_attempt_count.load(std::memory_order_acquire) >= 3 ||
+        now < g_hydra_replay_next_attempt_tick.load(std::memory_order_acquire)) return;
+    g_hydra_replay_attempt_count.fetch_add(1, std::memory_order_acq_rel);
+    g_hydra_replay_next_attempt_tick.store(now + 5000, std::memory_order_release);
+
+    const char* reason = "input_unavailable";
+    void* context = nullptr;
+    void* state = nullptr;
+    void* setup = nullptr;
+    void* parameters = nullptr;
+    void* settings = nullptr;
+    std::int32_t kind = 0;
+    std::int32_t stage = 0;
+    if (!battle_model_objects(mode, &context, &state) ||
+        !safe_read_field(context, "Setup", nullptr, setup) || !setup) {
+        reason = "active_battle_setup_unavailable";
+    } else if (!safe_read_field(setup, "KindId", nullptr, kind) || kind != expected_kind ||
+               !safe_read_field(setup, "StageId", nullptr, stage) || stage <= 0) {
+        reason = "active_battle_setup_identity_invalid";
+    } else {
+        const Il2CppImage* shared_image = replay_image("Unity.SharedModel.dll");
+        Il2CppClass* manager = shared_image && g_api.class_from_name
+            ? g_api.class_from_name(shared_image, "SharedModel", "SharedModelManager")
+            : nullptr;
+        FieldInfo* game_parameters = manager && g_api.class_get_field_from_name
+            ? g_api.class_get_field_from_name(manager, "GameParameters") : nullptr;
+        if (!safe_static_field_value(game_parameters, parameters) || !parameters ||
+            !safe_read_field(parameters, "BattleSettings", nullptr, settings) ||
+            !settings) {
+            reason = "current_login_battle_settings_unavailable";
+        } else {
+            const Il2CppImage* common_image = replay_image("Unity.Plarium.Common.dll");
+            Il2CppClass* json_main = common_image && g_api.class_from_name
+                ? g_api.class_from_name(common_image,
+                    "Plarium.Common.Serialization", "JsonMain") : nullptr;
+            const MethodInfo* to_json = json_main && g_api.class_get_method_from_name
+                ? g_api.class_get_method_from_name(json_main, "ToJsonStr", 2) : nullptr;
+            if (!to_json) {
+                reason = "original_json_serializer_unavailable";
+            } else {
+                const auto observation = raid::observation::observe_random(
+                    [mode](raid::observation::RandomFrame& frame) {
+                        void* current_context = nullptr;
+                        void* current_state = nullptr;
+                        return battle_model_objects(mode, &current_context,
+                                                    &current_state) &&
+                               read_random_frame(current_context, frame);
+                    });
+                const auto& frame = observation.frame;
+                if (!observation.available || !frame.seed_available ||
+                    !frame.setup_id_available ||
+                    frame.context != reinterpret_cast<std::uintptr_t>(context)) {
+                    reason = "stable_battle_random_identity_unavailable";
+                } else {
+                    std::string setup_json;
+                    std::string settings_json;
+                    if (!serialize_replay_json(to_json, setup, setup_json, &reason) ||
+                        !serialize_replay_json(to_json, settings, settings_json, &reason)) {
+                        // The serializer error is published after the attempt.
+                    } else {
+                        void* final_context = nullptr;
+                        void* final_state = nullptr;
+                        void* final_setup = nullptr;
+                        raid::observation::RandomFrame final_frame{};
+                        if (!battle_model_objects(mode, &final_context,
+                                                  &final_state) ||
+                            final_context != context ||
+                            !safe_read_field(final_context, "Setup", nullptr,
+                                             final_setup) ||
+                            final_setup != setup ||
+                            !read_random_frame(final_context, final_frame) ||
+                            !final_frame.seed_available ||
+                            !final_frame.setup_id_available ||
+                            final_frame.seed != frame.seed ||
+                            final_frame.setup_id != frame.setup_id) {
+                            reason = "battle_changed_during_json_serialization";
+                        } else {
+                            constexpr char hex[] = "0123456789abcdef";
+                            std::ostringstream output;
+                            output << "{\"schema\":1,\"type\":\"" << type_name << "\""
+                                   << ",\"status\":\"captured\""
+                                   << ",\"battleGeneration\":" << generation
+                                   << ",\"seed\":" << frame.seed
+                                   << ",\"stageId\":" << stage
+                                   << ",\"observedAtTick\":" << GetTickCount64()
+                                   << ",\"battleSetupId\":\"";
+                            for (const auto byte : frame.setup_id)
+                                output << hex[byte >> 4] << hex[byte & 15];
+                            output << "\",\"battleSetupsSource\":\"BattleContext.Setup.JsonMain.ToJsonStr\""
+                                   << ",\"battleSettingsSource\":\"SharedModelManager.GameParameters.BattleSettings.JsonMain.ToJsonStr\""
+                                   << ",\"battleSetupsJson\":\""
+                                   << json_escape("[" + setup_json + "]")
+                                   << "\",\"battleSettingsJson\":\""
+                                   << json_escape(settings_json) << "\"}";
+                            const std::string payload = output.str();
+                            if (payload.size() < sizeof(g_shared_state->replay_input.data)) {
+                                publish_shared_json(g_shared_state->replay_input, payload);
+                                g_hydra_replay_captured_generation.store(
+                                    generation, std::memory_order_release);
+                                diagnostic(std::string(type_name) + "_captured generation=" +
+                                           std::to_string(generation));
+                                return;
+                            }
+                            reason = "replay_input_shared_slot_capacity_exceeded";
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (g_hydra_replay_attempt_count.load(std::memory_order_acquire) >= 3)
+        publish_hydra_replay_failure(generation, reason, type_name);
+    diagnostic(std::string(type_name) + "_unavailable reason=" + reason);
+}
+
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE) && defined(RAID_HYDRA_SELECTOR_HOOK)
+#include "hydra_selector_capture.hpp"
+#endif
 
 void capture_finished_battle(void* mode);
 void refresh_result_battle_completion() {
@@ -5495,6 +5846,13 @@ void capture_finished_battle(void* mode) {
             << ",\"currentForm\":\"" << json_escape(enum_member_name(g_chimera_form_class, runtime.chimera_form_index)) << "\"}"
             << ",\"actorsAvailable\":" << (actors_read && actor_items.valid ? "true" : "false")
             << ",\"bossesAvailable\":" << (bosses_read && boss_items.valid ? "true" : "false");
+    // IsHydraBattle is not a backing field in every supported game build.
+    // Terminal snapshots retain RNG for either supported boss mode, including
+    // a final devour after the ordinary decision publisher has stopped.
+    append_battle_random_observation(summary, mode);
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE) && defined(RAID_HYDRA_SELECTOR_HOOK)
+    append_hydra_selector_history(summary, 4);
+#endif
     const auto prefix = summary.str();
     summary << ",\"heroes\":";
     append_actor_state(summary, mode, actor_items, "ally", false, true);
@@ -5662,7 +6020,10 @@ void capture_battle_state(void* mode, void* skill_data,
            << ",\"passive\":" << (passive ? "true" : "false")
            << ",\"validTargetIds\":";
     append_int_ids(output, valid_targets);
-    output << "},\"heroes\":";
+    output << '}';
+    // Both boss modes: offline parity checks compare these words per turn.
+    append_battle_random_observation(output, mode);
+    output << ",\"heroes\":";
     append_actor_state(output, mode, actors, "ally");
     output << ",\"bosses\":";
     append_actor_state(output, mode, bosses, "enemy",
@@ -5850,6 +6211,26 @@ void capture_decision_state(void* generator) {
     AcquireSRWLockExclusive(&g_result_confirmation_lock);
     g_result_confirmation.observe_running_battle();
     ReleaseSRWLockExclusive(&g_result_confirmation_lock);
+    const std::uint64_t battle_generation =
+        result_confirmation_snapshot().generation;
+    if (active_hydra || active_chimera) {
+        const char* replay_type =
+            active_hydra ? "hydra_replay_source" : "chimera_replay_source";
+        try {
+            capture_hydra_replay_source(mode, battle_generation,
+                                        active_hydra ? 5 : 8, replay_type);
+        } catch (...) {
+            // A failed optional capture must never unwind through the game's
+            // decision callback or interrupt an otherwise valid player turn.
+            g_hydra_replay_attempt_count.store(3,
+                                               std::memory_order_release);
+            try {
+                publish_hydra_replay_failure(
+                    battle_generation, "native_capture_exception", replay_type);
+            } catch (...) {
+            }
+        }
+    }
 
     const bool skill_catalog_fresh =
         g_skill_catalog_active_hero_id.load(std::memory_order_acquire) ==
@@ -5894,7 +6275,7 @@ void capture_decision_state(void* generator) {
            << ",\"bossMode\":\""
            << (runtime.hydra_battle ? "hydra" : "chimera") << "\""
            << ",\"observedAtTick\":" << GetTickCount64()
-           << ",\"battleGeneration\":" << result_confirmation_snapshot().generation
+           << ",\"battleGeneration\":" << battle_generation
            << ",\"battle\":{\"areaTypeId\":" << runtime.area_id
            << ",\"regionTypeId\":" << runtime.region_id
            << ",\"kindId\":" << runtime.kind_id
@@ -5955,6 +6336,11 @@ void capture_decision_state(void* generator) {
     } else {
         output << "[]";
     }
+    // Both boss modes: offline parity checks compare these words per turn.
+    append_battle_random_observation(output, mode);
+#if defined(RAID_HYDRA_SELECTOR_HOOK)
+    if (runtime.hydra_battle) append_hydra_selector_history(output);
+#endif
     output << ",\"heroes\":";
     append_actor_state(output, mode, actors, "ally");
     output << ",\"bosses\":";
@@ -5978,6 +6364,34 @@ void capture_decision_state(void* generator) {
     ReleaseSRWLockShared(&g_ui_state_lock);
     if (started_selection.valid && started_selection.stage_id > 0) {
         output << ",\"chimeraStageId\":" << started_selection.stage_id;
+        if (runtime.hydra_battle && started_selection.hero_count == 6) {
+            output << ",\"hydraStartSelection\":{\"stageId\":"
+                   << started_selection.stage_id << ",\"heroIds\":[";
+            for (std::size_t index = 0; index < 6; ++index) {
+                if (index) output << ',';
+                output << started_selection.hero_ids[index];
+            }
+            output << "],\"heroTypeIds\":[";
+            for (std::size_t index = 0; index < 6; ++index) {
+                if (index) output << ',';
+                output << started_selection.hero_type_ids[index];
+            }
+            output << "]}";
+        } else if (!runtime.hydra_battle && !started_selection.hydra &&
+                   started_selection.hero_count == 5) {
+            output << ",\"chimeraStartSelection\":{\"stageId\":"
+                   << started_selection.stage_id << ",\"heroIds\":[";
+            for (std::size_t index = 0; index < 5; ++index) {
+                if (index) output << ',';
+                output << started_selection.hero_ids[index];
+            }
+            output << "],\"heroTypeIds\":[";
+            for (std::size_t index = 0; index < 5; ++index) {
+                if (index) output << ',';
+                output << started_selection.hero_type_ids[index];
+            }
+            output << "]}";
+        }
     }
     std::string trial_catalog;
     std::string rotation_identity;
@@ -6046,6 +6460,429 @@ bool selection_snapshots_equal(const SelectionSnapshot& left,
            left.hero_count == right.hero_count &&
            left.hero_ids == right.hero_ids &&
            left.hero_type_ids == right.hero_type_ids;
+}
+
+// Prepared-team preview: the team the preparation screen shows, as the game
+// builds it for a battle (SiegeBuildingSlotExtensions.TeamSetup), plus each
+// hero's equipped artifacts and the localized names the tool cannot resolve
+// itself. Everything is serialized with the game's JsonMain; the tool decodes
+// it. Runs only on the game window thread, only when the selected heroes
+// change (or a failed attempt is 5 s old), and never changes game state.
+ClassLocation find_class_in_namespace(Il2CppApi& api, const char* wanted_namespace,
+                                      const char* wanted_name);
+
+struct TeamPreviewMethods {
+    bool resolved{};
+    const MethodInfo* get_heroes{};
+    const MethodInfo* get_hero{};
+    const MethodInfo* hero_power{};
+    const MethodInfo* get_equipment{};
+    const MethodInfo* hero_slot_artifact{};
+    const MethodInfo* get_relics{};
+    const MethodInfo* relics_by_hero{};
+    const MethodInfo* first_relic_id{};
+    const MethodInfo* all_relics{};
+    Il2CppClass* hero_stats_class{};
+    const MethodInfo* hero_stats_ctor{};
+    const MethodInfo* hero_stats_base{};
+    const MethodInfo* hero_stats_bonus{};
+    Il2CppClass* hero_with_form_class{};
+    const MethodInfo* hero_with_form_ctor{};
+    Il2CppClass* artifact_class{};
+    Il2CppClass* relic_class{};
+    const MethodInfo* set_icon_url{};
+    const MethodInfo* blessing_icon_url{};
+    const MethodInfo* to_json{};
+};
+
+TeamPreviewMethods& team_preview_methods() {
+    static TeamPreviewMethods methods{};
+    if (methods.resolved) return methods;
+    auto klass = [](const char* name_space, const char* name) {
+        return find_class_in_namespace(g_api, name_space, name).klass;
+    };
+    auto method = [](Il2CppClass* owner, const char* method_name, int arguments) -> const MethodInfo* {
+        return owner && g_api.class_get_method_from_name
+            ? g_api.class_get_method_from_name(owner, method_name, arguments) : nullptr;
+    };
+    Il2CppClass* guard = klass("Client.Model.Guard", "UserReadGuard");
+    Il2CppClass* heroes = klass("Client.Model.Gameplay.Heroes", "HeroesWrapperReadOnly");
+    Il2CppClass* equipment = klass("Client.Model.Gameplay.Artifacts", "EquipmentWrapperReadonly");
+    Il2CppClass* relics = klass("Client.Model.Gameplay.Relics", "RelicsWrapperReadonly");
+    methods.get_heroes = method(guard, "get_Heroes", 0);
+    // GetHero also has a Nullable<int> overload; the int one takes the id as is.
+    methods.get_hero = find_one_int_method(heroes, "GetHero");
+    methods.hero_power = method(heroes, "GetHeroPower", 1);
+    methods.get_equipment = method(guard, "get_Equipment", 0);
+    methods.hero_slot_artifact = method(equipment, "GetHeroSlotArtifact", 2);
+    methods.get_relics = method(guard, "get_Relics", 0);
+    methods.relics_by_hero = find_one_int_method(relics, "RelicsByHeroId");
+    methods.first_relic_id = find_one_int_method(relics, "GetFirstRelicByHeroId");
+    methods.all_relics = method(relics, "get_Relics", 0);
+    // The hero screen's own numbers: Base and Bonus of DefaultHeroStats.
+    methods.hero_stats_class = klass("Client.ViewModel.Contextes.HeroesInfoDialog.HeroDetails.HeroStats",
+                                     "DefaultHeroStats");
+    methods.hero_stats_ctor = method(methods.hero_stats_class, ".ctor", 0);
+    methods.hero_stats_base = method(methods.hero_stats_class, "Base", 2);
+    methods.hero_stats_bonus = method(methods.hero_stats_class, "Bonus", 4);
+    methods.hero_with_form_class = klass("Client.ViewModel.Contextes.HeroesInfoDialog.HeroAndForms", "HeroWithForm");
+    methods.hero_with_form_ctor = method(methods.hero_with_form_class, ".ctor", 2);
+    methods.artifact_class = klass("SharedModel.Meta.Artifacts", "Artifact");
+    methods.relic_class = klass("SharedModel.Meta.Relics.UserData", "Relic");
+    methods.set_icon_url = method(klass("Client.ViewModel.Contextes.Artifacts.Extensions", "ArtifactSetKindIdExtensions"),
+                                  "GetArtifactSetIconUrl", 1);
+    methods.blessing_icon_url = method(klass("Client.ViewModel.Contextes.Extensions", "BlessingTypeIdExtensions"),
+                                       "IconUrl", 1);
+    methods.to_json = method(klass("Plarium.Common.Serialization", "JsonMain"), "ToJsonStr", 2);
+    methods.resolved = methods.get_heroes && methods.get_hero && methods.get_equipment &&
+                       methods.hero_slot_artifact && methods.to_json && g_api.array_new && g_api.object_new;
+    return methods;
+}
+
+bool raw_invoke(const MethodInfo* method, void* instance, void** parameters, void** result) {
+    __try {
+        void* exception = nullptr;
+        *result = g_api.runtime_invoke(method, instance, parameters, &exception);
+        return !exception;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *result = nullptr;
+        return false;
+    }
+}
+
+// A new managed object, constructed with its .ctor.
+bool raw_construct(Il2CppClass* klass, const MethodInfo* constructor, void** parameters, void** result) {
+    __try {
+        *result = g_api.object_new(klass);
+        if (!*result) return false;
+        void* exception = nullptr;
+        g_api.runtime_invoke(constructor, *result, parameters, &exception);
+        return !exception;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *result = nullptr;
+        return false;
+    }
+}
+
+bool raw_new_object_array(Il2CppClass* element, void* const* values, std::size_t count, void** result) {
+    __try {
+        *result = g_api.array_new(element, count);
+        if (!*result) return false;
+        auto** vector = reinterpret_cast<void**>(static_cast<unsigned char*>(*result) + 32);
+        for (std::size_t index = 0; index < count; ++index) {
+            if (g_api.gc_wbarrier_set_field) g_api.gc_wbarrier_set_field(*result, &vector[index], values[index]);
+            else vector[index] = values[index];
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *result = nullptr;
+        return false;
+    }
+}
+
+bool raw_unbox_double(void* boxed, double* value) {
+    __try {
+        void* data = boxed ? g_api.object_unbox(boxed) : nullptr;
+        if (!data) return false;
+        std::memcpy(value, data, sizeof(double));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// A boxed Nullable<int> result is either null or a boxed int.
+bool raw_unbox_int(void* boxed, std::int32_t* value) {
+    __try {
+        void* data = boxed ? g_api.object_unbox(boxed) : nullptr;
+        if (!data) return false;
+        std::memcpy(value, data, sizeof(std::int32_t));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The element of a List<T> whose int field equals the wanted value.
+void* find_list_object_by_int_field(void* list, const char* field, std::int32_t wanted) {
+    Il2CppClass* list_class = nullptr;
+    std::size_t items_offset = 0, size_offset = 0, array_length = 0;
+    void* items = nullptr;
+    std::int32_t size = 0;
+    if (!safe_read(list, 0, list_class) || !list_class ||
+        !find_field_offset(list_class, "_items", "items", items_offset) ||
+        !find_field_offset(list_class, "_size", "size", size_offset) ||
+        !safe_read(list, items_offset, items) || !items || !safe_read(list, size_offset, size) ||
+        size < 0 || size > 100000 || !safe_read(items, 24, array_length)) return nullptr;
+    auto* vector = static_cast<unsigned char*>(items) + 32;
+    for (std::size_t index = 0; index < (std::min)(static_cast<std::size_t>(size), array_length); ++index) {
+        void* object = nullptr;
+        std::int32_t value = 0;
+        if (safe_read(vector, index * sizeof(void*), object) && object &&
+            safe_read_field(object, field, nullptr, value) && value == wanted) return object;
+    }
+    return nullptr;
+}
+
+bool raw_new_string(const char* value, Il2CppString** result) {
+    __try {
+        *result = g_api.string_new(value);
+        return *result != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *result = nullptr;
+        return false;
+    }
+}
+
+std::string localize_static_key(const std::string& key_text) {
+    void* localizer = g_localizer.load(std::memory_order_acquire);
+    Il2CppString* key = nullptr;
+    if (!localizer || !g_localize_method || !g_api.string_new ||
+        !raw_new_string(key_text.c_str(), &key)) return {};
+    for (std::int32_t priority = 0; priority < 2; ++priority) {
+        void* result = nullptr;
+        if (!safe_invoke_localize(localizer, g_localize_method, key, priority, &result)) continue;
+        const std::string candidate = il2cpp_string_utf8(result);
+        if (!candidate.empty() && candidate != key_text) return candidate;
+    }
+    return {};
+}
+
+std::string static_icon_url(const MethodInfo* method, std::int32_t id) {
+    void* result = nullptr;
+    void* parameters[1] = {&id};
+    return method && raw_invoke(method, nullptr, parameters, &result) && result
+        ? il2cpp_string_utf8(result) : std::string{};
+}
+
+// Nullable<int>-like field (e.g. HeroDoubleAscendData.BlessingId), read with
+// the runtime's own layout of the nullable struct.
+bool read_nullable_int_field(void* object, const char* name, std::int32_t* value) {
+    Il2CppClass* klass = nullptr;
+    if (!safe_read(object, 0, klass) || !klass || !g_api.class_get_field_from_name || !g_api.class_from_type)
+        return false;
+    FieldInfo* field = g_api.class_get_field_from_name(klass, name);
+    const Il2CppType* type = field ? g_api.field_get_type(field) : nullptr;
+    Il2CppClass* nullable = type ? g_api.class_from_type(type) : nullptr;
+    std::size_t has_value_offset = 0;
+    std::size_t value_offset = 0;
+    if (!nullable || !find_field_offset(nullable, "hasValue", nullptr, has_value_offset) ||
+        !find_field_offset(nullable, "value", nullptr, value_offset) ||
+        has_value_offset < 16 || value_offset < 16) return false;
+    const std::size_t base = g_api.field_get_offset(field);
+    bool has_value = false;
+    return safe_read(object, base + has_value_offset - 16, has_value) && has_value &&
+           safe_read(object, base + value_offset - 16, *value);
+}
+
+std::string serialized(const MethodInfo* to_json, void* value) {
+    std::string output;
+    const char* reason = nullptr;
+    return value && serialize_replay_json(to_json, value, output, &reason) ? output : std::string{};
+}
+
+std::array<std::int32_t, 6> g_team_preview_hero_ids{};
+std::uint64_t g_team_preview_tick{};
+bool g_team_preview_ok{};
+
+void reset_team_preview_capture() {
+    g_team_preview_hero_ids = {};
+    g_team_preview_tick = 0;
+    g_team_preview_ok = false;
+}
+
+void capture_team_preview(void* user, const SelectionSnapshot& snapshot) {
+    if (!g_shared_state || !user || !g_game_window ||
+        GetWindowThreadProcessId(g_game_window, nullptr) != GetCurrentThreadId()) return;
+    std::vector<std::int32_t> hero_ids;
+    for (std::size_t index = 0; index < snapshot.hero_count; ++index)
+        if (snapshot.hero_ids[index] > 0) hero_ids.push_back(snapshot.hero_ids[index]);
+    const auto now = GetTickCount64();
+    if (snapshot.hero_ids == g_team_preview_hero_ids &&
+        (g_team_preview_ok || now - g_team_preview_tick < 5000)) return;
+    g_team_preview_hero_ids = snapshot.hero_ids;
+    g_team_preview_tick = now;
+    g_team_preview_ok = false;
+
+    std::ostringstream output;
+    output << "{\"schema\":2,\"type\":\"team_preview\",\"bossMode\":\""
+           << (snapshot.hydra ? "hydra" : "chimera") << "\",\"observedAtTick\":" << now << ",\"heroIds\":[";
+    for (std::size_t index = 0; index < hero_ids.size(); ++index)
+        output << (index ? "," : "") << hero_ids[index];
+    output << ']';
+    TeamPreviewMethods& methods = team_preview_methods();
+    void* heroes = nullptr;
+    void* equipment = nullptr;
+    void* relics = nullptr;
+    const char* reason = hero_ids.empty() ? "no_heroes_selected"
+        : !methods.resolved ? "preview_methods_unavailable"
+        : !safe_runtime_invoke_object(methods.get_heroes, user, &heroes) ? "heroes_unavailable"
+        : !safe_runtime_invoke_object(methods.get_equipment, user, &equipment) ? "equipment_unavailable"
+        : nullptr;
+    if (reason) {
+        output << ",\"status\":\"unavailable\",\"reason\":\"" << reason << "\"}";
+        publish_shared_json(g_shared_state->team_preview, output.str());
+        diagnostic(std::string("team_preview_unavailable reason=") + reason);
+        return;
+    }
+    if (methods.get_relics) safe_runtime_invoke_object(methods.get_relics, user, &relics);
+    void* hero_stats = nullptr;
+    const bool stats_ready = methods.hero_stats_class && methods.hero_stats_ctor && methods.hero_stats_base &&
+                             methods.hero_stats_bonus && methods.hero_with_form_class && methods.hero_with_form_ctor &&
+                             methods.artifact_class && methods.relic_class &&
+                             raw_construct(methods.hero_stats_class, methods.hero_stats_ctor, nullptr, &hero_stats);
+
+    std::map<std::int32_t, std::string> set_names, set_icons, blessing_names, blessing_icons, relic_names,
+        mastery_names;
+    output << ",\"status\":\"captured\",\"heroes\":[";
+    bool first_hero = true;
+    for (std::int32_t hero_id : hero_ids) {
+        void* hero = nullptr;
+        void* parameters[1] = {&hero_id};
+        if (!raw_invoke(methods.get_hero, heroes, parameters, &hero) || !hero) continue;
+        output << (first_hero ? "" : ",") << "{\"heroId\":" << hero_id
+               << ",\"heroJson\":\"" << json_escape(serialized(methods.to_json, hero)) << '"';
+        first_hero = false;
+        void* power = nullptr;
+        void* power_parameters[1] = {hero};
+        double power_value = 0.0;
+        if (methods.hero_power && raw_invoke(methods.hero_power, heroes, power_parameters, &power) &&
+            raw_unbox_double(power, &power_value))
+            output << ",\"power\":" << std::fixed << std::setprecision(1) << power_value << std::defaultfloat;
+        // Equipped artifacts: slot, set, rank and rarity only.
+        std::vector<void*> equipped;
+        output << ",\"artifacts\":[";
+        for (std::int32_t kind = 1; kind <= 9; ++kind) {
+            void* artifact = nullptr;
+            void* slot_parameters[2] = {&hero_id, &kind};
+            if (!raw_invoke(methods.hero_slot_artifact, equipment, slot_parameters, &artifact) || !artifact) continue;
+            std::int32_t set_id = 0, rank = 0, rarity = 0;
+            safe_read_field(artifact, "_setKindId", nullptr, set_id);
+            safe_read_field(artifact, "_rankId", nullptr, rank);
+            safe_read_field(artifact, "_rarityId", nullptr, rarity);
+            output << (equipped.empty() ? "" : ",") << "{\"kind\":" << kind << ",\"set\":" << set_id
+                   << ",\"rank\":" << rank << ",\"rarity\":" << rarity << '}';
+            equipped.push_back(artifact);
+            if (set_id > 0 && !set_names.count(set_id)) {
+                set_names[set_id] = localize_static_key("l10n:artifact-set/name?id=" + std::to_string(set_id) + "#static");
+                set_icons[set_id] = static_icon_url(methods.set_icon_url, set_id);
+            }
+        }
+        output << ']';
+        // The relic for display: its id by hero, then the relic itself from the list.
+        void* relic_parameters[1] = {&hero_id};
+        void* boxed_relic_id = nullptr;
+        void* relic_list = nullptr;
+        std::int32_t relic_id = 0;
+        if (relics && methods.first_relic_id && methods.all_relics &&
+            raw_invoke(methods.first_relic_id, relics, relic_parameters, &boxed_relic_id) &&
+            raw_unbox_int(boxed_relic_id, &relic_id) && relic_id > 0 &&
+            safe_runtime_invoke_object(methods.all_relics, relics, &relic_list)) {
+            void* relic = find_list_object_by_int_field(relic_list, "Id", relic_id);
+            std::int32_t type_id = 0, rank = 0, level = 0;
+            if (relic && safe_read_field(relic, "TypeId", nullptr, type_id) && type_id > 0) {
+                safe_read_field(relic, "Rank", nullptr, rank);
+                safe_read_field(relic, "Level", nullptr, level);
+                output << ",\"relic\":{\"id\":" << relic_id << ",\"typeId\":" << type_id
+                       << ",\"rank\":" << rank << ",\"level\":" << level << '}';
+                if (!relic_names.count(type_id))
+                    relic_names[type_id] = localize_static_key("l10n:relic/name?id=" + std::to_string(type_id) + "#static");
+            }
+        }
+        // All of the hero's relics feed the hero screen's bonus.
+        void* hero_relics = nullptr;
+        if (relics && methods.relics_by_hero)
+            raw_invoke(methods.relics_by_hero, relics, relic_parameters, &hero_relics);
+        if (stats_ready) {
+            void* hero_with_form = nullptr;
+            std::int32_t form = 0;
+            void* form_parameters[2] = {hero, &form};
+            void* artifact_array = nullptr;
+            void* base = nullptr;
+            void* bonus = nullptr;
+            void* base_parameters[2] = {user, nullptr};
+            void* bonus_parameters[4] = {user, nullptr, nullptr, hero_relics};
+            void* no_relics = nullptr;
+            if (!hero_relics && raw_new_object_array(methods.relic_class, nullptr, 0, &no_relics))
+                bonus_parameters[3] = no_relics;
+            if (!raw_construct(methods.hero_with_form_class, methods.hero_with_form_ctor, form_parameters,
+                               &hero_with_form) ||
+                !raw_new_object_array(methods.artifact_class, equipped.data(), equipped.size(), &artifact_array)) {
+                output << ",\"statsReason\":\"hero_stats_inputs_unavailable\"";
+            } else {
+                base_parameters[1] = hero_with_form;
+                bonus_parameters[1] = hero_with_form;
+                bonus_parameters[2] = artifact_array;
+                if (!raw_invoke(methods.hero_stats_base, hero_stats, base_parameters, &base) || !base ||
+                    !raw_invoke(methods.hero_stats_bonus, hero_stats, bonus_parameters, &bonus) || !bonus) {
+                    output << ",\"statsReason\":\"hero_stats_failed\"";
+                } else {
+                    output << ",\"baseStats\":\"" << json_escape(serialized(methods.to_json, base))
+                           << "\",\"bonusStats\":\"" << json_escape(serialized(methods.to_json, bonus)) << '"';
+                }
+            }
+        } else {
+            output << ",\"statsReason\":\"hero_stats_unavailable\"";
+        }
+        output << '}';
+        // Blessing and masteries straight from the hero model.
+        void* ascend = nullptr;
+        std::int32_t blessing_id = 0;
+        if (safe_read_field(hero, "DoubleAscendData", nullptr, ascend) && ascend &&
+            read_nullable_int_field(ascend, "BlessingId", &blessing_id) && blessing_id > 0 &&
+            !blessing_names.count(blessing_id)) {
+            blessing_names[blessing_id] =
+                localize_static_key("l10n:blessing/name?id=" + std::to_string(blessing_id) + "#static");
+            blessing_icons[blessing_id] = static_icon_url(methods.blessing_icon_url, blessing_id);
+        }
+        void* mastery_data = nullptr;
+        void* mastery_list = nullptr;
+        const IntListItems masteries = safe_read_field(hero, "MasteryData", nullptr, mastery_data) && mastery_data &&
+                                       safe_read_field(mastery_data, "Masteries", nullptr, mastery_list)
+            ? read_int_list(mastery_list) : IntListItems{};
+        for (std::size_t index = 0; index < masteries.count; ++index) {
+            const std::int32_t id = masteries.values[index];
+            if (!mastery_names.count(id)) mastery_names[id] = resolve_static_skill_name(id).display;
+        }
+    }
+    output << ']';
+    if (first_hero) {
+        publish_shared_json(g_shared_state->team_preview,
+                            "{\"schema\":2,\"type\":\"team_preview\",\"status\":\"unavailable\","
+                            "\"reason\":\"heroes_not_found\"}");
+        diagnostic("team_preview_unavailable reason=heroes_not_found");
+        return;
+    }
+    auto append_map = [&](const char* name, const std::map<std::int32_t, std::string>& values, bool first) {
+        output << (first ? "" : ",") << '"' << name << "\":{";
+        bool first_value = true;
+        for (const auto& [id, value] : values) {
+            if (value.empty()) continue;
+            output << (first_value ? "" : ",") << '"' << id << "\":\"" << json_escape(value) << '"';
+            first_value = false;
+        }
+        output << '}';
+    };
+    output << ",\"names\":{";
+    append_map("sets", set_names, true);
+    append_map("blessings", blessing_names, false);
+    append_map("relics", relic_names, false);
+    append_map("masteries", mastery_names, false);
+    output << "},\"icons\":{";
+    append_map("sets", set_icons, true);
+    append_map("blessings", blessing_icons, false);
+    output << "}}";
+    const std::string payload = output.str();
+    if (payload.size() >= sizeof(g_shared_state->team_preview.data)) {
+        publish_shared_json(g_shared_state->team_preview,
+                            "{\"schema\":2,\"type\":\"team_preview\",\"status\":\"unavailable\","
+                            "\"reason\":\"team_preview_capacity_exceeded\"}");
+        return;
+    }
+    publish_shared_json(g_shared_state->team_preview, payload);
+    g_team_preview_ok = true;
+    diagnostic("team_preview_captured heroes=" + std::to_string(hero_ids.size()) +
+               " stats=" + std::to_string(stats_ready ? 1 : 0) + " bytes=" + std::to_string(payload.size()));
 }
 
 void capture_selection_state(void* self, const char* reason,
@@ -6138,6 +6975,9 @@ void capture_selection_state(void* self, const char* reason,
                 }
             }
         }
+    }
+    if (selection_user && heroes_read && heroes.valid) {
+        capture_team_preview(selection_user, snapshot);
     }
     if (acquired_selection_user) {
         if (!safe_runtime_invoke_void(g_user_read_guard_dispose_method,
@@ -6295,6 +7135,7 @@ void __fastcall hook_selection_on_enabled(void* self,
     g_last_chimera_competition_points.store(0, std::memory_order_release);
     reset_hydra_damage_tracker();
     refresh_chimera_rotation_catalog(false);
+    reset_team_preview_capture();
     capture_selection_state(self, "team_selection_enabled");
     if (g_game_window) {
         SetTimer(g_game_window, kSelectionCaptureTimerId,
@@ -6347,6 +7188,7 @@ void __fastcall hook_hydra_selection_on_enabled(void* self,
     g_last_chimera_damage.store(0, std::memory_order_release);
     g_last_chimera_competition_points.store(0, std::memory_order_release);
     reset_hydra_damage_tracker();
+    reset_team_preview_capture();
     capture_selection_state(self, "hydra_team_selection_enabled");
     if (g_game_window) {
         SetTimer(g_game_window, kSelectionCaptureTimerId,
@@ -6386,6 +7228,10 @@ void __fastcall hook_hydra_selection_refresh(void* self, void* user,
 
 void __fastcall hook_hydra_selection_start_battle_click(
     void* self, const MethodInfo* method) {
+    // The selection timer may be up to 500 ms behind a final team edit.
+    // Read the same UI state synchronously before retaining the start team.
+    capture_selection_state(self, "hydra_team_selection_before_start", nullptr,
+                            false);
     AcquireSRWLockExclusive(&g_ui_state_lock);
     g_last_started_selection = g_selection_snapshot;
     ReleaseSRWLockExclusive(&g_ui_state_lock);
@@ -6644,6 +7490,39 @@ void* native_method_pointer(const MethodLocation& location) {
                              PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     return (memory.Protect & executable) ? pointer : nullptr;
 }
+
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE) && defined(RAID_HYDRA_SELECTOR_HOOK)
+bool install_hydra_mark_selector_hook(const MethodLocation& location) {
+    if (!location.method || location.parameter_count != 2) return false;
+    using MethodFlags = std::uint32_t (*)(const MethodInfo*, std::uint32_t*);
+    const auto flags = Il2CppApi::resolve<MethodFlags>(g_api.module, "il2cpp_method_get_flags");
+    std::uint32_t implementation_flags = 0;
+    if (!flags || !(flags(location.method, &implementation_flags) & 0x10)) return false;
+    auto type_name = [](const Il2CppType* type) {
+        char* text = g_api.type_get_name(type);
+        const std::string result = text ? text : "";
+        if (text) g_api.free(text);
+        return result;
+    };
+    const auto first = type_name(g_api.method_get_param(location.method, 0));
+    const auto second = type_name(g_api.method_get_param(location.method, 1));
+    const auto result = type_name(g_api.method_get_return_type(location.method));
+    const std::string hero = "SharedModel.Battle.Core.Hero.BattleHero";
+    if ((first != "System.Collections.Generic.List<" + hero + ">" &&
+         first != "System.Collections.Generic.List`1<" + hero + ">") ||
+        second != "SharedModel.Battle.Core.Skill.EffectContexts.EffectContext" || result != hero) {
+        diagnostic("hydra_mark_selector_signature_mismatch");
+        return false;
+    }
+    void* pointer = native_method_pointer(location);
+    if (!pointer || MH_CreateHook(pointer, &hook_hydra_mark_selector,
+        reinterpret_cast<void**>(&g_original_hydra_mark_selector)) != MH_OK) return false;
+    if (MH_EnableHook(pointer) != MH_OK) { MH_RemoveHook(pointer); return false; }
+    g_hydra_mark_selector_hook_installed.store(true, std::memory_order_release);
+    diagnostic("hydra_mark_selector_observation_installed");
+    return true;
+}
+#endif
 
 bool install_result_ui_hooks(const std::array<MethodLocation, 4>& methods) {
     const std::array<void*, 4> replacements{
@@ -8318,6 +9197,12 @@ DWORD WINAPI probe_thread(void*) {
             hydra_selection_on_enabled, hydra_selection_on_disabled,
             hydra_selection_refresh, hydra_selection_start_battle_click,
             hydra_finish_total_damage, hydra_damage_counter_change);
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE) && defined(RAID_HYDRA_SELECTOR_HOOK)
+    const auto hydra_mark_processor = find_class_in_namespace(api,
+        "SharedModel.Battle.Core.Skill.EffectProcessing.Processors", "PlaceHungerCounterProcessor");
+    const bool hydra_mark_selector_installed = hooks_installed && install_hydra_mark_selector_hook(
+        find_method_by_name(api, hydra_mark_processor.klass, "RandomHungerVictimSelectedFrom"));
+#endif
     if (hooks_installed) install_result_ui_hooks({battle_finish_on_enabled,
         find_method_by_name(api, battle_finish_alliance_chimera.klass, "OnDisabled"),
         find_method_by_name(api, battle_finish_alliance_hydra.klass, "OnEnabled"),
@@ -8343,6 +9228,9 @@ DWORD WINAPI probe_thread(void*) {
     append_bool(output, "captureHooksInstalled", hooks_installed);
     append_bool(output, "hydraSelectionHooksInstalled",
                 hydra_selection_hooks_installed);
+#if defined(RAID_HYDRA_RESEARCH_CAPTURE) && defined(RAID_HYDRA_SELECTOR_HOOK)
+    append_bool(output, "hydraMarkSelectorObservationInstalled", hydra_mark_selector_installed);
+#endif
     append_bool(output, "hydraDamageCounterHookInstalled",
                 g_hydra_damage_counter_hook_installed.load(
                     std::memory_order_acquire));

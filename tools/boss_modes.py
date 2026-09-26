@@ -176,7 +176,6 @@ def strategy_template(mode: Any = "chimera") -> dict[str, Any]:
         objectives.update(
             {
                 "mandatoryTrialIds": [],
-                "earlyRetryConditions": [],
                 "onMandatoryTrialImpossible": "free_regroup_and_retry_manual",
             }
         )
@@ -373,6 +372,7 @@ def sanitize_strategy_for_mode(
 
     visit(result.get("rules"))
     visit(result.get("strategyTree"))
+    visit(result.get("strategyFlow"))
     return result
 
 

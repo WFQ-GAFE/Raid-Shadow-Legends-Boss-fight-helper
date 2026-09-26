@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import chimera_web as web
 import controller_manager as manager_module
-from agent_ipc import AgentIpc, DecisionJsonSlot
+from agent_ipc import AGENT_BUILD_ID, AgentIpc, DecisionJsonSlot
 from boss_modes import default_store, normalize_hydra_head, strategy_template
 from catalog_stream import static_entity
 from controller_manager import ControllerManager
@@ -29,7 +29,8 @@ def test_cancel_before_spawn() -> None:
     with (
         patch.object(manager_module, "require_expected_account"),
         patch.object(manager, "_run_injector", return_value=(SimpleNamespace(returncode=0),
-            {"agentLoaded": True, "agentCompatible": True, "agentReady": True})),
+            {"agentLoaded": True, "agentCompatible": True, "agentReady": True,
+             "agentStatus": {"compatible": True, "buildId": AGENT_BUILD_ID}})),
         patch.object(manager_module, "worker_command", side_effect=worker),
         patch.object(manager_module.subprocess, "Popen") as launch,
     ):
@@ -68,7 +69,8 @@ def test_cancel_during_process_handoff() -> None:
     with (
         patch.object(manager_module, "require_expected_account"),
         patch.object(manager, "_run_injector", return_value=(SimpleNamespace(returncode=0),
-            {"agentLoaded": True, "agentCompatible": True, "agentReady": True})),
+            {"agentLoaded": True, "agentCompatible": True, "agentReady": True,
+             "agentStatus": {"compatible": True, "buildId": AGENT_BUILD_ID}})),
         patch.object(manager_module, "worker_command", return_value=["offline-worker"]),
         patch.object(manager_module.subprocess, "Popen", side_effect=spawn),
     ):

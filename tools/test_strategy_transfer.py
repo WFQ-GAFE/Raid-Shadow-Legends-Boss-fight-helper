@@ -13,9 +13,11 @@ def main() -> None:
         os.environ["CHIMERA_RESOURCE_ROOT"] = str(resource_root)
 
         from chimera_web import ChimeraService, strategy_template
+        from team_preview import TeamSnapshotStore
 
         service = object.__new__(ChimeraService)
         service.lock = threading.RLock()
+        service.team_snapshots = TeamSnapshotStore(Path(temporary) / "snapshots")
         config = strategy_template("hydra")
         config["name"] = "Portable Hydra"
         config["team"] = {
@@ -60,6 +62,25 @@ def main() -> None:
             assert "Boss" in str(error)
         else:
             raise AssertionError("cross-mode import must be rejected")
+
+        # The author's prepared team travels with the export, without the
+        # account's hero and artifact ids, and stays with the imported copy.
+        assert "teamSnapshot" not in document
+        service.team_snapshots.remember({
+            "status": "captured", "bossMode": "hydra", "teamKey": "k", "names": {"sets": {"47": "Set"}},
+            "heroes": [{"heroId": 1001 + index, "typeId": type_id, "level": 60,
+                        "sets": [{"set": 47, "pieces": 4}], "stats": {"total": [1.0] * 10}}
+                       for index, type_id in enumerate([300, 100, 200])]})
+        shared = service.export_strategy_profile("default", "hydra")
+        snapshot = shared["teamSnapshot"]
+        assert [hero["typeId"] for hero in snapshot["heroes"]] == [300, 100, 200]
+        assert all("heroId" not in hero and hero["sets"] == [{"set": 47, "pieces": 4}] for hero in snapshot["heroes"])
+        received = service.import_strategy_profile(shared, "hydra")
+        reference = received["config"]["referenceTeam"]
+        assert reference["heroes"][1]["stats"]["total"][0] == 1.0 and reference["names"]["sets"]["47"] == "Set"
+        service.team_snapshots = TeamSnapshotStore(Path(temporary) / "other")
+        again = service.export_strategy_profile(received["activeStrategyId"], "hydra")
+        assert again["teamSnapshot"]["heroes"][0]["typeId"] == 300
     print("strategy-transfer-tests-ok")
 
 

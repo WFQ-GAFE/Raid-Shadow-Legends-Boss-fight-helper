@@ -46,7 +46,7 @@ def decision_context(state: dict) -> dict:
             row["challenges"] = [pick(trial, ("id", "name", "activeInChain", "eligibleNow", "completed", "progressRatio", "possible", "impossible", "lastEligibleBossTurn", "impossibilityReason"))
                                  for trial in entity.get("challenges", [])[:128]]
             entities.append(row)
-    return {
+    context = {
         "activeHero": pick(state, ("activeHeroId", "activeHeroTypeId", "activeHeroName", "activeHeroTurnCount", "activeHeroFormIndex")),
         "battle": pick(state.get("battle"), ("kind", "round", "turn", "playerTurnCount", "currentDamage", "finished")),
         "battleGeneration": state.get("battleGeneration"),
@@ -57,6 +57,16 @@ def decision_context(state: dict) -> dict:
                    for skill in state.get("skills", [])[:16]],
         "reservedStrictSkillTypeIds": state.get("_reservedStrictSkillTypeIds", []),
     }
+    if state.get("bossMode") == "hydra":
+        # The normal controller already receives this stable native checkpoint.
+        # Preserve it with the submitted decision so a sidecar stopping or
+        # missing a publication does not erase every later RNG comparison.
+        context["battleRandom"] = pick(state.get("battleRandom"), (
+            "schema", "available", "source", "capturePoint", "readStatus",
+            "words", "turn", "playerTurnCount", "seedAvailable", "seed",
+            "battleSetupIdAvailable", "battleSetupId",
+        ))
+    return context
 
 
 def record_rule(state: dict, rule: Any, index: int, decision: Any,
@@ -101,6 +111,8 @@ def decision_details(state: dict, decision: Any) -> dict:
         "targetId": target,
         "legalTargetIds": targets if isinstance(targets, list) else [],
         "rules": state.get("_decisionTrace", []),
+        "flowTrace": state.get("_flowTrace", []),
+        "flowRevision": state.get("_flowRevision"),
         "status": "selected" if decision is not None else "waiting",
         "skillSlot": skill.get("slot"), "skillTypeId": skill.get("typeId"),
         "context": decision_context(state),

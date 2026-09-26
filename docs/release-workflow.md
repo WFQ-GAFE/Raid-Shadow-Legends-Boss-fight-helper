@@ -1,14 +1,16 @@
 # 通用 release
 
-固定启动文件：`build\release\AllianceBossStrategyStudio.exe`。
+固定启动文件：`build\release\RSL-Boss-helper.exe`。
 
-在 Windows 中为这个文件创建桌面快捷方式。不要把 EXE 本身复制到桌面，也不要让快捷方式指向带版本号的旧文件；快捷方式必须继续指向上述固定路径。当前程序版本为 1.0.5，以后升级版本时该路径也不变。策略和日志继续使用原用户数据目录。
+在 Windows 中为这个文件创建桌面快捷方式。不要把 EXE 本身复制到桌面，也不要让快捷方式指向带版本号的旧文件；快捷方式必须继续指向上述固定路径。当前程序版本为 1.1.0，以后升级版本时该路径也不变。策略和日志继续使用原用户数据目录。
+
+1.1.0 起工具由 Alliance Boss Strategy Studio 改名为 RSL-Boss-helper，固定入口随之改为 `RSL-Boss-helper.exe`；旧入口 `AllianceBossStrategyStudio.exe` 保留原样、不再更新，已有快捷方式需改为指向新入口一次。
 
 ## 发布流程
 
 `tools/build_chimera_desktop.ps1` 默认先将单文件 EXE 构建到 `out/chimera-desktop/packages/<构建时间>/`，成功后调用 `tools/publish_chimera_release.py` 更新固定入口。
 
-发布会校验新包、备份之前的固定入口，再原子替换并核对结果。版本、发布时间和 SHA-256 写入 `build/release/latest.json`，校验值同时写入 `AllianceBossStrategyStudio.sha256`。旧入口保存在 `build/release/archive`，不自动删除。已有的带版本号 EXE 作为历史文件保留，不是后续启动入口。
+发布会校验新包、备份之前的固定入口，再原子替换并核对结果。版本、发布时间和 SHA-256 写入 `build/release/latest.json`，校验值同时写入 `RSL-Boss-helper.sha256`。旧入口保存在 `build/release/archive`，不自动删除。已有的带版本号 EXE 作为历史文件保留，不是后续启动入口。
 
 如果需要先核对包内容，可使用 `-SkipPublish` 构建，验证后调用发布脚本。`-OutputDirectory` 只控制构建包的输出位置，不改变固定 release 的目标路径；`-OneDir` 需要整个程序目录，不能发布到本单文件入口。
 

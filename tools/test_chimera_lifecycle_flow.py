@@ -12,7 +12,6 @@ from chimera_controller import (
     ObjectiveReport,
     TakeoverInterrupted,
     account_binding,
-    evaluate_early_retry_trigger,
     evaluate_hydra_devour_retry_trigger,
     free_regroup_and_retry_manual,
     lifecycle_nonce,
@@ -747,97 +746,37 @@ def test_retry_success_updates_session_budget() -> None:
     regroup.assert_called_once()
 
 
-def test_early_retry_uses_explicit_turn_and_trial_deadline() -> None:
+def test_battle_forecast_retry_reuses_verified_regroup_path() -> None:
+    from chimera_forecast_live import ChimeraForecastRetry
+
     config = {
         "mode": "execute",
-        "objectives": {
-            "mandatoryTrialIds": [8000607],
-            "earlyRetryConditions": [
-                {
-                    "bossTurnAtLeast": 5,
-                    "mode": "any",
-                    "trialIds": [8000607, 8000608],
-                }
-            ],
-            "maxRegroupRetries": 2,
-        },
+        "objectives": {"mandatoryTrialIds": [8000607], "maxRegroupRetries": 2},
         "safety": {"requireFreshSnapshotMs": 500},
     }
-    state = {
-        "pid": 1,
-        "chimera": {"turnCount": 4},
-        "bosses": [
-            {
-                "id": 5,
-                "challenges": [
-                    {"id": 8000607, "completed": True},
-                    {"id": 8000608, "completed": False},
-                ],
-            }
-        ],
-    }
-    assert evaluate_early_retry_trigger(config, state) is None
-    state["chimera"]["turnCount"] = 5
-    trigger = evaluate_early_retry_trigger(config, state)
-    assert trigger is not None
-    assert trigger.incomplete_trial_ids == (8000608,)
-
-    config["objectives"]["earlyRetryConditions"][0]["mode"] = "all"
-    assert evaluate_early_retry_trigger(config, state) is None
-    state["bosses"][0]["challenges"][0]["completed"] = False
-    assert evaluate_early_retry_trigger(config, state) is not None
-    state["bosses"][0]["challenges"].pop()
-    assert evaluate_early_retry_trigger(config, state) is None
-
-
-def test_early_retry_reuses_verified_regroup_path() -> None:
-    ipc = FakeIpc(active_lifecycle("battle", {"battle": {"context": 1001}}))
-    config = {
-        "mode": "execute",
-        "objectives": {
-            "mandatoryTrialIds": [8000607],
-            "earlyRetryConditions": [
-                {"bossTurnAtLeast": 5, "mode": "any", "trialIds": [8000607]}
-            ],
-            "maxRegroupRetries": 2,
-        },
-        "safety": {"requireFreshSnapshotMs": 500},
-    }
-    state = {
-        "pid": 1,
-        "chimera": {"turnCount": 5},
-        "bosses": [
-            {"id": 5, "challenges": [{"id": 8000607, "completed": False}]}
-        ],
-    }
-    report = ObjectiveReport(
-        mandatory_trial_ids=(8000607,),
-        completed_trial_ids=(),
-        missing_trial_ids=(8000607,),
-        impossible_trial_ids=(),
-        current_damage=0,
-        minimum_damage=0,
-    )
-    runtime = {"regroupRetries": 0}
-    with (
-        patch("chimera_controller.require_takeover_active"),
-        patch("chimera_controller.safety_reason", return_value=None),
-        patch("chimera_controller.evaluate_objectives", return_value=report),
-        patch("chimera_controller.free_regroup_and_retry_manual") as regroup,
-    ):
-        submitted = process_state(
-            config,
-            state,
-            agent=AGENT,
-            ipc=ipc,
-            session_id=SESSION,
-            execute_requested=True,
-            nonce=13,
-            runtime_state=runtime,
-        )
-    assert submitted is False
-    assert runtime["regroupRetries"] == 1
-    regroup.assert_called_once()
+    state = {"pid": 1, "chimera": {"turnCount": 1}, "bosses": []}
+    for behavior, expected in (("free_regroup_and_retry_manual", "retry"), ("free_regroup_and_stop", "stop")):
+        retry = ChimeraForecastRetry(cause="mandatory", behavior=behavior, message="m", record_id="battle-1")
+        runtime = {"regroupRetries": 0}
+        with (
+            patch("chimera_controller.require_takeover_active"),
+            patch("chimera_controller.safety_reason", return_value=None),
+            patch("chimera_controller.observe_chimera_forecast", return_value=retry),
+            patch("chimera_controller.free_regroup_and_retry_manual") as regroup,
+            patch("chimera_controller.free_regroup_and_stop") as regroup_and_stop,
+            patch("chimera_controller.evaluate") as evaluate_rules,
+        ):
+            try:
+                submitted = process_state(
+                    config, state, agent=AGENT, ipc=FakeIpc(active_lifecycle("battle", {"battle": {"context": 1}})),
+                    session_id=SESSION, execute_requested=True, nonce=14, runtime_state=runtime)
+            except Exception as error:  # FreeRegroupCompleted ends the stop variant.
+                assert expected == "stop" and type(error).__name__ == "FreeRegroupCompleted"
+            else:
+                assert expected == "retry" and submitted is False and runtime["regroupRetries"] == 1
+        assert regroup.call_count == (expected == "retry")
+        assert regroup_and_stop.call_count == (expected == "stop")
+        evaluate_rules.assert_not_called()
 
 
 def test_hydra_result_holds_after_damage_target() -> None:
@@ -1124,8 +1063,6 @@ def main() -> int:
     test_hydra_devour_retry_accepts_partial_live_team()
     test_retry_budget_stops_before_mutation()
     test_retry_success_updates_session_budget()
-    test_early_retry_uses_explicit_turn_and_trial_deadline()
-    test_early_retry_reuses_verified_regroup_path()
     test_hydra_result_holds_after_damage_target()
     test_chimera_result_restart_uses_native_result_action()
     test_hydra_result_retries_below_damage_target()

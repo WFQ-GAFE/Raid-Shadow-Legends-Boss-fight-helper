@@ -20,7 +20,7 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
-from agent_ipc import AGENT_BUILD_ID, COMMAND_VERSION, AgentIpc, read_agent_status
+from agent_ipc import AGENT_BUILD_ID, COMMAND_VERSION, AgentIpc, read_agent_status, reload_block_reason
 from chimera_inventory import inspect_pe
 from raid_processes import is_supported_raid_executable, raid_processes
 
@@ -1055,6 +1055,16 @@ def main() -> int:
 
     reload_result: dict[str, object] | None = None
     if args.reload:
+        status = read_agent_status(args.pid)
+        reason = reload_block_reason(status)
+        if reason:
+            return fail(
+                reason,
+                output,
+                pid=args.pid,
+                action="fully_close_and_restart_raid",
+                agentStatus=status,
+            )
         try:
             reload_result = unload(args.pid, agent.name, agent)
         except RuntimeError as error:

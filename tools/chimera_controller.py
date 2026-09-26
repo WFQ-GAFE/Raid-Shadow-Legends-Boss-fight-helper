@@ -688,10 +688,9 @@ class SkillCapabilityMemory:
         memory.dirty = False
         return memory
 
-    def save_if_changed(self, path: Path) -> bool:
-        if not self.dirty:
-            return False
-        payload = {
+    def payload(self) -> dict[str, Any]:
+        """The persisted form (also used for simulation snapshots)."""
+        return {
             "version": 2,
             "updatedAt": datetime.now(timezone.utc).isoformat(),
             "skills": {
@@ -703,6 +702,11 @@ class SkillCapabilityMemory:
                 for skill_type_id, statistics in sorted(self._performance.items())
             },
         }
+
+    def save_if_changed(self, path: Path) -> bool:
+        if not self.dirty:
+            return False
+        payload = self.payload()
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(
@@ -924,16 +928,6 @@ class ObjectiveReport:
 
 
 @dataclass(frozen=True)
-class EarlyRetryTrigger:
-    condition_index: int
-    boss_turn: int
-    boss_turn_at_least: int
-    mode: str
-    trial_ids: tuple[int, ...]
-    incomplete_trial_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True)
 class HydraDevourRetryTrigger:
     condition_index: int
     mark_index: int
@@ -942,6 +936,37 @@ class HydraDevourRetryTrigger:
     actual_hero_type_id: int
     actual_hero_name: str
     observed_sequence: tuple[str, ...]
+    mark_limit: int | None = None
+
+
+# isAnyOf/isNoneOf constrain one mark position; neverMarked forbids the
+# selected heroes as any mark target (optionally within the first N marks).
+HYDRA_DEVOUR_RELATIONS = frozenset({"isAnyOf", "isNoneOf", "neverMarked"})
+
+
+def hydra_devour_relation(condition: dict[str, Any]) -> str:
+    relation = condition.get("relation")
+    return relation if relation in HYDRA_DEVOUR_RELATIONS else "isNoneOf"
+
+
+def hydra_devour_mark_limit(condition: dict[str, Any]) -> int | None:
+    limit = condition.get("markLimit")
+    return (
+        limit
+        if isinstance(limit, int) and not isinstance(limit, bool) and 1 <= limit <= 100
+        else None
+    )
+
+
+def hydra_devour_requirement_text(
+    relation: str, hero_labels: str, mark_limit: int | None = None
+) -> str:
+    if relation == "isAnyOf":
+        return f"该位置必须是以下英雄之一：{hero_labels}"
+    if relation == "neverMarked":
+        scope = f"前 {mark_limit} 个标记内" if mark_limit else "整场战斗中"
+        return f"以下英雄{scope}不能成为吞噬目标：{hero_labels}"
+    return f"该位置不能是以下英雄之一：{hero_labels}"
 
 
 @dataclass(frozen=True)
@@ -1101,32 +1126,6 @@ def validate_strategy_config(
         trial_ids = configured_trial_ids(raw_trial_ids)
         if len(trial_ids) != len(raw_trial_items):
             raise ValueError("必要试炼 ID 必须是互不重复的正整数")
-        early_retry_conditions = objectives.get("earlyRetryConditions", [])
-        if not isinstance(early_retry_conditions, list):
-            raise ValueError("earlyRetryConditions 必须是数组")
-        if len(early_retry_conditions) > 20:
-            raise ValueError("提前重整条件最多允许 20 条")
-        for index, condition in enumerate(early_retry_conditions):
-            path = f"earlyRetryConditions[{index}]"
-            if not isinstance(condition, dict):
-                raise ValueError(f"{path} 必须是对象")
-            threshold = condition.get("bossTurnAtLeast")
-            if (
-                not isinstance(threshold, int)
-                or isinstance(threshold, bool)
-                or threshold < 0
-            ):
-                raise ValueError(f"{path}.bossTurnAtLeast 必须是非负整数")
-            if condition.get("mode", "any") not in {"any", "all"}:
-                raise ValueError(f"{path}.mode 只允许 any 或 all")
-            raw_ids = condition.get("trialIds", [])
-            condition_trial_ids = configured_trial_ids(raw_ids)
-            if (
-                not isinstance(raw_ids, list)
-                or not condition_trial_ids
-                or len(condition_trial_ids) != len(raw_ids)
-            ):
-                raise ValueError(f"{path}.trialIds 必须是非空且互不重复的正整数数组")
 
     minimum_damage = objectives.get("minimumDamage", 0)
     if (
@@ -1149,6 +1148,8 @@ def validate_strategy_config(
             "free_regroup_and_stop",
         }:
             raise ValueError("未知的必要试炼失败处理方式")
+        if not isinstance(objectives.get("battleForecast", True), bool):
+            raise ValueError("battleForecast 必须是布尔值")
     else:
         devour_conditions = objectives.get("devourOrderRetryConditions", [])
         if not isinstance(devour_conditions, list):
@@ -1159,18 +1160,27 @@ def validate_strategy_config(
             path = f"devourOrderRetryConditions[{index}]"
             if not isinstance(condition, dict):
                 raise ValueError(f"{path} 必须是对象")
-            mark_index = condition.get("markIndex")
-            if (
-                not isinstance(mark_index, int)
-                or isinstance(mark_index, bool)
-                or not 1 <= mark_index <= 100
-            ):
-                raise ValueError(f"{path}.markIndex 必须是 1 到 100 的整数")
-            if condition.get("relation", "isNoneOf") not in {
-                "isAnyOf",
-                "isNoneOf",
-            }:
-                raise ValueError(f"{path}.relation 只允许 isAnyOf 或 isNoneOf")
+            relation = condition.get("relation", "isNoneOf")
+            if relation not in HYDRA_DEVOUR_RELATIONS:
+                raise ValueError(
+                    f"{path}.relation 只允许 isAnyOf、isNoneOf 或 neverMarked"
+                )
+            if relation == "neverMarked":
+                mark_limit = condition.get("markLimit")
+                if mark_limit is not None and (
+                    not isinstance(mark_limit, int)
+                    or isinstance(mark_limit, bool)
+                    or not 1 <= mark_limit <= 100
+                ):
+                    raise ValueError(f"{path}.markLimit 必须是 1 到 100 的整数")
+            else:
+                mark_index = condition.get("markIndex")
+                if (
+                    not isinstance(mark_index, int)
+                    or isinstance(mark_index, bool)
+                    or not 1 <= mark_index <= 100
+                ):
+                    raise ValueError(f"{path}.markIndex 必须是 1 到 100 的整数")
             raw_ids = condition.get("heroTypeIds", [])
             hero_type_ids = tuple(
                 dict.fromkeys(
@@ -1185,6 +1195,9 @@ def validate_strategy_config(
                 raise ValueError(
                     f"{path}.heroTypeIds 必须是非空且互不重复的正整数数组"
                 )
+        forecast = objectives.get("devourOrderForecast", False)
+        if not isinstance(forecast, bool):
+            raise ValueError("devourOrderForecast 必须是布尔值")
         behavior = objectives.get(
             "onTeamDefeatedBeforeMinimumDamage",
             "free_regroup_and_retry_manual",
@@ -1216,6 +1229,7 @@ def validate_strategy_config(
 
     tree = config.get("strategyTree")
     rules = config.get("rules")
+    require_list_execution(config)
     if tree is not None and not isinstance(tree, dict):
         raise ValueError("strategyTree 必须是对象")
     if tree is None and not isinstance(rules, list):
@@ -1526,10 +1540,15 @@ def is_battle_decision_state(state: Any) -> bool:
 
 
 def latest_account_state(pid: int) -> dict[str, Any] | None:
+    """The agent's account slot, or None when no readable agent state exists.
+
+    An older agent (another shared-state layout) also reads as None, so the
+    caller's version check can explain it instead of a raw access error.
+    """
     try:
         with AgentIpc(pid) as ipc:
             return ipc.account()
-    except FileNotFoundError:
+    except OSError:
         return None
 
 
@@ -1718,6 +1737,41 @@ def evaluate_hydra_devour_retry_trigger(
     for index, condition in enumerate(conditions):
         if index in evaluated or not isinstance(condition, dict):
             continue
+        if hydra_devour_relation(condition) == "neverMarked":
+            forbidden = tuple(
+                value
+                for value in condition.get("heroTypeIds", [])
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            )
+            mark_limit = hydra_devour_mark_limit(condition)
+            considered = sequence if mark_limit is None else sequence[:mark_limit]
+            hit = next(
+                (
+                    (position, item)
+                    for position, item in enumerate(considered, 1)
+                    if item.get("heroTypeId") in forbidden
+                ),
+                None,
+            )
+            if hit is None:
+                if mark_limit is not None and len(sequence) >= mark_limit:
+                    evaluated.add(index)
+                continue
+            evaluated.add(index)
+            position, actual = hit
+            return HydraDevourRetryTrigger(
+                condition_index=index,
+                mark_index=position,
+                relation="neverMarked",
+                expected_hero_type_ids=forbidden,
+                actual_hero_type_id=actual["heroTypeId"],
+                actual_hero_name=str(actual.get("name") or f"英雄 {actual['heroTypeId']}"),
+                observed_sequence=tuple(
+                    str(item.get("name") or f"英雄 {item.get('heroTypeId', '?')}")
+                    for item in sequence
+                ),
+                mark_limit=mark_limit,
+            ), new_mark, armed
         mark_index = condition.get("markIndex")
         if (
             not isinstance(mark_index, int)
@@ -2174,58 +2228,6 @@ def evaluate_objectives(
             else 0.0
         ),
     )
-
-
-def evaluate_early_retry_trigger(
-    config: dict[str, Any], state: dict[str, Any]
-) -> EarlyRetryTrigger | None:
-    """Return the first explicit turn/trial deadline that currently matches.
-
-    Trial state must be present in the live snapshot.  This prevents an
-    incomplete initialization snapshot from being interpreted as a failed
-    trial and triggering a regroup.
-    """
-    objectives = config.get("objectives", {})
-    if not isinstance(objectives, dict):
-        return None
-    conditions = objectives.get("earlyRetryConditions", [])
-    if not isinstance(conditions, list) or not conditions:
-        return None
-    boss_turn = state.get("chimera", {}).get("turnCount")
-    if not isinstance(boss_turn, int) or isinstance(boss_turn, bool):
-        return None
-    statuses = trial_status_by_id(state)
-    for index, condition in enumerate(conditions):
-        if not isinstance(condition, dict):
-            continue
-        threshold = condition.get("bossTurnAtLeast")
-        trial_ids = configured_trial_ids(condition.get("trialIds", []))
-        if (
-            not isinstance(threshold, int)
-            or isinstance(threshold, bool)
-            or threshold < 0
-            or boss_turn < threshold
-            or not trial_ids
-            or any(trial_id not in statuses for trial_id in trial_ids)
-        ):
-            continue
-        incomplete = tuple(
-            trial_id
-            for trial_id in trial_ids
-            if statuses[trial_id].get("completed") is not True
-        )
-        mode = "all" if condition.get("mode") == "all" else "any"
-        matched = bool(incomplete) if mode == "any" else len(incomplete) == len(trial_ids)
-        if matched:
-            return EarlyRetryTrigger(
-                condition_index=index,
-                boss_turn=boss_turn,
-                boss_turn_at_least=threshold,
-                mode=mode,
-                trial_ids=trial_ids,
-                incomplete_trial_ids=incomplete,
-            )
-    return None
 
 
 def match_effect_condition(
@@ -6393,6 +6395,29 @@ STRICT_RESERVATION_SCOPE_KEYS = DEFAULT_POLICY_SCOPE_KEYS | frozenset(
 )
 
 
+def is_basic_skill(action: dict[str, Any], state: dict[str, Any]) -> bool:
+    """A basic (slot 1, no cooldown) skill is never reserved for a rule.
+
+    It has no cooldown to preserve, and it is the one skill an actor can
+    always use: reserving it for a future strict or trial condition leaves the
+    actor with no action whenever its other skills are cooling down.
+    """
+    if action.get("skillSlot") == 1:
+        return True
+    skill_type_id = action.get("skillTypeId")
+    live_skill = next(
+        (
+            skill
+            for skill in state.get("skills", [])
+            if isinstance(skill, dict) and skill.get("typeId") == skill_type_id
+        ),
+        None,
+    )
+    if not isinstance(live_skill, dict):
+        return False
+    return live_skill.get("slot") == 1 or live_skill.get("defaultCooldown") == 0
+
+
 def strict_rule_reserved_skill_ids(
     rules: list[Any], state: dict[str, Any]
 ) -> set[int]:
@@ -6413,26 +6438,10 @@ def strict_rule_reserved_skill_ids(
             state,
         ):
             continue
-        # A basic skill has no cooldown to preserve. Reserving an A1 for a
-        # future strict condition can deadlock the actor when every other skill
-        # is cooling down, even though that A1 will still be available in the
-        # intended trigger window.
-        skill_slot = action.get("skillSlot")
-        if skill_slot == 1:
+        if is_basic_skill(action, state):
             continue
         skill_type_id = action.get("skillTypeId")
         if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
-            live_skill = next(
-                (
-                    skill
-                    for skill in state.get("skills", [])
-                    if isinstance(skill, dict)
-                    and skill.get("typeId") == skill_type_id
-                ),
-                None,
-            )
-            if isinstance(live_skill, dict) and live_skill.get("slot") == 1:
-                continue
             reserved.add(skill_type_id)
     return reserved
 
@@ -6454,6 +6463,8 @@ def trial_rule_skill_owners(rules: list[Any], state: dict[str, Any]) -> dict[int
             continue
         action = rule.get("action", {})
         if not isinstance(action, dict) or action.get("type") not in {"cast", "transform"}:
+            continue
+        if is_basic_skill(action, state):
             continue
         skill_id = action.get("skillTypeId")
         if isinstance(skill_id, int) and not isinstance(skill_id, bool):
@@ -6868,12 +6879,20 @@ def _evaluate_strategy_node(
     )
 
 
+def require_list_execution(config: dict[str, Any]) -> None:
+    if config.get("executionMode", "list") != "list":
+        raise ValueError("1.0.6 已移除流程图执行。请使用原列表策略；旧流程文件已保留，不会自动替换为其他动作。")
+
+
 def evaluate(
     config: dict[str, Any],
     state: dict[str, Any],
     capability_memory: SkillCapabilityMemory | None = None,
     planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
+    require_list_execution(config)
+    state.pop("_flowTrace", None)
+    state.pop("_flowRevision", None)
     automatic_trial_ids = objective_trial_ids(config, state)
     rules = config.get("rules", [])
     input_state = state
@@ -6973,22 +6992,69 @@ def evaluate(
     if matched_trial_policy_name is not None:
         memory = capability_memory or SkillCapabilityMemory()
         memory.observe_state(state)
-        return adaptive_combat_decision(
+        decision = adaptive_combat_decision(
             f"{matched_trial_policy_name} · 当前无可执行试炼专用动作",
             state,
             memory,
             excluded_skill_type_ids=reserved,
         )
+        if decision is not None:
+            return decision
+    if reserved:
+        return reserved_skill_fallback_decision(rules, state, reserved)
     return None
 
 
-def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str:
-    """Summarise why the active hero's flat rules did not yield an action."""
+def reserved_skill_fallback_decision(
+    rules: list[Any], state: dict[str, Any], reserved: set[int]
+) -> Decision | None:
+    """Use a reserved skill rather than leave the actor with nothing to do.
+
+    Reservation keeps a cooldown skill for a strict or trial rule's window.
+    When every unreserved skill is unusable, waiting would stall the battle,
+    so the default priority is evaluated once more without reservations.
+    """
+    for rule_index, rule in enumerate(rules):
+        action = rule.get("action") if isinstance(rule, dict) else None
+        if not isinstance(action, dict) or action.get("type") != "defaultSkillPriority":
+            continue
+        when = rule.get("when", {})
+        if not isinstance(when, dict) or not matches(when, state):
+            continue
+        decision = default_skill_priority_decision(
+            f"{rule.get('name', '默认技能顺序')} · 保留技能已无替代，按默认顺序使用",
+            action,
+            state,
+        )
+        if decision is None:
+            continue
+        if isinstance(state.get("_decisionTrace"), list) and len(state["_decisionTrace"]) < 100:
+            state["_decisionTrace"].append({
+                "rule": decision.rule, "name": decision.rule, "index": rule_index + 1,
+                "kind": "reservation", "outcome": "reservation_released", "conditions": [],
+                "matched": True, "reason": "no_unreserved_skill_available",
+                "skillTypeId": decision.skill.get("typeId")})
+        return decision
+    return None
+
+
+NO_DECISION_REASON_TEXT = {
+    "hero_form_mismatch": "要求英雄形态 {expected}，当前为 {actual}",
+    "chimera_form_mismatch": "奇美拉形态条件不满足（当前 {actual}）",
+    "conditions_not_met": "触发条件不满足",
+    "default_no_ready_skill": "条件满足，但优先列表中没有已就绪且目标合法的技能",
+    "trial_no_action": "条件满足，但当前没有可安全执行的试炼动作或基础技能",
+    "skill_unavailable": "条件满足，但指定技能未就绪或没有合法目标",
+}
+
+
+def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Why each of the active hero's flat rules did not yield an action."""
     rules = config.get("rules")
     if not isinstance(rules, list):
-        return "策略树没有产生可执行动作"
-    candidates: list[str] = []
-    for rule in rules:
+        return []
+    report: list[dict[str, Any]] = []
+    for rule_index, rule in enumerate(rules, 1):
         if not isinstance(rule, dict):
             continue
         when = rule.get("when") if isinstance(rule.get("when"), dict) else {}
@@ -6999,32 +7065,47 @@ def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str
         }
         if hero_scope and not matches(hero_scope, state):
             continue
-        name = str(rule.get("name") or "未命名规则")
-        scoped_states = states_for_rule_targets(
-            state,
-            rule.get("action") if isinstance(rule.get("action"), dict) else {},
-        )
+        action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
+        entry: dict[str, Any] = {
+            "ruleIndex": rule_index,
+            "name": str(rule.get("name") or "未命名规则"),
+            "actionType": action.get("type"),
+        }
+        scoped_states = states_for_rule_targets(state, action)
         if not any(matches(when, scoped_state) for scoped_state in scoped_states):
             expected_form = when.get("activeHeroFormIndex")
-            actual_form = state.get("activeHeroFormIndex")
             if expected_form is not None and not matches(
                 {"activeHeroFormIndex": expected_form}, state
             ):
-                reason = f"要求英雄形态 {expected_form}，当前为 {actual_form}"
+                entry.update(code="hero_form_mismatch", expected=expected_form,
+                             actual=state.get("activeHeroFormIndex"))
             elif "form" in when and not matches({"form": when["form"]}, state):
-                reason = f"奇美拉形态条件不满足（当前 {state.get('form', '未知')}）"
+                current_form = canonical_chimera_form(
+                    state.get("chimera", {}).get("currentForm")
+                    if isinstance(state.get("chimera"), dict)
+                    else None
+                )
+                entry.update(code="chimera_form_mismatch", expected=when["form"],
+                             actual=current_form or "未知")
             else:
-                reason = "触发条件不满足"
+                entry["code"] = "conditions_not_met"
+        elif action.get("type") == "defaultSkillPriority":
+            entry["code"] = "default_no_ready_skill"
+        elif action.get("type") == "executeTrialRecipe":
+            entry["code"] = "trial_no_action"
         else:
-            action = rule.get("action") if isinstance(rule.get("action"), dict) else {}
-            action_type = action.get("type")
-            if action_type == "defaultSkillPriority":
-                reason = "条件满足，但优先列表中没有已就绪且目标合法的技能"
-            elif action_type == "executeTrialRecipe":
-                reason = "条件满足，但当前没有可安全执行的试炼动作或基础技能"
-            else:
-                reason = "条件满足，但指定技能未就绪或没有合法目标"
-        candidates.append(f"“{name}”：{reason}")
+            entry["code"] = "skill_unavailable"
+        entry["reason"] = NO_DECISION_REASON_TEXT[entry["code"]].format(
+            expected=entry.get("expected"), actual=entry.get("actual"))
+        report.append(entry)
+    return report
+
+
+def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str:
+    """Summarise why the active hero's flat rules did not yield an action."""
+    if not isinstance(config.get("rules"), list):
+        return "策略树没有产生可执行动作"
+    candidates = [f"“{entry['name']}”：{entry['reason']}" for entry in no_decision_report(config, state)]
     if not candidates:
         return "没有为当前英雄配置规则"
     shown = candidates[:3]
@@ -7079,6 +7160,93 @@ def remember_trial_contributor(
         contributors[str(trial_id)] = used
     if skill_type_id not in used:
         used.append(skill_type_id)
+
+
+_HYDRA_FORECAST_MONITOR: Any = None
+_CHIMERA_CAPTURE_MONITOR: Any = None
+_CHIMERA_CAPTURE_TELEMETRY: Any = None
+
+
+def chimera_capture_monitor() -> Any:
+    """Saves each Chimera battle's start data and decision trace (diagnostic)."""
+    global _CHIMERA_CAPTURE_MONITOR
+    if _CHIMERA_CAPTURE_MONITOR is None:
+        from chimera_capture_live import ChimeraCaptureMonitor
+
+        _CHIMERA_CAPTURE_MONITOR = ChimeraCaptureMonitor()
+    return _CHIMERA_CAPTURE_MONITOR
+
+
+def observe_chimera_capture(
+    state: dict[str, Any],
+    ipc: AgentIpc,
+    config: dict[str, Any] | None = None,
+    capability_memory: SkillCapabilityMemory | None = None,
+) -> None:
+    global _CHIMERA_CAPTURE_TELEMETRY
+    try:
+        monitor = chimera_capture_monitor()
+        monitor.observe_decision(state, ipc=ipc, config=config,
+                                 capability_memory=capability_memory)
+        telemetry = monitor.telemetry()
+    except Exception as error:  # Diagnostic capture must never stop control.
+        telemetry = {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"}
+    # Report only status changes, not every recorded decision.
+    key = (
+        {name: telemetry.get(name) for name in ("status", "reason", "folder")}
+        if telemetry is not None
+        else None
+    )
+    if key is not None and key != _CHIMERA_CAPTURE_TELEMETRY:
+        _CHIMERA_CAPTURE_TELEMETRY = key
+        emit_telemetry(chimeraCapture=telemetry)
+
+
+_CHIMERA_FORECAST_MONITOR: Any = None
+_CHIMERA_FORECAST_TELEMETRY: Any = None
+
+
+def chimera_forecast_monitor() -> Any:
+    """One battle-start whole-battle simulation monitor per controller process."""
+    global _CHIMERA_FORECAST_MONITOR
+    if _CHIMERA_FORECAST_MONITOR is None:
+        # Imported lazily: the simulation modules import this controller.
+        from chimera_forecast_live import ChimeraForecastMonitor
+
+        _CHIMERA_FORECAST_MONITOR = ChimeraForecastMonitor()
+    return _CHIMERA_FORECAST_MONITOR
+
+
+def observe_chimera_forecast(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    capability_memory: SkillCapabilityMemory | None,
+) -> Any:
+    """Consult the battle-start simulation; a returned retry asks for a regroup."""
+    global _CHIMERA_FORECAST_TELEMETRY
+    try:
+        monitor = chimera_forecast_monitor()
+        retry = monitor.observe(config, state, capture=chimera_capture_monitor(),
+                                capability_memory=capability_memory)
+        telemetry = monitor.telemetry()
+    except Exception as error:  # The forecast must never stop control.
+        retry = None
+        telemetry = {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"}
+    if telemetry is not None and telemetry != _CHIMERA_FORECAST_TELEMETRY:
+        _CHIMERA_FORECAST_TELEMETRY = telemetry
+        emit_telemetry(battleForecast=telemetry)
+    return retry
+
+
+def hydra_forecast_monitor() -> Any:
+    """One battle-start forecast monitor per controller process."""
+    global _HYDRA_FORECAST_MONITOR
+    if _HYDRA_FORECAST_MONITOR is None:
+        # Imported lazily: the forecast modules import this controller.
+        from hydra_forecast_live import HydraForecastMonitor
+
+        _HYDRA_FORECAST_MONITOR = HydraForecastMonitor()
+    return _HYDRA_FORECAST_MONITOR
 
 
 def request_chimera_regroup_retry(
@@ -7153,6 +7321,34 @@ def process_state(
     if reason:
         print(f"暂停：{reason}", flush=True)
         return False
+    if ACTIVE_BOSS_MODE == "chimera":
+        observe_chimera_capture(state, ipc, config, capability_memory)
+        forecast_retry = observe_chimera_forecast(config, state, capability_memory)
+        if forecast_retry is not None:
+            emit_telemetry(lifecycle={"event": "battle_forecast_retry", "cause": forecast_retry.cause,
+                                      "recordId": forecast_retry.record_id, "context": decision_context(state)})
+            execute = execute_requested and config.get("mode") == "execute"
+            if not execute:
+                print("观察模式：不会实际触发免费重整。", flush=True)
+            elif forecast_retry.behavior == "free_regroup_and_stop":
+                free_regroup_and_stop(
+                    ipc,
+                    pid=int(state["pid"]),
+                    agent=agent,
+                    session_id=session_id,
+                )
+                raise FreeRegroupCompleted()
+            else:
+                request_chimera_regroup_retry(
+                    config,
+                    state,
+                    agent=agent,
+                    ipc=ipc,
+                    session_id=session_id,
+                    nonce=nonce,
+                    runtime_state=runtime_state,
+                )
+            return False
     if ACTIVE_BOSS_MODE == "hydra" and runtime_state is not None:
         devour_retry, new_mark, devour_tracking_armed = (
             evaluate_hydra_devour_retry_trigger(config, state, runtime_state)
@@ -7196,15 +7392,13 @@ def process_state(
                 hero_names_by_type.get(type_id, f"英雄 {type_id}")
                 for type_id in devour_retry.expected_hero_type_ids
             )
-            requirement = (
-                f"必须是以下英雄之一：{expected_labels}"
-                if devour_retry.relation == "isAnyOf"
-                else f"不能是以下英雄之一：{expected_labels}"
+            requirement = hydra_devour_requirement_text(
+                devour_retry.relation, expected_labels, devour_retry.mark_limit
             )
             print(
                 f"六头蛇吞噬顺序重整条件 {devour_retry.condition_index + 1} 已触发："
                 f"第 {devour_retry.mark_index} 个标记目标为"
-                f"“{devour_retry.actual_hero_name}”，但该位置{requirement}；"
+                f"“{devour_retry.actual_hero_name}”，但{requirement}；"
                 f"当前已观察顺序：{' → '.join(devour_retry.observed_sequence)}。",
                 flush=True,
             )
@@ -7224,6 +7418,69 @@ def process_state(
             else:
                 print("观察模式：不会实际触发免费重整。", flush=True)
             return False
+        if isinstance(tracker, dict):
+            monitor = hydra_forecast_monitor()
+            forecast_retry = monitor.observe(
+                config,
+                state,
+                ipc=ipc,
+                capability_memory=capability_memory,
+                marked_target=hydra_marked_target,
+                tracker_armed=tracker.get("armed") is True,
+            )
+            forecast_telemetry = monitor.telemetry()
+            if forecast_telemetry is not None:
+                emit_telemetry(devourForecast=forecast_telemetry)
+            if forecast_retry is not None and forecast_retry.cause == "damage":
+                print(
+                    "六头蛇开局推演触发重整：预计整场伤害 "
+                    f"{forecast_retry.predicted_damage / 1e8:.1f} 亿，低于最低伤害 "
+                    f"{forecast_retry.minimum_damage / 1e8:.1f} 亿。",
+                    flush=True,
+                )
+            elif forecast_retry is not None:
+                hero_names_by_type = {
+                    hero.get("typeId"): str(
+                        hero.get("name") or f"英雄 {hero.get('typeId')}"
+                    )
+                    for hero in state_entities(state, "heroes")
+                    if isinstance(hero.get("typeId"), int)
+                }
+                expected_labels = ", ".join(
+                    hero_names_by_type.get(type_id, f"英雄 {type_id}")
+                    for type_id in forecast_retry.expected_hero_type_ids
+                )
+                requirement = hydra_devour_requirement_text(
+                    forecast_retry.relation, expected_labels, forecast_retry.mark_limit
+                )
+                actual_label = hero_names_by_type.get(
+                    forecast_retry.actual_hero_type_id,
+                    f"英雄 {forecast_retry.actual_hero_type_id}",
+                )
+                print(
+                    f"六头蛇开局推演触发重整条件 {forecast_retry.condition_index + 1}："
+                    f"预计第 {forecast_retry.mark_index} 个标记（约第 "
+                    f"{forecast_retry.apply_turn} 回合）为“{actual_label}”，"
+                    f"但{requirement}。",
+                    flush=True,
+                )
+            if forecast_retry is not None:
+                execute = execute_requested and config.get("mode") == "execute"
+                if execute:
+                    runtime_state.pop("hydraDevourTracker", None)
+                    request_chimera_regroup_retry(
+                        config,
+                        state,
+                        agent=agent,
+                        ipc=ipc,
+                        session_id=session_id,
+                        nonce=nonce,
+                        runtime_state=runtime_state,
+                        boss_mode="hydra",
+                    )
+                else:
+                    print("观察模式：不会实际触发免费重整。", flush=True)
+                return False
     objective_report = evaluate_objectives(config, state)
     if runtime_state is not None and ACTIVE_BOSS_MODE == "chimera":
         runtime_state["lastObjectiveReport"] = {
@@ -7245,34 +7502,6 @@ def process_state(
             f"{objective_report.minimum_damage:g}",
             flush=True,
         )
-    if ACTIVE_BOSS_MODE == "chimera":
-        early_retry = evaluate_early_retry_trigger(config, state)
-        if early_retry is not None:
-            emit_telemetry(lifecycle={"event": "early_retry_condition", "conditionIndex": early_retry.condition_index,
-                "missingTrialIds": list(early_retry.incomplete_trial_ids), "context": decision_context(state)})
-            relation = "任一" if early_retry.mode == "any" else "全部"
-            print(
-                f"提前重整条件 {early_retry.condition_index + 1} 已触发："
-                f"Boss 回合 {early_retry.boss_turn} ≥ "
-                f"{early_retry.boss_turn_at_least}，指定试炼中{relation}未完成；"
-                "未完成试炼 "
-                + ", ".join(map(str, early_retry.incomplete_trial_ids)),
-                flush=True,
-            )
-            execute = execute_requested and config.get("mode") == "execute"
-            if execute:
-                request_chimera_regroup_retry(
-                    config,
-                    state,
-                    agent=agent,
-                    ipc=ipc,
-                    session_id=session_id,
-                    nonce=nonce,
-                    runtime_state=runtime_state,
-                )
-            else:
-                print("观察模式：不会实际触发免费重整。", flush=True)
-            return False
     if objective_report.mandatory_impossible:
         emit_telemetry(lifecycle={"event": "mandatory_trials_impossible",
             "impossibleTrialIds": list(objective_report.impossible_trial_ids), "context": decision_context(state)})
@@ -7455,6 +7684,16 @@ def process_state(
         raise RuntimeError(
             f"代理拒绝请求：{acknowledgement.get('reason') or acknowledgement.get('status')}"
         )
+    if ACTIVE_BOSS_MODE == "chimera":
+        try:
+            chimera_capture_monitor().observe_command(
+                state, skill_type_id=skill.get("typeId"), target_id=decision.target_id,
+                rule=decision.rule, status=acknowledgement.get("status"), executed=execute)
+            if execute:
+                chimera_forecast_monitor().observe_command(
+                    state, skill_type_id=skill.get("typeId"), target_id=decision.target_id)
+        except Exception:
+            pass  # Diagnostic trace and forecast check only.
     if execute and runtime_state is not None:
         if (
             isinstance(decision.mythic_followup_action, dict)

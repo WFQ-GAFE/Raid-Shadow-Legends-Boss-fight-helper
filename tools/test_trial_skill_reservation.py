@@ -43,11 +43,23 @@ def test_finished_trial_or_different_form_releases_generic_skill():
         assert evaluate({'rules': [generic, owner, fallback]}, state).rule == 'generic-S2'
 
 
-def test_no_fallback_does_not_cast_and_explicit_trial_a1_is_also_protected():
+def test_no_fallback_does_not_cast_and_a_trial_a1_is_never_reserved():
     state, owner, generic, fallback = fixture()
     assert evaluate({'rules': [generic, owner]}, state) is None
+    # A1 has no cooldown to keep; reserving it stalled heroes whose other
+    # skills were cooling down (1.0.6).
     owner['action'] = copy.deepcopy(fallback['action'])
-    assert evaluate({'rules': [owner, fallback]}, state) is None
+    assert evaluate({'rules': [owner, fallback]}, state).rule == 'fallback-A1'
+
+
+def test_default_priority_uses_a_reserved_skill_rather_than_stalling():
+    state, owner, generic, fallback = fixture()
+    default = {'name': 'default', 'when': {}, 'action': {'type': 'defaultSkillPriority',
+        'prioritySkills': [{'skillTypeId': 88962, 'skillSlot': 2, 'target': {'type': 'self'}}],
+        'blockedSkillTypeIds': []}}
+    decision = evaluate({'rules': [owner, default]}, state)
+    assert decision.rule.startswith('default · ') and decision.skill['typeId'] == 88962
+    assert any(row.get('outcome') == 'reservation_released' for row in state['_decisionTrace'])
 
 
 def test_first_turn_skill_cannot_bypass_trial_reservation():

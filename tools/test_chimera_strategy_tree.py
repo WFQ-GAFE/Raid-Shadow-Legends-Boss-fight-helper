@@ -875,13 +875,8 @@ def main() -> int:
             "mode": "execute",
             "objectives": {
                 "mandatoryTrialIds": [8000501],
-                "earlyRetryConditions": [
-                    {
-                        "bossTurnAtLeast": 5,
-                        "mode": "any",
-                        "trialIds": [8000502],
-                    }
-                ],
+                # Saved before 1.0.6: no longer used, still accepted.
+                "earlyRetryConditions": [{"bossTurnAtLeast": 5, "mode": "any", "trialIds": []}],
             },
             "rules": [],
         }
@@ -890,7 +885,6 @@ def main() -> int:
         {"mode": "execute", "objectives": {"maxRegroupRetries": -1}, "rules": []},
         {"mode": "execute", "objectives": {"minimumDamage": True}, "rules": []},
         {"mode": "execute", "objectives": {"mandatoryTrialIds": [1, 1]}, "rules": []},
-        {"mode": "execute", "objectives": {"mandatoryTrialIds": [1], "earlyRetryConditions": [{"bossTurnAtLeast": 5, "mode": "any", "trialIds": []}]}, "rules": []},
         {"mode": "execute", "objectives": {"onAllMetAtResult": "save"}, "rules": []},
         {"mode": "execute", "safety": {"maxCommandsPerTurn": 2}, "rules": []},
         {"mode": "typo", "rules": []},

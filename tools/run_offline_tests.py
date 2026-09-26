@@ -8,6 +8,7 @@ MODULES = (
     "test_boss_modes", "test_chimera_strategy_tree", "test_chimera_strategy_fuzz",
     "test_chimera_lifecycle_flow", "test_strategy_transfer", "test_effect_catalog",
     "test_inject_protocol", "test_controller_pause", "test_studio_regressions", "test_decision_diagnostics",
+    "test_agent_version_safety",
     "test_release_publish",
     "test_effect_count_conditions",
     "test_result_confirmation",
@@ -16,6 +17,12 @@ MODULES = (
     "test_desktop_lifecycle",
     "test_regroup_transition",
     "test_trial_skill_reservation",
+    "test_strategy_flow",
+    "test_hydra_forecast",
+    "test_chimera_capture",
+    "test_chimera_simulation",
+    "test_chimera_forecast_live",
+    "test_team_preview",
 )
 
 def main() -> int:
