@@ -14,7 +14,6 @@
 *, *::before, *::after { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body {
-  min-width: 320px;
   margin: 0;
   color: var(--text);
   background:
