@@ -28,6 +28,7 @@
           <span>RSL-Boss-helper</span>
         </a>
         <nav class="site-nav" aria-label="主导航">
+          <a href="#interface">界面</a>
           <a href="#features">功能</a>
           <a href="#getting-started">快速开始</a>
           <a href="#about">关于项目</a>
@@ -62,9 +63,58 @@
           </div>
         </section>
 
+        <section class="section interface-section" id="interface" aria-labelledby="interface-title">
+          <div class="section-heading">
+            <p class="section-kicker">01 / 界面一览</p>
+            <h2 id="interface-title">队伍、规则与战况，集中在一个界面。</h2>
+            <p>选择 RAID 账号与 Boss，查看队伍、设定战斗目标，再按顺序编写行动规则。战斗过程和执行结果也能在同一工作区查看。</p>
+          </div>
+          <figure class="interface-preview">
+            <div class="preview-window" aria-hidden="true">
+              <div class="preview-topbar">
+                <div class="preview-brand"><img src="../assets/icon.png" width="28" height="28" alt=""><strong>RSL-Boss-helper</strong></div>
+                <div class="preview-account">RAID 账号 <span>⌄</span></div>
+                <span class="preview-state"><span></span> 界面示意</span>
+              </div>
+              <div class="preview-modes"><span class="preview-mode active">✦ &nbsp; 奇美拉</span><span class="preview-mode">◇ &nbsp; 六头蛇</span></div>
+              <div class="preview-layout">
+                <div class="preview-column">
+                  <div class="preview-panel">
+                    <div class="preview-panel-title"><strong>当前队伍</strong><span>5 / 5</span></div>
+                    <div class="preview-team"><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i></div>
+                    <span class="preview-subline">查看队伍配置 →</span>
+                  </div>
+                  <div class="preview-panel">
+                    <div class="preview-panel-title"><strong>战斗目标</strong><span>奇美拉</span></div>
+                    <div class="preview-pair"><span>必做试炼</span><strong>已选 3 项</strong></div>
+                    <div class="preview-pair"><span>最低伤害</span><strong>8000 万</strong></div>
+                  </div>
+                  <div class="preview-panel preview-control"><span>接管控制</span><strong>开始执行</strong></div>
+                </div>
+                <div class="preview-column">
+                  <div class="preview-panel preview-profile"><span>策略组</span><strong>试炼路线</strong><span>已保存</span></div>
+                  <div class="preview-metrics"><div><small>当前伤害</small><strong>5420 万</strong></div><div><small>Boss 回合</small><strong>27</strong></div><div><small>试炼</small><strong>4 / 7</strong></div></div>
+                  <div class="preview-panel preview-rules">
+                    <div class="preview-panel-title"><strong>行动规则</strong><span>按顺序</span></div>
+                    <div class="preview-rule"><b>01</b><span><strong>试炼时机</strong><small>条件满足 → 使用指定技能</small></span><em>Boss</em></div>
+                    <div class="preview-rule"><b>02</b><span><strong>备用行动</strong><small>技能可用 → 优先目标</small></span><em>Boss</em></div>
+                  </div>
+                  <div class="preview-feedback"><span>最近决策</span><strong>命中规则 01</strong><span>运行日志 →</span></div>
+                </div>
+              </div>
+            </div>
+            <figcaption>简化的界面示意，数字仅为示例，不展示真实游戏数据。</figcaption>
+          </figure>
+          <ol class="interface-points">
+            <li><span>01</span><div><h3>选择账号与 Boss</h3><p>奇美拉和六头蛇使用独立的工作区与策略组。</p></div></li>
+            <li><span>02</span><div><h3>查看队伍与目标</h3><p>检查所选英雄的配置，设定试炼或伤害目标。</p></div></li>
+            <li><span>03</span><div><h3>编写并复盘策略</h3><p>排列技能规则，查看实时决策和运行日志。</p></div></li>
+          </ol>
+        </section>
+
         <section class="section features-section" id="features" aria-labelledby="features-title">
           <div class="section-heading">
-            <p class="section-kicker">01 / 核心功能</p>
+            <p class="section-kicker">02 / 核心功能</p>
             <h2 id="features-title">看清战况，再决定如何出手。</h2>
             <p>规划策略、理解实时战斗，并检查规则实际带来的结果。</p>
           </div>
@@ -97,7 +147,7 @@
 
         <section class="section start-section" id="getting-started" aria-labelledby="start-title">
           <div class="section-heading">
-            <p class="section-kicker">02 / 快速开始</p>
+            <p class="section-kicker">03 / 快速开始</p>
             <h2 id="start-title">三步建立第一套策略。</h2>
             <p>需要 Windows 桌面环境和本机 RAID: Shadow Legends 游戏客户端。</p>
           </div>
@@ -111,7 +161,7 @@
 
         <section class="section about-section" id="about" aria-labelledby="about-title">
           <div class="about-copy">
-            <p class="section-kicker">03 / 关于项目</p>
+            <p class="section-kicker">04 / 关于项目</p>
             <h2 id="about-title">开放的项目，公开的源码。</h2>
             <p>RSL-Boss-helper 是帮助玩家细化 Boss 策略的本地 Windows 开源项目。你可以浏览源码、阅读文档，或加入社区交流。</p>
             <p class="disclaimer">这是独立社区项目，与 RAID: Shadow Legends 或 Plarium 无关联。注入和自动化操作可能违反游戏规则，并带来账号风险。</p>
