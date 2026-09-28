@@ -28,6 +28,7 @@
           <span>RSL-Boss-helper</span>
         </a>
         <nav class="site-nav" aria-label="Main navigation">
+          <a href="#interface">Interface</a>
           <a href="#features">Features</a>
           <a href="#getting-started">Get started</a>
           <a href="#about">About</a>
@@ -62,9 +63,58 @@
           </div>
         </section>
 
+        <section class="section interface-section" id="interface" aria-labelledby="interface-title">
+          <div class="section-heading">
+            <p class="section-kicker">01 / INSIDE THE APP</p>
+            <h2 id="interface-title">Your team, rules, and battle in one view.</h2>
+            <p>Choose a RAID account and Boss, review your team, set a battle goal, then build ordered action rules. The same workspace shows what happens during a run.</p>
+          </div>
+          <figure class="interface-preview">
+            <div class="preview-window" aria-hidden="true">
+              <div class="preview-topbar">
+                <div class="preview-brand"><img src="assets/icon.png" width="28" height="28" alt=""><strong>RSL-Boss-helper</strong></div>
+                <div class="preview-account">RAID account <span>⌄</span></div>
+                <span class="preview-state"><span></span> Workspace preview</span>
+              </div>
+              <div class="preview-modes"><span class="preview-mode active">✦ &nbsp; Chimera</span><span class="preview-mode">◇ &nbsp; Hydra</span></div>
+              <div class="preview-layout">
+                <div class="preview-column">
+                  <div class="preview-panel">
+                    <div class="preview-panel-title"><strong>Current team</strong><span>5 / 5</span></div>
+                    <div class="preview-team"><i>1</i><i>2</i><i>3</i><i>4</i><i>5</i></div>
+                    <span class="preview-subline">Open team setup →</span>
+                  </div>
+                  <div class="preview-panel">
+                    <div class="preview-panel-title"><strong>Battle goals</strong><span>Chimera</span></div>
+                    <div class="preview-pair"><span>Required trials</span><strong>3 selected</strong></div>
+                    <div class="preview-pair"><span>Minimum damage</span><strong>80 M</strong></div>
+                  </div>
+                  <div class="preview-panel preview-control"><span>Battle control</span><strong>Start execution</strong></div>
+                </div>
+                <div class="preview-column">
+                  <div class="preview-panel preview-profile"><span>Strategy group</span><strong>Trial route</strong><span>Saved profile</span></div>
+                  <div class="preview-metrics"><div><small>Damage</small><strong>54.2 M</strong></div><div><small>Boss turn</small><strong>27</strong></div><div><small>Trials</small><strong>4 / 7</strong></div></div>
+                  <div class="preview-panel preview-rules">
+                    <div class="preview-panel-title"><strong>Action rules</strong><span>Ordered</span></div>
+                    <div class="preview-rule"><b>01</b><span><strong>Trial window</strong><small>Condition met → use selected skill</small></span><em>Boss</em></div>
+                    <div class="preview-rule"><b>02</b><span><strong>Backup action</strong><small>Available skill → priority target</small></span><em>Boss</em></div>
+                  </div>
+                  <div class="preview-feedback"><span>Latest decision</span><strong>Rule 01 matched</strong><span>Run log →</span></div>
+                </div>
+              </div>
+            </div>
+            <figcaption>Simplified interface illustration with example values; no live game data is shown.</figcaption>
+          </figure>
+          <ol class="interface-points">
+            <li><span>01</span><div><h3>Select an account and Boss</h3><p>Chimera and Hydra have separate workspaces and strategy profiles.</p></div></li>
+            <li><span>02</span><div><h3>Review your team and goals</h3><p>Inspect the selected champions and set trial or damage targets.</p></div></li>
+            <li><span>03</span><div><h3>Build and review a strategy</h3><p>Order skill rules, follow live decisions, and read the run log.</p></div></li>
+          </ol>
+        </section>
+
         <section class="section features-section" id="features" aria-labelledby="features-title">
           <div class="section-heading">
-            <p class="section-kicker">01 / CAPABILITIES</p>
+            <p class="section-kicker">02 / CAPABILITIES</p>
             <h2 id="features-title">Everything in view. Decisions in your hands.</h2>
             <p>Prepare a strategy, understand the live encounter, and review what your rules actually do.</p>
           </div>
@@ -97,7 +147,7 @@
 
         <section class="section start-section" id="getting-started" aria-labelledby="start-title">
           <div class="section-heading">
-            <p class="section-kicker">02 / GET STARTED</p>
+            <p class="section-kicker">03 / GET STARTED</p>
             <h2 id="start-title">From download to your first strategy.</h2>
             <p>Runs locally on Windows with the RAID: Shadow Legends game client.</p>
           </div>
@@ -111,7 +161,7 @@
 
         <section class="section about-section" id="about" aria-labelledby="about-title">
           <div class="about-copy">
-            <p class="section-kicker">03 / THE PROJECT</p>
+            <p class="section-kicker">04 / THE PROJECT</p>
             <h2 id="about-title">Built in the open.</h2>
             <p>RSL-Boss-helper is a local, open-source Windows project for players who want more control over their Boss strategy. Explore the code, read the documentation, or join the community.</p>
             <p class="disclaimer">Independent community project. Not affiliated with RAID: Shadow Legends or Plarium. Automated play may violate game rules and carry account risk.</p>
