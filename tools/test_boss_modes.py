@@ -8,6 +8,7 @@ from unittest.mock import patch
 from boss_modes import (
     canonical_hydra_head_type_id,
     default_store,
+    hydra_head_defence,
     hydra_head_is_exposed_neck,
     normalize_hydra_head,
     strategy_for_mode,
@@ -465,7 +466,64 @@ def main() -> None:
         )
     assert queued.call_args.kwargs["context"] == 1234
     assert "6 名英雄开始首场六头蛇战斗" in output.getvalue()
+    check_hydra_lowest_defence_targets()
     print("boss-mode-tests-ok")
+
+
+# Called from main(): run_offline_tests runs main() only in modules without test_ functions.
+def check_hydra_lowest_defence_targets() -> None:
+    from test_chimera_strategy_tree import sample_state
+
+    def head(actor_id: int, type_id: int, defence: float, health: float, *, neck: bool = False,
+             protected: bool = False) -> dict:
+        value = {"id": actor_id, "typeId": type_id, "avatar": f"BossAvatars/{type_id}", "name": f"head-{actor_id}",
+                 "healthPct": health, "dead": False,
+                 "effects": [{"effectTypeId": 670, "effectKind": "NewbieDefence"}] if protected else [],
+                 "numericObservation": {"schema": 1, "statsRaw": {"Defence": str(round(defence * 2**32))}}}
+        if neck:
+            value["isHydraNeck"] = True
+        return value
+
+    state = sample_state()
+    state.update({
+        "bossMode": "hydra", "activeHeroId": 0, "activeHeroTypeId": 9906, "hydra": {"active": True, "turnCount": 4},
+        "skills": [{"slot": 2, "skillId": 1, "typeId": 99002, "ready": True, "validTargetIds": [5, 6, 7, 8]}],
+        "bosses": [head(5, 26040, 5319.8, 20), head(6, 26120, 2503.4, 30, neck=True),
+                   head(7, 26200, 1401.9, 60, neck=True), head(8, 26280, 11056.9, 10)],
+    })
+    assert abs(hydra_head_defence(state["bosses"][1]) - 2503.4) < 1e-6
+    assert normalize_hydra_head(state["bosses"][1])["defence"] == 2503
+    assert hydra_head_defence({"numericObservation": {"statsRaw": {"Defence": None}}}) is None
+    skill = state["skills"][0]
+    # Current defence decides (buffs and debuffs are already in the stat), not health.
+    assert select_target({"type": "lowestDefenseBoss"}, skill, state)[0] == 7
+    assert select_target({"type": "exposedNeck"}, skill, state)[0] == 7
+    assert select_target({"type": "lowestHpBoss"}, skill, state)[0] == 8
+
+    def rule(target: str) -> dict:
+        return {"rules": [{
+            "name": f"unprotected-{target}",
+            "when": {"activeHeroTypeId": [9900, 9906], "effectConditionsMode": "all", "effectConditions": [
+                {"target": "bossPriority", "presence": "missing", "effect": {"effectTypeId": 670}}]},
+            "action": {"type": "cast", "skillSlot": 2, "skillTypeId": 99002, "target": {"type": target}},
+        }]}
+
+    for target in ("exposedNeck", "lowestDefenseBoss"):
+        assert evaluate(rule(target), state).target_id == 7
+    # The lowest-defence neck fails the rule's conditions: the next lowest is checked.
+    state["bosses"][2]["effects"] = [{"effectTypeId": 670, "effectKind": "NewbieDefence"}]
+    assert evaluate(rule("exposedNeck"), state).target_id == 6
+    assert evaluate(rule("lowestDefenseBoss"), state).target_id == 6
+    # No exposed neck qualifies: the rule is skipped, never cast on a head instead.
+    state["bosses"][1]["effects"] = [{"effectTypeId": 670, "effectKind": "NewbieDefence"}]
+    assert evaluate(rule("exposedNeck"), state) is None
+    assert evaluate(rule("lowestDefenseBoss"), state).target_id == 5
+    # Without reported stats (older agents) the lowest-health order remains.
+    for boss in state["bosses"]:
+        boss.pop("numericObservation")
+        boss["effects"] = []
+    assert select_target({"type": "exposedNeck"}, skill, state)[0] == 6
+    assert evaluate(rule("lowestDefenseBoss"), state).target_id == 8
 
 
 if __name__ == "__main__":

@@ -597,6 +597,69 @@ def queue_command(
         kernel32.CloseHandle(process)
 
 
+BONUS_REQUEST_HEROES = 8
+# BonusRequest.kind: what the agent reads (ids are hero ids unless noted).
+REQUEST_BONUSES_BY_HERO = 0
+REQUEST_BONUSES_BY_TYPE = 1  # ids are hero type ids
+REQUEST_TEAM_DATA = 2  # the heroes' full data, into the team_data slot
+REQUEST_ROSTER = 3  # the account's champion list, into the team_data slot (ids unused)
+REQUEST_SKILL_TYPES = 4  # static skills by skill type id (names, descriptions, cooldowns), into the team_data slot
+REQUEST_HYDRA = 0x100
+
+
+def encode_bonus_request(nonce: int, hero_ids: list[int], kind: int = REQUEST_BONUSES_BY_HERO) -> bytes:
+    """A read-only request to the agent (BonusRequest, 56 bytes)."""
+    if not 0 < nonce <= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("Bonus request requires a nonce")
+    if not 1 <= len(hero_ids) <= BONUS_REQUEST_HEROES or any(
+            not isinstance(hero_id, int) or isinstance(hero_id, bool) or not 0 < hero_id <= 0x7FFFFFFF
+            for hero_id in hero_ids):
+        raise ValueError("Bonus request requires 1-8 hero ids")
+    padded = list(hero_ids) + [0] * (BONUS_REQUEST_HEROES - len(hero_ids))
+    return struct.pack("<IIQI8iI", 0x52434252, 2, nonce, len(hero_ids), *padded, kind)
+
+
+def request_account_bonuses(pid: int, hero_ids: list[int], nonce: int,
+                            module_name: str = "RaidChimeraAgent.dll",
+                            kind: int = REQUEST_BONUSES_BY_HERO) -> dict[str, object]:
+    """Ask the loaded agent for account data of these heroes (see REQUEST_*).
+
+    Read only: the agent answers on the game thread into its account_bonuses
+    slot, or the team_data slot for REQUEST_TEAM_DATA.
+    """
+    status = read_agent_status(pid)
+    if status is None or not status.get("compatible") or not status.get("ready"):
+        raise RuntimeError(f"Agent is incompatible or not ready: {status}")
+    if status.get("buildId") != AGENT_BUILD_ID:
+        raise RuntimeError(f"Agent ABI does not match this tool: {status}")
+    payload = encode_bonus_request(nonce, hero_ids, kind)
+    process = kernel32.OpenProcess(PROCESS_RIGHTS, False, pid)
+    if not process:
+        raise ctypes.WinError(ctypes.get_last_error())
+    remote_memory = None
+    try:
+        remote_memory = kernel32.VirtualAllocEx(
+            process, None, len(payload), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+        )
+        if not remote_memory:
+            raise ctypes.WinError(ctypes.get_last_error())
+        written = ctypes.c_size_t()
+        source = ctypes.create_string_buffer(payload)
+        if not kernel32.WriteProcessMemory(
+            process, remote_memory, source, len(payload), ctypes.byref(written)
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if written.value != len(payload):
+            raise RuntimeError(f"Short remote write: {written.value}/{len(payload)}")
+        function = remote_export_address(process, pid, module_name, b"RaidChimeraAgentQueueBonusRequest")
+        invocation = run_remote_function(process, function, remote_memory)
+        return {"queued": invocation["result"] == 1, "agentResult": invocation["result"], "nonce": nonce}
+    finally:
+        if remote_memory:
+            kernel32.VirtualFreeEx(process, remote_memory, 0, MEM_RELEASE)
+        kernel32.CloseHandle(process)
+
+
 def encode_takeover_request(
     *,
     session_id: int,

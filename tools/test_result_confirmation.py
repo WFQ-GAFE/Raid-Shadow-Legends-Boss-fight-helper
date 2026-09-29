@@ -1,5 +1,4 @@
 """Offline conflicting-snapshot and result action regression tests."""
-import copy
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory

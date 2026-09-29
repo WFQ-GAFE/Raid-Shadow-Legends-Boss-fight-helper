@@ -6,10 +6,12 @@
 #include "policy_state.hpp"
 #include "policy_channel.hpp"
 #include "static_data_probe.hpp"
+#include "command_breakdown.hpp"
 
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -17,12 +19,14 @@
 
 // One captured Hydra battle in the original engine. Every player command comes
 // from the external list policy over the channel; every enemy command from the
-// original EnemyTurnActionGenerator. Returns the report's JSON fields.
+// original EnemyTurnActionGenerator. seed_override replays the same team and
+// Hydra with a different battle seed. Returns the report's JSON fields.
 inline std::string run_policy_forecast(const ManagedRuntime& model, void* static_data,
                                        const std::function<void(const char*)>& checkpoint,
                                        const std::filesystem::path& setup_path,
                                        const std::filesystem::path& settings_path,
-                                       int max_game_turn, PolicyChannel& policy) {
+                                       int max_game_turn, PolicyChannel& policy,
+                                       const int* seed_override = nullptr) {
     if (max_game_turn < 1 || max_game_turn > 1000)
         throw std::runtime_error("Game turn limit must be between 1 and 1000");
     void* domain = model.api<void* (*)()>("il2cpp_domain_get")();
@@ -42,6 +46,8 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
                                      model.klass("SharedModel.Battle.Core.Setup", "BattleSetup"));
     if (model.get<int>(setup, "KindId") != 5)
         throw std::runtime_error("Policy forecast requires a captured Hydra setup");
+    const int captured_seed = model.get<int>(setup, "RandomSeed");
+    if (seed_override) model.set<int>(setup, "RandomSeed", *seed_override);
     const int effective_max_turns = model.unbox<int>(model.call(setup, "get_MaxTurnsInBattle"));
 
     checkpoint("construct_original_battle_processor");
@@ -104,6 +110,11 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
     std::ostringstream result_hunger_events;
     result_hunger_events << '[';
     bool first_result_hunger = true;
+    // Devoured (effect kind 9024): the hero actually swallowed by a head, as
+    // opposed to only marked; from the same processor result stream.
+    std::ostringstream result_swallow_events;
+    result_swallow_events << '[';
+    bool first_result_swallow = true;
     auto record_result_hunger = [&](void* processor_results, int command_index) {
         for (int i = 0; processor_results && i < model.get<int>(processor_results, "_size"); ++i) {
             void* processor_result = model.call(processor_results, "get_Item", {&i});
@@ -115,7 +126,18 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
                 void* effect = model.get<void*>(applied, "Effect");
                 void* target = model.get<void*>(applied, "Target");
                 void* type = effect ? model.get<void*>(effect, "_type") : nullptr;
-                if (!target || !type || model.get<int>(type, "KindId") != 9020) continue;
+                const int kind = type ? model.get<int>(type, "KindId") : 0;
+                if (target && kind == 9024) {
+                    if (!first_result_swallow) result_swallow_events << ',';
+                    first_result_swallow = false;
+                    result_swallow_events << "{\"commandIndex\":" << command_index
+                                          << ",\"turn\":" << model.get<int>(processor_result, "Turn")
+                                          << ",\"actorId\":" << model.unbox<int>(model.call(target, "get_Id"))
+                                          << ",\"effectId\":" << model.get<int>(effect, "Id")
+                                          << ",\"applyTurn\":" << model.get<int>(effect, "ApplyTurn") << '}';
+                    continue;
+                }
+                if (!target || kind != 9020) continue;
                 if (!first_result_hunger) result_hunger_events << ',';
                 first_result_hunger = false;
                 result_hunger_events << "{\"commandIndex\":" << command_index
@@ -133,18 +155,46 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
 
     checkpoint("prepare_policy_projection");
     OfflinePolicyProjection projection(model, static_data, setup);
+    // Every actor the battle ever had (killed heads are replaced by new ones),
+    // and who is dead now: per-command deaths for the simulation report.
+    struct ActorSeen { int type_id; bool player; int inventory_id; };
+    std::map<int, ActorSeen> actors_seen;
+    auto dead_flags = [&] {
+        std::map<int, bool> dead;
+        for (const char* team_name : {"FirstTeam", "SecondTeam"}) {
+            void* team = model.get<void*>(state, team_name);
+            void* members = team ? model.get<void*>(team, "Heroes") : nullptr;
+            for (int i = 0; members && i < model.get<int>(members, "_size"); ++i) {
+                void* hero = model.call(members, "get_Item", {&i});
+                void* hero_state = hero ? model.get<void*>(hero, "_heroState") : nullptr;
+                if (!hero) continue;
+                const int id = model.unbox<int>(model.call(hero, "get_Id"));
+                actors_seen.emplace(id, ActorSeen{model.get<int>(hero, "TypeId"),
+                                                  std::string(team_name) == "FirstTeam",
+                                                  model.get<int>(hero, "InventoryHeroId")});
+                dead[id] = hero_state && model.get<bool>(hero_state, "IsDead");
+            }
+        }
+        return dead;
+    };
+    auto dead_before = dead_flags();
     void* enemy_generator = nullptr;
     std::uint64_t policy_requests = 0;
     std::uint64_t policy_commands = 0;
     std::string stop_reason;
     std::string stop_detail;
     std::ostringstream turns;
+    turns.precision(15);  // Hydra damage exceeds the default six digits.
     turns << '[';
     int commands = 0;
     const auto player_owner = model.get<std::int64_t>(model.get<void*>(setup, "FirstTeam"), "TeamOwnerId");
     // A game turn and a submitted skill command are separate quantities.
     // The command bound only guards against a non-advancing simulation.
     constexpr int max_skill_commands = 20000;
+    PhaseTiming timing;
+    // Damage to a head as the Hydra counter counts it (the HP it lost; shields excluded).
+    CommandBreakdown breakdown(model, [&](void* head) { return projection.hydra_taken(head); });
+    breakdown.observe(state);
     while (!model.get<bool>(state, "BattleFinished") &&
            model.get<int>(state, "CurrentTurn") < max_game_turn &&
            commands < max_skill_commands) {
@@ -166,6 +216,7 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
         const int player_turns_before = model.get<int>(state, "PlayerTurnCount");
         const auto rng_before = offline_rng_words(model, random);
         void* command = nullptr;
+        timing.lap(PhaseTiming::kOther);
         if (player_action) {
             const std::uint64_t request = ++policy_requests;
             std::string decision_state;
@@ -176,9 +227,11 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
                 stop_detail = error.what();
                 break;
             }
+            timing.lap(PhaseTiming::kDecisionState);
             policy.send("{\"type\":\"decision_request\",\"sequence\":" + std::to_string(request) +
                         ",\"state\":" + decision_state + "}");
             const PolicyReply reply = policy.receive(request);
+            timing.lap(PhaseTiming::kPolicyWait);
             if (!reply.command) {
                 stop_reason = "policy_stopped";
                 stop_detail = reply.reason;
@@ -195,6 +248,7 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
                 break;
             }
             ++policy_commands;
+            timing.lap(PhaseTiming::kPlayerCommand);
         } else {
             try {
                 if (!enemy_generator) {
@@ -212,6 +266,7 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
                 break;
             }
         }
+        timing.lap(PhaseTiming::kEnemyAi);
         if (!command || model.get<int>(command, "Type") != 0 || model.get<void*>(command, "CheatCommand"))
             throw std::runtime_error("Original battle did not produce an ordinary skill command");
         void* skill = model.get<void*>(command, "SkillCommand");
@@ -226,18 +281,35 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
               << ",\"targetId\":" << (target ? model.get<int>(target, "HeroId") : -1)
               << ",\"rngBefore\":[" << rng_before[0] << ',' << rng_before[1] << ','
               << rng_before[2] << ',' << rng_before[3] << ']';
+        timing.lap(PhaseTiming::kOther);
         void* processed = model.call(processor, "ApplyCommand", {command});
+        timing.lap(PhaseTiming::kApply);
         record_result_hunger(processed, commands);
         record_hunger();
         const auto rng_after = offline_rng_words(model, random);
+        const auto dead_after = dead_flags();
         turns << ",\"turnAfter\":" << model.get<int>(state, "CurrentTurn") << ",\"rngAfter\":["
-              << rng_after[0] << ',' << rng_after[1] << ',' << rng_after[2] << ',' << rng_after[3] << "]}";
+              << rng_after[0] << ',' << rng_after[1] << ',' << rng_after[2] << ',' << rng_after[3] << ']'
+              << ",\"damageAfter\":" << projection.hydra_damage(state) << ",\"deaths\":[";
+        bool first_death = true;
+        for (const auto& [id, dead] : dead_after) {
+            const auto found = dead_before.find(id);
+            if (dead == (found != dead_before.end() && found->second)) continue;
+            if (!first_death) turns << ',';
+            first_death = false;
+            turns << (dead ? id : -1 - id);  // negative: revived
+        }
+        turns << "],\"uses\":";
+        breakdown.append(turns, processed, state);
+        turns << '}';
+        dead_before = dead_after;
         ++commands;
         model.release_roots_since(root_frame);
     }
     turns << ']';
     hunger_events << ']';
     result_hunger_events << ']';
+    result_swallow_events << ']';
     const bool battle_finished = model.get<bool>(state, "BattleFinished");
     const int game_turn = model.get<int>(state, "CurrentTurn");
     const bool stopped_early = !stop_reason.empty();
@@ -269,21 +341,41 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
                       << ",\"slotId\":" << model.get<int>(hero, "SlotId") << '}';
     }
     player_actors << ']';
+    std::ostringstream all_actors;
+    all_actors << '[';
+    const auto dead_now = dead_flags();
+    bool first_actor = true;
+    for (const auto& [id, seen] : actors_seen) {
+        const auto found = dead_now.find(id);
+        if (!first_actor) all_actors << ',';
+        first_actor = false;
+        // An actor no longer in its team (a replaced head) counts as dead.
+        all_actors << "{\"actorId\":" << id << ",\"heroTypeId\":" << seen.type_id
+                   << ",\"inventoryHeroId\":" << seen.inventory_id
+                   << ",\"player\":" << (seen.player ? "true" : "false")
+                   << ",\"dead\":" << (found == dead_now.end() || found->second ? "true" : "false") << '}';
+    }
+    all_actors << ']';
 
     std::ostringstream result;
+    result.precision(15);
     result << "\"policyDriven\":true"
            << ",\"enemyCommandPath\":\"EnemyTurnActionGenerator.GenerateNext\""
            << ",\"playerCooldownHypothesis\":true,\"enemyCooldownHypothesis\":true"
            << ",\"policyRequests\":" << policy_requests
            << ",\"policyCommands\":" << policy_commands
+           << ",\"phaseMs\":" << timing.json()
            << ",\"hydraDamage\":" << projection.hydra_damage(state)
            << ",\"policyStop\":"
            << (stopped_early ? "{\"reason\":\"" + stop_reason + "\",\"detail\":\"" + stop_detail + "\"}"
                              : std::string("null"))
            << ",\"engineVersion\":" << active_engine_version
            << ",\"seed\":" << model.get<int>(setup, "RandomSeed")
+           << ",\"capturedSeed\":" << captured_seed
+           << ",\"seedOverridden\":" << (seed_override ? "true" : "false")
            << ",\"battleSetupId\":\"" << setup_id << '"'
            << ",\"playerActors\":" << player_actors.str()
+           << ",\"actors\":" << all_actors.str()
            << ",\"battleKindId\":5,\"stageId\":" << model.get<int>(setup, "StageId")
            << ",\"turn\":" << game_turn
            << ",\"configuredMaxTurnsInBattle\":" << configured_max_turns
@@ -297,6 +389,7 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
            << ",\"commands\":" << commands
            << ",\"hungerEvents\":" << hunger_events.str()
            << ",\"resultHungerEvents\":" << result_hunger_events.str()
+           << ",\"resultSwallowEvents\":" << result_swallow_events.str()
            << ",\"turns\":" << turns.str();
     return result.str();
 }

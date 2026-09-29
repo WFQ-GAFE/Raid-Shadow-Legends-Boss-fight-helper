@@ -30,9 +30,16 @@ SCHEMA = 1
 MAX_GAME_TURN = 1000
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 330.0
-# Condition keys whose live inputs the original model does not reproduce.
-UNSUPPORTED_CONDITION_KEYS = frozenset({"currentDamageAtLeast", "currentDamageBelow"})
 UNSUPPORTED_ACTION_TYPES = frozenset({"executeTrialRecipe"})
+# Current-damage conditions. The live value is the game's damage counter, which
+# the game fills with each head's damage rounded (about six significant digits);
+# the forecast reads the exact per-head damage. Across 868 decisions of 23 real
+# battles the two differed by at most 6.7e-5 of the total (a few points early
+# on) and never lagged. Decisions whose damage lies within DAMAGE_MARGIN of a
+# threshold could still go either way live; see damage_ambiguous_turn.
+DAMAGE_CONDITION_KEYS = frozenset({"currentDamageAtLeast", "currentDamageBelow"})
+DAMAGE_MARGIN_RATIO = 2e-4
+DAMAGE_MARGIN_MINIMUM = 50
 
 
 class ForecastError(RuntimeError):
@@ -53,14 +60,76 @@ def strategy_forecast_issue(strategy: dict[str, Any]) -> str | None:
         node = stack.pop()
         if isinstance(node, dict):
             for key, value in node.items():
-                if key in UNSUPPORTED_CONDITION_KEYS:
-                    return f"condition_not_forecastable:{key}"
                 if key == "type" and value in UNSUPPORTED_ACTION_TYPES:
                     return f"action_not_forecastable:{value}"
                 stack.append(value)
         elif isinstance(node, list):
             stack.extend(node)
     return None
+
+
+def damage_thresholds(strategy: dict[str, Any]) -> list[float]:
+    """Every current-damage threshold the strategy's rules test."""
+    found: set[float] = set()
+    stack: list[Any] = [strategy.get("rules") if isinstance(strategy, dict) else None]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in DAMAGE_CONDITION_KEYS and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    found.add(float(value))
+                else:
+                    stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return sorted(found)
+
+
+def damage_ambiguous_turn(strategy: dict[str, Any], decisions: list[dict[str, Any]]) -> int | None:
+    """First forecast turn whose damage is too close to a threshold to decide as the live counter would.
+
+    Before it, every current-damage condition has the same truth live and offline.
+    """
+    thresholds = damage_thresholds(strategy)
+    if not thresholds:
+        return None
+    for decision in decisions:
+        damage = decision.get("damage")
+        if not isinstance(damage, (int, float)) or isinstance(damage, bool):
+            continue
+        margin = max(DAMAGE_MARGIN_MINIMUM, DAMAGE_MARGIN_RATIO * abs(damage))
+        if any(abs(damage - threshold) <= margin for threshold in thresholds):
+            return decision.get("turn")
+    return None
+
+
+def swallow_stream(report: dict[str, Any], marks: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+    """Devoured (kind 9024) applications: heroes actually swallowed, each tied to its mark.
+
+    A head swallows its marked hero when the next mark lands; a hero that dies
+    first or is still marked when the battle ends is never swallowed. None for
+    probes before 1.1.1, which do not report swallows.
+    """
+    events = report.get("resultSwallowEvents")
+    if not isinstance(events, list):
+        return None
+    actors = {item.get("actorId"): item for item in report.get("playerActors", []) if isinstance(item, dict)}
+    swallows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for event in events:
+        key = (event.get("actorId"), event.get("effectId"), event.get("applyTurn"))
+        actor = actors.get(event.get("actorId"))
+        if key in seen or actor is None:
+            continue
+        seen.add(key)
+        turn = event.get("applyTurn")
+        mark = next((item for item in reversed(marks) if item.get("actorId") == event.get("actorId")
+                     and isinstance(item.get("applyTurn"), int) and isinstance(turn, int)
+                     and item["applyTurn"] <= turn), None)
+        swallows.append({"swallowIndex": len(swallows) + 1, "turn": turn, "actorId": event.get("actorId"),
+                         "heroTypeId": actor.get("heroTypeId"),
+                         "markIndex": mark.get("markIndex") if mark else None})
+    return swallows
 
 
 def mark_stream(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -133,17 +202,32 @@ def evaluate_conditions(conditions: list[dict[str, Any]], forecast: dict[str, An
                     if isinstance(value, int) and not isinstance(value, bool) and value > 0]
         relation = condition.get("relation")
         if relation == "neverMarked":
+            # "Never devoured" (the historical key name): since 1.1.1 only an actual
+            # swallow counts. A hero marked but not swallowed (dying first, or the
+            # battle ending) still fights. Forecasts without swallow data fall back
+            # to marks.
             limit = condition.get("markLimit")
             limit = limit if type(limit) is int and 1 <= limit <= 100 else None
-            considered = marks if limit is None else marks[:limit]
-            hit = next((mark for mark in considered if mark["heroTypeId"] in expected), None)
+            swallows = forecast.get("swallows")
+            if isinstance(swallows, list):
+                considered_swallows = [item for item in swallows if limit is None or (
+                    isinstance(item.get("markIndex"), int) and item["markIndex"] <= limit)]
+                swallow = next((item for item in considered_swallows if item.get("heroTypeId") in expected), None)
+                hit = None if swallow is None else {"markIndex": swallow.get("markIndex"),
+                                                    "heroTypeId": swallow["heroTypeId"],
+                                                    "actorId": swallow.get("actorId"),
+                                                    "applyTurn": swallow.get("turn"), "swallowed": True}
+            else:
+                considered = marks if limit is None else marks[:limit]
+                hit = next((mark for mark in considered if mark["heroTypeId"] in expected), None)
             if hit is not None:
                 violations.append({"conditionIndex": index, "markIndex": hit["markIndex"],
                                    "relation": "neverMarked", "markLimit": limit,
                                    "expectedHeroTypeIds": expected,
                                    "actualHeroTypeId": hit["heroTypeId"],
                                    "actualActorId": hit["actorId"],
-                                   "applyTurn": hit["applyTurn"]})
+                                   "applyTurn": hit["applyTurn"],
+                                   **({"swallowed": True} if hit.get("swallowed") else {})})
             elif ((limit is None or len(marks) < limit)
                   and forecast.get("horizon") != "battle_finished"
                   and isinstance(forecast.get("effectiveMaxTurnsInBattle"), int)
@@ -354,61 +438,14 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         return result
     try:
         result["marks"] = mark_stream(observation)
+        result["swallows"] = swallow_stream(observation, result["marks"])
     except ForecastError as error:
         result["reason"] = str(error)
         return result
     result["status"] = "complete"
+    result["damageAmbiguousTurn"] = damage_ambiguous_turn(strategy, decisions)
     result["horizon"] = "battle_finished" if stop == "battle_finished" else "turn_limit"
     return result
-
-
-def opening_parity(forecast: dict[str, Any], live_state: dict[str, Any]) -> str | None:
-    """Bind a forecast to the live battle's first player command window.
-
-    The live decision before any player command must show the same Setup ID,
-    seed, turn, active hero and all four RNG words as the forecast's first
-    request, and the same marked hero as the forecast's opening mark.
-    """
-    decisions = forecast.get("decisions") or []
-    if not decisions:
-        return "forecast_has_no_decisions"
-    first = decisions[0]
-    rng = live_state.get("battleRandom")
-    battle = live_state.get("battle", {})
-    if not isinstance(rng, dict) or rng.get("available") is not True:
-        return "live_rng_unavailable"
-    if rng.get("battleSetupId") != forecast.get("battleSetupId") or rng.get("seed") != forecast.get("seed"):
-        return "live_battle_identity_differs"
-    if (battle.get("turn") != first.get("turn")
-            or battle.get("playerTurnCount") != first.get("playerTurnCount")
-            or live_state.get("activeHeroId") != first.get("activeHeroId")
-            or live_state.get("activeHeroTypeId") != first.get("activeHeroTypeId")):
-        return "live_opening_window_differs"
-    if rng.get("words") != first.get("rngBefore"):
-        return "live_opening_rng_differs"
-    marks = forecast.get("marks") or []
-    live_marked = controller.hydra_marked_target(live_state)
-    if marks and marks[0].get("applyTurn") == 0:
-        if not isinstance(live_marked, dict) or live_marked.get("id") != marks[0]["actorId"]:
-            return "live_opening_mark_differs"
-    return None
-
-
-def trace_divergence(forecast: dict[str, Any], live_state: dict[str, Any]) -> str | None:
-    """Compare a later live player window with the forecast trace."""
-    battle = live_state.get("battle", {})
-    turn = battle.get("turn")
-    rng = live_state.get("battleRandom")
-    entry = next((item for item in forecast.get("decisions", []) if item.get("turn") == turn), None)
-    if entry is None:
-        return f"live_turn_{turn}_absent_from_forecast"
-    if (live_state.get("activeHeroId") != entry.get("activeHeroId")
-            or battle.get("playerTurnCount") != entry.get("playerTurnCount")):
-        return f"live_turn_{turn}_actor_differs"
-    if (isinstance(rng, dict) and rng.get("available") is True
-            and isinstance(rng.get("words"), list) and rng["words"] != entry.get("rngBefore")):
-        return f"live_turn_{turn}_rng_differs"
-    return None
 
 
 def main() -> None:

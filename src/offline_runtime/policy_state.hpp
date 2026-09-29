@@ -77,6 +77,11 @@ public:
     // HydraTotalTakenDamage, summed over every head the battle has had
     // (killed and replaced heads keep their contribution). Summing raw
     // Q32.32 values would overflow at this scale.
+    // One head's HydraTotalTakenDamage (the HP it lost), unrounded.
+    double hydra_taken(void* head) const {
+        return static_cast<double>(model_.unbox<std::int64_t>(model_.invoke(hydra_damage_, nullptr, {head}))) / 4294967296.0;
+    }
+
     std::int64_t hydra_damage(void* state) const {
         void* team = model_.get<void*>(state, "SecondTeam");
         void* heads = team ? model_.get<void*>(team, "Heroes") : nullptr;
@@ -562,6 +567,23 @@ private:
         }
     }
 
+    // Current battle stats, buffs and debuffs included (Hydra "lowest defence"
+    // targets), written exactly as the agent's numericObservation.
+    void append_numeric_observation(std::ostringstream& out, void* hero) const {
+        void* stats = model_.get<void*>(hero, "<Stats>k__BackingField");
+        const char* names[] = {"Health", "Attack", "Defence", "Speed", "Resistance",
+                               "Accuracy", "CriticalChance", "CriticalDamage"};
+        out << ",\"numericObservation\":{\"schema\":1,\"format\":\"signed_Q32.32_decimal_string\""
+            << ",\"statsObjectAvailable\":" << boolean(stats != nullptr) << ",\"statsRaw\":{";
+        for (std::size_t i = 0; i < std::size(names); ++i) {
+            if (i) out << ',';
+            out << '"' << names[i] << "\":";
+            if (stats) out << '"' << model_.get<std::int64_t>(stats, names[i]) << '"';
+            else out << "null";
+        }
+        out << "}}";
+    }
+
     void append_team(std::ostringstream& out, void* state, const char* team_name,
                      const char* side, bool living_only) {
         void* team = model_.get<void*>(state, team_name);
@@ -620,7 +642,9 @@ private:
                 << ",\"duelTarget\":" << boolean(model_.get<bool>(hero_state, "IsDuelTarget"))
                 << ",\"enfeeble\":" << boolean(model_.get<bool>(hero_state, "IsEnfeeble"))
                 << ",\"rages\":" << boolean(model_.get<bool>(hero_state, "IsRages"))
-                << "},\"skills\":";
+                << '}';
+            append_numeric_observation(out, hero);
+            out << ",\"skills\":";
             append_model_skills(out, hero);
             out << ",\"effects\":";
             append_effects(out, hero_state);

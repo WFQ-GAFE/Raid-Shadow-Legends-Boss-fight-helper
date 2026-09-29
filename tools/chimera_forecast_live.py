@@ -24,12 +24,15 @@ import time
 from typing import Any, Callable
 
 import chimera_controller as controller
+from damage_units import damage_text
+from forecast_advice import advice as failure_note
 from chimera_simulation import run_simulation, summarize_run
 from chimera_simulation_service import (BATTLE_FORECAST_PREFIX, BATTLE_FORECAST_ROOT, aggregate,
                                         difficulty_for_stage)
 from convert_hydra_replay_source import ConversionError, convert
 from hydra_forecast_live import (ForecastSetupError, ensure_runtime_bundle, game_build_directory,
                                  newest_static_data, probe_source)
+from simulation_common import write_run
 from strategy_storage import atomic_write_json
 
 
@@ -54,10 +57,6 @@ STUCK_REASONS = {
     "no_progress": "同一回合反复决策而战斗没有推进",
     "engine_rejected_command": "游戏引擎拒绝了规则给出的指令",
 }
-
-
-def damage_text(value: float) -> str:
-    return f"{value / 1e4:,.0f} 万"
 
 
 def _names_by_type(state: dict[str, Any]) -> dict[int, str]:
@@ -152,6 +151,7 @@ class _Battle:
     reason: str | None = None
     conclusion: str | None = None
     finished_at: str | None = None
+    advice: dict[str, str] | None = None
 
 
 def _prune(root: Path) -> None:
@@ -235,12 +235,15 @@ class ChimeraForecastMonitor:
                 current.divergence_reported = True
                 self.emit(f"奇美拉开局模拟：实战已偏离模拟（{difference}）；此后按实际战况判断。")
 
-    def _conclude(self, status: str, conclusion: str, reason: str | None = None) -> None:
+    def _conclude(self, status: str, conclusion: str, reason: str | None = None,
+                  detail: str | None = None) -> None:
         assert self.battle is not None
         current = self.battle
         current.status = status
         current.reason = reason
         current.conclusion = conclusion
+        # Why it could not conclude and what to do (shown next to the conclusion).
+        current.advice = failure_note("chimera", reason, detail) if status in ("unavailable", "not_opening") else None
         current.finished_at = time.strftime("%H:%M:%S")
         self.emit(conclusion)
         record = current.job.record if current.job else None
@@ -248,6 +251,7 @@ class ChimeraForecastMonitor:
             try:
                 summary = json.loads((record / "summary.json").read_text(encoding="utf-8"))
                 summary["verdict"] = {"status": status, "reason": reason, "conclusion": conclusion,
+                                      **({"advice": current.advice} if current.advice else {}),
                                       "checkedTurns": len(current.windows), "finishedAt": current.finished_at,
                                       **{key: value for key, value in (current.evaluation or {}).items()
                                          if key != "summary"}}
@@ -255,8 +259,8 @@ class ChimeraForecastMonitor:
             except (OSError, json.JSONDecodeError):
                 pass
 
-    def _give_up(self, reason: str) -> None:
-        self._conclude("unavailable", f"奇美拉开局模拟无法进行：{reason}；本场按实际战况判断。", reason)
+    def _give_up(self, reason: str, code: str, detail: str | None = None) -> None:
+        self._conclude("unavailable", f"奇美拉开局模拟无法进行：{reason}；本场按实际战况判断。", code, detail)
 
     def _start(self, state: dict[str, Any], capture: Any) -> None:
         assert self.battle is not None
@@ -265,10 +269,11 @@ class ChimeraForecastMonitor:
         capture_status = getattr(capture, "status", None)
         if getattr(capture, "generation", None) != current.generation or capture_status == "waiting":
             if self.clock() - current.started_at > CAPTURE_WAIT_SECONDS:
-                self._give_up("开局数据未保存")
+                self._give_up("开局数据未保存", "capture_timeout")
             return
         if capture_status != "saved" or not isinstance(folder, Path):
-            self._give_up(f"开局数据未保存（{getattr(capture, 'reason', None) or capture_status}）")
+            missing = str(getattr(capture, "reason", None) or capture_status)
+            self._give_up(f"开局数据未保存（{missing}）", "capture_unavailable", missing)
             return
         opening = getattr(capture, "opening", None) or {}
         static_state = dict(getattr(capture, "static_payload", None) or {})
@@ -317,7 +322,7 @@ class ChimeraForecastMonitor:
             run = summarize_run(result, strategy)
             run["index"] = 1
             atomic_write_json(folder / "strategy.json", strategy)
-            atomic_write_json(folder / "run-01.json", result)
+            write_run(folder, 1, result)
             atomic_write_json(folder / "summary.json", {
                 "schema": 1, "id": record_id, "kind": "battle", "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "status": "complete",
@@ -339,23 +344,23 @@ class ChimeraForecastMonitor:
         current = self.battle
         job = current.job
         if job.error or not job.result:
-            self._give_up(job.error or "没有结果")
+            self._give_up(job.error or "没有结果", "setup_failed" if job.error else "no_result", job.error)
             return None
         result = job.result
         strategy = current.strategy or {}
         evaluation = evaluate_forecast(strategy, result)
         current.evaluation = evaluation
         if evaluation["verdict"] == "unavailable":
-            self._give_up(f"模拟没有完成（{result.get('reason')}）")
+            self._give_up(f"模拟没有完成（{result.get('reason')}）", str(result.get("reason") or "no_result"))
             return None
         if not current.windows:
-            self._give_up("没有可核对的实战回合")
+            self._give_up("没有可核对的实战回合", "no_live_windows")
             return None
         for turn in sorted(current.windows):
             difference = window_difference(result, current.windows[turn], current.commands.get(turn))
             if difference:
                 self._conclude("unavailable", f"奇美拉开局模拟与实战不一致（{difference}）；本场不据此重整。",
-                               "live_turn_differs")
+                               "live_turn_differs", difference)
                 return None
         current.result = result
         record_id = job.record.name if job.record else None
@@ -392,6 +397,8 @@ class ChimeraForecastMonitor:
         payload: dict[str, Any] = {"status": current.status, "reason": current.reason,
                                    "conclusion": current.conclusion, "finishedAt": current.finished_at,
                                    "checkedTurns": len(current.windows), "battleGeneration": current.generation}
+        if current.advice:
+            payload["advice"] = current.advice
         if current.job and current.job.record:
             payload["recordId"] = current.job.record.name
         evaluation = current.evaluation

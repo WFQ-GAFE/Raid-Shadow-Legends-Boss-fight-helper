@@ -1,6 +1,43 @@
 #pragma once
 
 #include <windows.h>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+
+// Where an offline battle spends its time, reported with the result
+// ("phaseMs"): the decision state, waiting for the policy, building the
+// player's or the enemy's command, applying it, and everything else.
+struct PhaseTiming {
+    enum Phase { kOther, kDecisionState, kPolicyWait, kPlayerCommand, kEnemyAi, kApply, kCount };
+    std::uint64_t spent[kCount]{};
+    std::uint64_t last = now();
+    static std::uint64_t now() {
+        LARGE_INTEGER counter{};
+        QueryPerformanceCounter(&counter);
+        return static_cast<std::uint64_t>(counter.QuadPart);
+    }
+    void lap(Phase phase) {
+        const std::uint64_t current = now();
+        spent[phase] += current - last;
+        last = current;
+    }
+    std::string json() const {
+        LARGE_INTEGER frequency{};
+        QueryPerformanceFrequency(&frequency);
+        static const char* names[kCount] = {"other", "decisionState", "policyWait", "playerCommand", "enemyAi", "apply"};
+        std::string result = "{";
+        for (int phase = 0; phase < kCount; ++phase) {
+            char value[48];
+            std::snprintf(value, sizeof(value), "%s\"%s\":%.1f", phase ? "," : "", names[phase],
+                          static_cast<double>(spent[phase]) * 1000.0 / static_cast<double>(frequency.QuadPart));
+            result += value;
+        }
+        return result + "}";
+    }
+};
+
+#include <windows.h>
 
 #include <cstdint>
 #include <stdexcept>

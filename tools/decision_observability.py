@@ -77,6 +77,16 @@ def record_rule(state: dict, rule: Any, index: int, decision: Any,
     when = rule.get("when", {})
     if not isinstance(when, dict):
         return
+    if state.get("_decisionTraceLite"):
+        # Offline simulations only need the rule that decided; the detailed
+        # explanation (every condition re-evaluated and copied) is rebuilt by
+        # no_decision_report when a run stops.
+        if decision is not None:
+            action = rule.get("action", {})
+            trace.append({"index": index + 1, "name": str(rule.get("name") or f"规则 {index + 1}"),
+                          "kind": action.get("type", "cast") if isinstance(action, dict) else "cast",
+                          "outcome": "selected"})
+        return
     hero = {key: value for key, value in when.items() if key == "activeHeroTypeId"}
     if hero and not matches(hero, state):
         return
@@ -111,8 +121,6 @@ def decision_details(state: dict, decision: Any) -> dict:
         "targetId": target,
         "legalTargetIds": targets if isinstance(targets, list) else [],
         "rules": state.get("_decisionTrace", []),
-        "flowTrace": state.get("_flowTrace", []),
-        "flowRevision": state.get("_flowRevision"),
         "status": "selected" if decision is not None else "waiting",
         "skillSlot": skill.get("slot"), "skillTypeId": skill.get("typeId"),
         "context": decision_context(state),

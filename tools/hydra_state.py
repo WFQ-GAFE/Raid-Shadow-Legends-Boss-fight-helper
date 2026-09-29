@@ -33,6 +33,30 @@ def hydra_head_is_devouring(entity: dict[str, Any]) -> bool:
     return False
 
 
+def hydra_swallowed_hero_ids(state: dict[str, Any]) -> set[int]:
+    """Heroes inside a Hydra head right now: actually swallowed (a devour mark alone is not).
+
+    The victim carries the Devoured effect (kind 9024); the digesting head
+    names it as well (devouredHeroId).
+    """
+    result: set[int] = set()
+    for hero in [item for item in state.get("heroes", []) if isinstance(item, dict)]:
+        actor_id = hero.get("id")
+        if not isinstance(actor_id, int) or isinstance(actor_id, bool):
+            continue
+        for effect in hero.get("effects", []):
+            if isinstance(effect, dict) and (effect.get("effectKind") == "Devoured"
+                                             or effect.get("effectKindId") == 9024):
+                result.add(actor_id)
+    for boss in [item for item in state.get("bosses", []) if isinstance(item, dict)]:
+        if boss.get("dead") is True:
+            continue
+        devoured = boss.get("devouredHeroId")
+        if isinstance(devoured, int) and not isinstance(devoured, bool) and devoured >= 0:
+            result.add(devoured)
+    return result
+
+
 def hydra_devouring_head_ids(state: dict[str, Any]) -> set[int]:
     """Return authoritative Hydra head actor IDs that currently hold a hero.
 

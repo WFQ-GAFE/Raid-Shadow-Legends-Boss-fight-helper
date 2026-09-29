@@ -75,13 +75,37 @@ def backup_paths(path: Path) -> list[Path]:
     return [path.with_name(path.name + f".bak.{index}") for index in range(1, 6)]
 
 
+HISTORY_DAYS = 14
+
+
 def write_strategy_store(path: Path, value: dict[str, Any]) -> None:
     # Validate before touching backups; never rotate a corrupt file into them.
     previous = read_object(path)
     if previous is not None:
-        _record_backup(path, path.read_bytes())
+        payload = path.read_bytes()
+        _record_history(path, payload)
+        _record_backup(path, payload)
     atomic_write_json(path, value)
     _record_backup(path, path.read_bytes())
+
+
+def _record_history(path: Path, payload: bytes) -> None:
+    """Before the first change of a day, keep that day's starting file (14 days).
+
+    The five rotating backups follow every save, so a few edits push an older
+    version out; the daily copies keep it recoverable.
+    """
+    history = path.parent / "history"
+    target = history / f"{path.name}.{time.strftime('%Y%m%d')}"
+    if target.exists():
+        return
+    try:
+        history.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(target, payload)
+        for old in sorted(history.glob(path.name + ".*"))[:-HISTORY_DAYS]:
+            old.unlink()
+    except OSError:
+        pass
 
 
 def _record_backup(path: Path, payload: bytes) -> None:

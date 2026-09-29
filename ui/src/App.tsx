@@ -6,7 +6,9 @@ import { LogView } from './LogView'
 import { DecisionRows } from './DecisionRows'
 import { CollapsiblePanel } from './CollapsiblePanel'
 import { TeamPreviewDialog, TeamPreviewSummary, type TeamPreviewSummaryState, type TeamSnapshot } from './TeamPreview'
+import { TeamPicker, type ChosenTeam, type RosterHero } from './TeamPicker'
 import { BattleForecastPanel, ChimeraSimulationPanel, SimulationReport, ruleUsageByIndex, type BattleForecastTelemetry, type SimulationOverview, type SimulationSummary } from './ChimeraSimulation'
+import { HydraSimulationPanel, HydraSimulationReport, type HydraSimulationOverview } from './HydraSimulation'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   Activity,
@@ -42,6 +44,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { gameText, getInitialLanguage, installDocumentLocalization, saveLanguage, translateToolText, type UiLanguage } from './i18n'
+import { AdviceNote, damageText, type FailureAdvice } from './SimulationShared'
 
 type JsonObject = Record<string, unknown>
 type BossMode = 'chimera' | 'hydra'
@@ -105,6 +108,7 @@ type HydraHead = {
   isHydraNeck?: boolean
   isDevouring?: boolean
   headState?: string
+  defence?: number
 }
 
 type RaidProcess = {
@@ -118,6 +122,9 @@ type RaidProcess = {
 type Trial = {
   id: number
   form?: string
+  formId?: number
+  part?: string
+  partId?: number
   difficulty?: string
   difficultyId?: number
   description?: string
@@ -267,11 +274,15 @@ type StrategyProfile = {
 
 type StorageHealth = { ok: boolean; error?: string; backups: string[] }
 
+// Whose strategy groups these are: every game account keeps its own (key = game user id).
+type StrategyAccount = { key: string | null; name: string | null }
+
 type StrategyBundle = {
   revision: string
   config: Strategy
   activeStrategyId: string
   strategyProfiles: StrategyProfile[]
+  strategyAccount?: StrategyAccount
   message?: string
 }
 
@@ -328,10 +339,7 @@ type HydraForecastTelemetry = {
   predictedDamage?: number | null
   minimumDamage?: number | null
   marks?: { markIndex: number; heroTypeId: number; applyTurn: number }[]
-}
-
-function formatHundredMillions(value: number) {
-  return `${(value / 1e8).toFixed(1)} 亿`
+  advice?: FailureAdvice | null
 }
 
 // A saved battle forecast read from the data directory, newest first.
@@ -341,12 +349,13 @@ function hydraForecastStatusLabel(forecast: HydraForecastTelemetry) {
   if (forecast.status === 'waiting_input') return '等待本局开局数据'
   if (forecast.status === 'running') return '后台推演中，战斗照常进行'
   if (forecast.status === 'not_opening') return '不是从开局接管，已跳过'
+  if (forecast.status === 'unavailable' && forecast.reason === 'damage_threshold_too_close') return '伤害接近规则阈值，本场不据此重整'
   if (forecast.status === 'unavailable') return '无法判断，本场不据此重整'
   if (forecast.status === 'unrecorded') return '未记录结论（旧版本或接管已停止）'
   return forecast.verdict === 'retry' ? '预计违反条件，已触发免费重整' : '条件满足，继续战斗'
 }
 
-function HydraForecastEntry({ title, forecast, observed, heroes }: { title: string; forecast: HydraForecastTelemetry; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[] }) {
+function HydraForecastEntry({ title, forecast, observed, heroes, language }: { title: string; forecast: HydraForecastTelemetry; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[]; language: UiLanguage }) {
   const name = (heroTypeId: number) => heroByRuntimeId(heroes, heroTypeId)?.name ?? `英雄 ${heroTypeId}`
   const predicted = (forecast.marks ?? []).map((mark) => `${mark.markIndex}.${name(mark.heroTypeId)}（${mark.applyTurn}）`).join(' → ')
   const actual = (observed ?? []).map((mark, index) => `${index + 1}.${mark.name || name(mark.heroTypeId)}`).join(' → ')
@@ -354,21 +363,22 @@ function HydraForecastEntry({ title, forecast, observed, heroes }: { title: stri
     <article className={`hydra-forecast-entry ${forecast.status}`}>
       <header><strong>{title}</strong><span>{hydraForecastStatusLabel(forecast)}{forecast.finishedAt ? ` · ${forecast.finishedAt}` : ''}</span></header>
       {forecast.conclusion && <p>{forecast.conclusion}</p>}
-      {typeof forecast.predictedDamage === 'number' && <p><span>预计整场伤害</span>：<span data-i18n-skip>{formatHundredMillions(forecast.predictedDamage)}{typeof forecast.minimumDamage === 'number' ? ` / ${formatHundredMillions(forecast.minimumDamage)}` : ''}</span></p>}
+      <AdviceNote language={language} advice={forecast.advice} />
+      {typeof forecast.predictedDamage === 'number' && <p><span>预计整场伤害</span>：<span data-i18n-skip>{damageText(forecast.predictedDamage)}{typeof forecast.minimumDamage === 'number' ? ` / ${damageText(forecast.minimumDamage)}` : ''}</span></p>}
       {predicted && <p><span>预计标记（回合）</span>：<span data-i18n-skip>{predicted}</span></p>}
       {actual && <p><span>实际已出现</span>：<span data-i18n-skip>{actual}</span></p>}
     </article>
   )
 }
 
-function HydraForecastPanel({ forecast, history, observed, heroes }: { forecast?: HydraForecastTelemetry; history: HydraForecastSummary[]; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[] }) {
+function HydraForecastPanel({ forecast, history, observed, heroes, language }: { forecast?: HydraForecastTelemetry; history: HydraForecastSummary[]; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[]; language: UiLanguage }) {
   const previous = history.filter((entry) => !forecast || entry.battleSetupId !== forecast.battleSetupId)
   const latest = forecast ?? history[0]
   return (
     <CollapsiblePanel id="hydra:forecast" title="开局吞噬顺序推演" hint={toolText(latest ? hydraForecastStatusLabel(latest) : '暂无记录')}>
       <div className="hydra-forecast-body">
-        {forecast && <HydraForecastEntry title="本场" forecast={forecast} observed={observed} heroes={heroes} />}
-        {previous.map((entry) => <HydraForecastEntry key={entry.id} title={`${entry.startedAt ?? ''} 开局`} forecast={entry} heroes={heroes} />)}
+        {forecast && <HydraForecastEntry title="本场" forecast={forecast} observed={observed} heroes={heroes} language={language} />}
+        {previous.map((entry) => <HydraForecastEntry key={entry.id} title={`${entry.startedAt ?? ''} 开局`} forecast={entry} heroes={heroes} language={language} />)}
         {!forecast && !previous.length && <p className="hydra-forecast-empty">开启推演后，每场开局的推演结论会显示在这里，并保留最近 5 场。</p>}
       </div>
     </CollapsiblePanel>
@@ -405,6 +415,7 @@ type Bootstrap = {
   config: Strategy
   activeStrategyId: string
   strategyProfiles: StrategyProfile[]
+  strategyAccount?: StrategyAccount
   heroes: Hero[]
   hydraHeads: HydraHead[]
   difficulties: Difficulty[]
@@ -443,14 +454,14 @@ const FORM_LABEL: Record<string, string> = {
 const TRIAL_LEVEL: Record<string, string> = {
   Easy: '简单',
   Normal: '普通',
-  Hard: '苦难',
+  Hard: '困难',
 }
 
 const BOSS_DIFFICULTY: Record<string, string> = {
   Easy: '简单',
   Normal: '普通',
   Hard: '困难',
-  Brutal: '残暴',
+  Brutal: '地狱',
   Nightmare: '噩梦',
   UltraNightmare: '终极噩梦',
 }
@@ -747,10 +758,6 @@ function configuredTrialDifficulty(strategy: Strategy): number | undefined {
   return difficultyId >= 1 && difficultyId <= 6 ? difficultyId : undefined
 }
 
-function formatNumber(value?: number) {
-  return new Intl.NumberFormat('zh-CN').format(value ?? 0)
-}
-
 function damageInMillions(value?: number) {
   const millions = Number(value ?? 0) / 1_000_000
   return Number(millions.toFixed(3))
@@ -983,6 +990,7 @@ function targetLabel(rule: Rule, heroes: Hero[], hydraHeads: HydraHead[] = []): 
   if (target.type === 'devouringHead') return '正在吞噬的蛇头'
   if (target.type === 'exposedNeck') return '暴露蛇颈'
   if (target.type === 'lowestHpBoss') return '生命最低蛇头'
+  if (target.type === 'lowestDefenseBoss') return '防御最低蛇头'
   return '奇美拉 Boss'
 }
 
@@ -1414,14 +1422,14 @@ function HydraDevourRetryPicker({
                 <div className="early-retry-condition-heading"><strong>条件 {index + 1}</strong><button type="button" className="icon-button danger" aria-label={`删除吞噬顺序条件 ${index + 1}`} onClick={() => setDraft((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>
                 <div className="early-retry-fields">
                   {condition.relation === 'neverMarked'
-                    ? <label className="field"><span>判定范围：前几个标记（0 为整场战斗）</span><NumericInput value={condition.markLimit ?? 0} maximum={100} onValue={(value) => updateCondition(index, { markLimit: value })} /></label>
+                    ? <label className="field"><span>判定范围：前几个标记导致的吞下（0 为整场战斗）</span><NumericInput value={condition.markLimit ?? 0} maximum={100} onValue={(value) => updateCondition(index, { markLimit: value })} /></label>
                     : <label className="field"><span>第几个吞噬标记</span><NumericInput value={condition.markIndex ?? 1} onValue={(value) => updateCondition(index, { markIndex: value })} /></label>}
                   <label className="field"><span>目标要求</span><select value={condition.relation} onChange={(event) => {
                     const relation = event.target.value === 'isAnyOf' ? 'isAnyOf' : event.target.value === 'neverMarked' ? 'neverMarked' : 'isNoneOf'
                     updateCondition(index, relation === 'neverMarked' ? { relation } : { relation, markIndex: condition.markIndex ?? Math.min(100, index + 1) })
                   }}><option value="isNoneOf">不能是所选英雄</option><option value="isAnyOf">必须是所选英雄之一</option><option value="neverMarked">所选英雄从未被吞噬</option></select></label>
                 </div>
-                {condition.relation === 'neverMarked' && <p className="devour-condition-note">所选英雄只要成为吞噬标记的目标即视为被吞噬（包括被标记后先阵亡的情况）；实战中一出现就重整，开局推演预计会出现时也会重整。</p>}
+                {condition.relation === 'neverMarked' && <p className="devour-condition-note">所选英雄真正被蛇头吞下才算被吞噬；只被标记（战斗结束前还没被吞下）或被标记后先阵亡的都不算，阵亡另外统计。实战中一被吞下就重整，开局推演预计会被吞下时也会重整。</p>}
                 <div className="devour-retry-heroes">
                   {teamHeroTypeIds.map((heroTypeId) => {
                     const hero = heroByRuntimeId(heroes, heroTypeId)
@@ -2290,7 +2298,7 @@ function RuleEditor({
                       <option value="auto">自动合法目标</option>
                       {bossMode === 'chimera'
                         ? <option value="boss">奇美拉 Boss</option>
-                        : <><option value="hydraHeadPriority">按蛇头类型优先</option><option value="devouringHead">正在吞噬的蛇头</option><option value="exposedNeck">暴露蛇颈</option><option value="lowestHpBoss">生命最低蛇头</option></>}
+                        : <><option value="hydraHeadPriority">按蛇头类型优先</option><option value="devouringHead">正在吞噬的蛇头</option><option value="exposedNeck">暴露蛇颈</option><option value="lowestDefenseBoss">防御最低蛇头</option><option value="lowestHpBoss">生命最低蛇头</option></>}
                       <option value="self">自己</option>
                       <option value="lowestHpAlly">生命最低队友</option>
                       <option value="allyPosition">准备队伍指定位置</option>
@@ -2324,7 +2332,7 @@ function RuleEditor({
                 <div className="target-quick">
                   {bossMode === 'chimera'
                     ? <button type="button" className={target === 'boss' ? 'active' : ''} onClick={() => setTarget('boss')}><Crosshair size={16} />奇美拉 Boss</button>
-                    : <><button type="button" className={target === 'hydraHeadPriority' ? 'active' : ''} onClick={() => setTarget('hydraHeadPriority')}><Waves size={16} />按蛇头类型优先</button><button type="button" className={target === 'devouringHead' ? 'active' : ''} onClick={() => setTarget('devouringHead')}><Crosshair size={16} />正在吞噬的蛇头</button><button type="button" className={target === 'exposedNeck' ? 'active' : ''} onClick={() => setTarget('exposedNeck')}><Zap size={16} />暴露蛇颈</button><button type="button" className={target === 'lowestHpBoss' ? 'active' : ''} onClick={() => setTarget('lowestHpBoss')}><Activity size={16} />生命最低蛇头</button></>}
+                    : <><button type="button" className={target === 'hydraHeadPriority' ? 'active' : ''} onClick={() => setTarget('hydraHeadPriority')}><Waves size={16} />按蛇头类型优先</button><button type="button" className={target === 'devouringHead' ? 'active' : ''} onClick={() => setTarget('devouringHead')}><Crosshair size={16} />正在吞噬的蛇头</button><button type="button" className={target === 'exposedNeck' ? 'active' : ''} title="有多个暴露蛇颈时先选当前防御最低的；规则条件不满足就检查下一个，都不满足则跳过这条规则" onClick={() => setTarget('exposedNeck')}><Zap size={16} />暴露蛇颈</button><button type="button" className={target === 'lowestDefenseBoss' ? 'active' : ''} title="当前防御最低的蛇头（计入加防、降防）；规则条件不满足就检查防御次低的，都不满足则跳过这条规则" onClick={() => setTarget('lowestDefenseBoss')}><ShieldCheck size={16} />防御最低蛇头</button><button type="button" className={target === 'lowestHpBoss' ? 'active' : ''} onClick={() => setTarget('lowestHpBoss')}><Activity size={16} />生命最低蛇头</button></>}
                   <button type="button" className={target === 'self' ? 'active' : ''} onClick={() => setTarget('self')}><HeroAvatar hero={hero} size="sm" />自己</button><button type="button" className={target === 'lowestHpAlly' ? 'active' : ''} onClick={() => setTarget('lowestHpAlly')}><Activity size={16} />生命最低队友</button>
                 </div>
                 {bossMode === 'hydra' && target === 'hydraHeadPriority' && <div className="head-priority-builder">
@@ -2374,15 +2382,24 @@ function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [selectedPid, setSelectedPid] = useState<number | undefined>()
   const [config, setConfigState] = useState<Strategy>({})
-  const [savedRevision, setSavedRevision] = useState('')
   const [saving, setSaving] = useState(false)
   const savingRef = useRef(false)
-  const [lastSync, setLastSync] = useState(0)
   const [connectionError, setConnectionError] = useState('')
   const [drafts] = useState(() => {
     try { return new DraftStore<Strategy>(window.localStorage) } catch { return new DraftStore<Strategy>() }
   })
   const editorRef = useRef({ key: '', mode: 'chimera' as BossMode, value: {} as Strategy })
+  const strategyAccountRef = useRef<StrategyAccount>({ key: null, name: null })
+  const [strategyAccount, setStrategyAccountState] = useState<StrategyAccount>({ key: null, name: null })
+  const [strategyAccountChanged, setStrategyAccountChanged] = useState(0)
+  function setStrategyAccount(account: StrategyAccount | undefined) {
+    const next = account ?? { key: null, name: null }
+    strategyAccountRef.current = next
+    setStrategyAccountState(next)
+  }
+  // Drafts belong to one account's strategy group (the same ids exist in every account).
+  const draftKey = (mode: BossMode, id: string) =>
+    `${strategyAccountRef.current.key ? `${strategyAccountRef.current.key}:` : ''}${mode}:${id}`
   const loadScope = useRef(new RequestScope())
   const pollScope = useRef(new RequestScope())
   const catalogRevisionRef = useRef('')
@@ -2396,11 +2413,10 @@ function App() {
     setConfigState(next)
   }
   function showDraft(mode: BossMode, id: string, value: Strategy, revision: string) {
-    const key = `${mode}:${id}`
+    const key = draftKey(mode, id)
     const entry = drafts.open(key, value, revision)
     editorRef.current = { key, mode, value: entry.value }
     setConfigState(entry.value)
-    setSavedRevision(entry.revision)
   }
   const [activeStrategyId, setActiveStrategyId] = useState('default')
   const [strategyProfiles, setStrategyProfiles] = useState<StrategyProfile[]>([])
@@ -2424,9 +2440,12 @@ function App() {
   const [hydraDevourRetryOpen, setHydraDevourRetryOpen] = useState(false)
   const [hydraForecasts, setHydraForecasts] = useState<HydraForecastSummary[]>([])
   const [chimeraSimulation, setChimeraSimulation] = useState<SimulationOverview>()
+  const [hydraSimulation, setHydraSimulation] = useState<HydraSimulationOverview>()
+  const [hydraReportId, setHydraReportId] = useState<string | null>(null)
   const [teamPreviewRevision, setTeamPreviewRevision] = useState('')
   const [teamPreview, setTeamPreview] = useState<TeamSnapshot | null>(null)
   const [teamDialog, setTeamDialog] = useState<'live' | 'reference' | null>(null)
+  const [teamPickerOpen, setTeamPickerOpen] = useState(false)
   const [simulationSummary, setSimulationSummary] = useState<SimulationSummary | null>(null)
   const [simulationReportId, setSimulationReportId] = useState<string | null>(null)
   const [highlightRule, setHighlightRule] = useState<number | null>(null)
@@ -2482,14 +2501,14 @@ function App() {
       catalogRevisionRef.current = next.catalogRevision ?? ''
       if (next.language === 'en' || next.language === 'zh-CN') setLanguage(next.language)
       setBossMode(next.bossMode)
-      if (discardKey === `${next.bossMode}:${next.activeStrategyId ?? 'default'}`) drafts.forget(discardKey)
+      setStrategyAccount(next.strategyAccount)
+      if (discardKey === draftKey(next.bossMode, next.activeStrategyId ?? 'default')) drafts.forget(discardKey)
       showDraft(next.bossMode, next.activeStrategyId ?? 'default', next.config, next.revision)
       setActiveStrategyId(next.activeStrategyId ?? 'default')
       setStrategyProfiles(next.strategyProfiles ?? [])
       setController(next.controller)
       setLive(next.state ?? {})
       setSelectedPid(next.selectedPid ?? next.processes[0]?.pid)
-      setLastSync(Date.now())
       setConnectionError('')
       const inferredDifficulty = next.state?.chimeraDifficultyId ?? configuredTrialDifficulty(next.config)
       if (inferredDifficulty) setTrialSearchDifficulty(inferredDifficulty)
@@ -2521,7 +2540,7 @@ function App() {
     return () => { cancelled = true }
   }, [teamPreviewRevision, selectedPid])
 
-  type StateResponse = { _fence?: number; state: LiveState; controller: ControllerState; hydraForecasts?: HydraForecastSummary[]; chimeraSimulation?: SimulationOverview; teamPreview?: TeamPreviewSummaryState | null; storageHealth?: StorageHealth; catalogRevision?: string; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }
+  type StateResponse = { _fence?: number; strategyAccount?: StrategyAccount; state: LiveState; controller: ControllerState; hydraForecasts?: HydraForecastSummary[]; chimeraSimulation?: SimulationOverview; hydraSimulation?: HydraSimulationOverview; teamPreview?: TeamPreviewSummaryState | null; storageHealth?: StorageHealth; catalogRevision?: string; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }
   const pollRequest = useCallback((signal: AbortSignal) => {
     const params = new URLSearchParams({ mode: bossMode, catalogRevision: catalogRevisionRef.current })
     if (selectedPid) params.set('pid', String(selectedPid))
@@ -2535,7 +2554,13 @@ function App() {
     setController(current => mergeLogDelta(current, next.controller))
     if (next.hydraForecasts) setHydraForecasts(next.hydraForecasts)
     if (next.chimeraSimulation) setChimeraSimulation(next.chimeraSimulation)
+    if (next.hydraSimulation) setHydraSimulation(next.hydraSimulation)
     setTeamPreviewRevision(next.teamPreview?.revision ?? '')
+    // Another account logged in: its own strategy groups replace these.
+    if (next.strategyAccount && next.strategyAccount.key !== strategyAccountRef.current.key) {
+      setStrategyAccountChanged(value => value + 1)
+      return
+    }
     if (next.strategyProfiles) setStrategyProfiles(next.strategyProfiles)
     catalogRevisionRef.current = next.catalogRevision ?? catalogRevisionRef.current
     setData(current => current ? {
@@ -2546,7 +2571,6 @@ function App() {
       effects: next.effects ?? current.effects,
       difficulties: next.difficulties ?? current.difficulties,
     } : current)
-    setLastSync(Date.now())
     setConnectionError(next.state.error ?? '')
   }, [setController])
   const pollFailed = useCallback((reason: unknown) => {
@@ -2554,6 +2578,10 @@ function App() {
     setLive(current => ({ ...current, modeReady: false, agentReady: false }))
   }, [])
   useSerialPoll(Boolean(data) && !loading, `${bossMode}:${selectedPid}`, pollScope.current, pollRequest, receivePoll, pollFailed)
+  useEffect(() => {
+    if (strategyAccountChanged) void load(selectedPid, true, bossMode)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyAccountChanged])
 
   useEffect(() => {
     const difficultyId = live.chimeraDifficultyId
@@ -2572,9 +2600,20 @@ function App() {
   const selectedTrials = objectives.mandatoryTrialIds ?? []
   const hydraDevourRetryConditions = objectives.devourOrderRetryConditions ?? EMPTY_HYDRA_DEVOUR_RETRY_CONDITIONS
   const selectedProcess = data?.processes.find((process) => process.pid === selectedPid)
-  const team = (live.teamHeroIds?.length ? live.teamHeroIds : config.team?.heroTypeIds ?? config.team?.heroIds) ?? []
+  const strategyTeamIds = config.team?.heroTypeIds ?? config.team?.heroIds ?? []
+  const team = strategyTeamIds.length ? strategyTeamIds : live.teamHeroIds ?? []
   const activeModeSpec = data?.modes.find((mode) => mode.id === bossMode)
   const teamSize = activeModeSpec?.teamSize ?? (bossMode === 'hydra' ? 6 : 5)
+  // The full team on the preparation screen now, to set as the strategy's team.
+  const preparationTeam = ((): ChosenTeam | null => {
+    const types = live.teamHeroIds ?? []
+    const instances = live.teamHeroInstanceIds ?? []
+    const valid = (values: number[]) => values.every((value) => Number.isInteger(value) && value > 0) && new Set(values).size === values.length
+    return live.screen === 'team_selection' && types.length === teamSize && instances.length === types.length && valid(types) && valid(instances)
+      ? { heroTypeIds: [...types], heroInstanceIds: [...instances] } : null
+  })()
+  const preparationMatches = preparationTeam !== null
+    && preparationTeam.heroInstanceIds.join(',') === (config.team?.heroInstanceIds ?? []).join(',')
   const selectedStrategyProfile = strategyProfiles.find((profile) => profile.id === activeStrategyId)
   const selectedStrategyName = selectedStrategyProfile?.name === '默认策略'
     ? (language === 'en' ? 'Default Strategy' : '默认策略')
@@ -2649,30 +2688,14 @@ function App() {
     setRuleOpen(false)
   }
 
-  function configForSave(capturePreparedTeam: boolean): Strategy {
-    const liveTeam = live.teamHeroIds ?? []
-    if (!capturePreparedTeam || live.screen !== 'team_selection' || liveTeam.length !== teamSize) {
-      return config
-    }
-    const selectedTeam = liveTeam.filter((value) => Number.isInteger(value) && value > 0)
-    if (new Set(selectedTeam).size !== selectedTeam.length) return config
-    const liveInstances = live.teamHeroInstanceIds ?? []
-    return {
-      ...config,
-      team: {
-        heroTypeIds: selectedTeam,
-        ...(liveInstances.length === selectedTeam.length && new Set(liveInstances).size === selectedTeam.length
-          ? { heroInstanceIds: [...liveInstances] }
-          : {}),
-      },
-    }
-  }
-
-  async function save(showMessage = true, capturePreparedTeam = true) {
+  // snapshotTeam: an explicit save, which also records the team's current gear
+  // when the game is open; `value` replaces the edited strategy first.
+  async function save(showMessage = true, snapshotTeam = true, value?: Strategy) {
     if (savingRef.current || loadingContext || data?.storageHealth?.ok === false) return false
     savingRef.current = true
     setSaving(true)
     setError('')
+    if (value) setConfig(value)
     const context = { ...editorRef.current }
     const entry = drafts.get(context.key)
     const generation = entry?.generation ?? 0
@@ -2680,14 +2703,13 @@ function App() {
       const result = await api<StrategyBundle>('/api/config', {
         method: 'POST',
         body: JSON.stringify({ bossMode: context.mode, strategyId: activeStrategyId,
-          config: configForSave(capturePreparedTeam), capturePreparedTeam, pid: selectedPid,
+          config: context.value, snapshotTeam, pid: selectedPid,
           expectedRevision: entry?.revision || undefined }),
       })
       const updated = drafts.saved(context.key, generation, result.config, result.revision)
       if (editorRef.current.key === context.key && updated) {
         editorRef.current.value = updated.value
         setConfigState(updated.value)
-        setSavedRevision(updated.revision)
         setStrategyProfiles(result.strategyProfiles)
         if (showMessage) setNotice(result.message ?? '策略组已保存')
       }
@@ -2699,6 +2721,16 @@ function App() {
       savingRef.current = false
       setSaving(false)
     }
+  }
+
+  async function applyStrategyTeam(chosen: ChosenTeam) {
+    setTeamPickerOpen(false)
+    await save(true, true, { ...editorRef.current.value, team: { heroTypeIds: [...chosen.heroTypeIds], heroInstanceIds: [...chosen.heroInstanceIds] } })
+  }
+
+  async function loadRoster(): Promise<RosterHero[]> {
+    if (selectedPid === null || selectedPid === undefined) throw new Error('需要打开游戏读取账号的英雄')
+    return (await api<{ heroes: RosterHero[] }>(`/api/roster?pid=${selectedPid}`)).heroes
   }
 
   function openProfileNameDialog(kind: 'create' | 'rename') {
@@ -2723,9 +2755,10 @@ function App() {
           bossMode,
           strategyId: activeStrategyId,
           name,
+          pid: selectedPid,
           ...(profileDialog === 'create' ? {
-            config: configForSave(true),
-            capturePreparedTeam: true,
+            config: editorRef.current.value,
+            snapshotTeam: true,
             pid: selectedPid,
           } : {}),
         }),
@@ -2748,7 +2781,7 @@ function App() {
       if (!(await save(false, false))) return
       const result = await api<StrategyBundle>('/api/strategy/profile', {
         method: 'POST',
-        body: JSON.stringify({ action: 'select', bossMode, strategyId }),
+        body: JSON.stringify({ action: 'select', bossMode, strategyId, pid: selectedPid }),
       })
       applyStrategyBundle(result)
       setNotice(result.message ?? '已切换策略组')
@@ -2771,7 +2804,7 @@ function App() {
     try {
       const result = await api<StrategyBundle>('/api/strategy/profile', {
         method: 'POST',
-        body: JSON.stringify({ action: 'delete', bossMode, strategyId: activeStrategyId }),
+        body: JSON.stringify({ action: 'delete', bossMode, strategyId: activeStrategyId, pid: selectedPid }),
       })
       drafts.forget(editorRef.current.key)
       applyStrategyBundle(result)
@@ -2791,7 +2824,7 @@ function App() {
       if (!(await save(false, false))) return
       const result = await api<{ document: StrategyExportDocument }>('/api/strategy/profile', {
         method: 'POST',
-        body: JSON.stringify({ action: 'export', bossMode, strategyId: activeStrategyId }),
+        body: JSON.stringify({ action: 'export', bossMode, strategyId: activeStrategyId, pid: selectedPid }),
       })
       const safeName = selectedStrategyName.replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '-').replace(/[. ]+$/g, '').trim() || 'strategy'
       const blob = new Blob([JSON.stringify(result.document, null, 2)], { type: 'application/json;charset=utf-8' })
@@ -2803,9 +2836,11 @@ function App() {
       link.click()
       link.remove()
       URL.revokeObjectURL(url)
-      setNotice(result.document.teamSnapshot
-        ? '策略已导出（含队伍配置：英雄属性与装备）'
-        : '策略已导出（未含队伍配置：请先在游戏准备界面选好这支队伍）')
+      setNotice(result.document.teamSnapshot?.simulation
+        ? '策略已导出（含保存策略组时的队伍配置，导入的人可以查看和模拟）'
+        : result.document.teamSnapshot
+          ? '策略已导出（含队伍配置，仅供查看：打开游戏后保存一次策略组，导出就会带上可模拟的队伍数据）'
+          : '策略已导出（未含队伍配置：打开游戏后保存一次策略组就会记下）')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -2826,14 +2861,14 @@ function App() {
     try {
       const document = JSON.parse(await file.text()) as unknown
       if (data?.storageHealth?.ok === false) {
-        await api('/api/config/recover', { method: 'POST', body: JSON.stringify({ bossMode, document }) })
+        await api('/api/config/recover', { method: 'POST', body: JSON.stringify({ bossMode, document, pid: selectedPid }) })
         await load(selectedPid, false, bossMode)
         setNotice('已恢复策略；原文件已保留')
         return
       }
       const result = await api<StrategyBundle>('/api/strategy/profile', {
         method: 'POST',
-        body: JSON.stringify({ action: 'import', bossMode, document }),
+        body: JSON.stringify({ action: 'import', bossMode, document, pid: selectedPid }),
       })
       applyStrategyBundle(result)
       setNotice(result.message ?? '策略已导入为新的策略组')
@@ -2890,7 +2925,7 @@ function App() {
   async function recoverConfig() {
     setError('')
     try {
-      await api('/api/config/recover', { method: 'POST', body: '{}' })
+      await api('/api/config/recover', { method: 'POST', body: JSON.stringify({ pid: selectedPid }) })
       await load(selectedPid, false, bossMode)
       setNotice('已恢复最近的有效备份；原文件已保留')
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
@@ -2979,15 +3014,20 @@ function App() {
 
       <main className="workspace">
         <aside className="control-column">
-          <CollapsiblePanel key={`${bossMode}:team`} id={`${bossMode}:team`} title="当前队伍" hint={`${team.filter((id) => id > 0).length}/${teamSize}`}>
+          <CollapsiblePanel key={`${bossMode}:team`} id={`${bossMode}:team`} title="策略组队伍" hint={`${team.filter((id) => id > 0).length}/${teamSize}`}>
 <section className="card team-card">
-            <div className="section-heading"><span><Users size={18} />当前队伍</span><em>{team.filter((typeId) => typeId > 0).length}/{teamSize}</em></div>
+            <div className="section-heading"><span><Users size={18} />策略组队伍</span><em>{team.filter((typeId) => typeId > 0).length}/{teamSize}</em></div>
             <div className={`team-row team-${teamSize}`}>
               {Array.from({ length: teamSize }, (_, index) => {
                 const hero = heroByRuntimeId(heroes, team[index])
                 return <div className="team-member" key={index}><HeroAvatar hero={hero} size="lg" /><small>{hero?.name ?? '待读取'}</small></div>
               })}
             </div>
+            <div className="team-card-actions">
+              <button type="button" className="button ghost" disabled={selectedPid === null || selectedPid === undefined || saving || loadingContext || controller.running} onClick={() => setTeamPickerOpen(true)}><Users size={15} />选择英雄</button>
+              {preparationTeam && <button type="button" className="button ghost" disabled={preparationMatches || saving || loadingContext || controller.running} onClick={() => void applyStrategyTeam(preparationTeam)}><Crosshair size={15} />设为准备界面的队伍</button>}
+            </div>
+            {preparationTeam && !preparationMatches && <small className="team-card-note">准备界面现在的队伍和策略组的队伍不同</small>}
             <TeamPreviewSummary language={language} preview={teamPreview?.bossMode === bossMode ? teamPreview : null}
               reference={config.referenceTeam} onOpenPreview={() => setTeamDialog('live')} onOpenReference={() => setTeamDialog('reference')} />
           </section>
@@ -3035,7 +3075,7 @@ function App() {
 <section className="card strategy-profile-card">
             <div className="strategy-profile-identity">
               <span className="strategy-profile-icon"><Layers3 size={21} /></span>
-              <span><small>当前策略组</small><strong data-i18n-skip>{selectedStrategyName}</strong></span>
+              <span><small>当前策略组{strategyAccount.name ? <em className="strategy-account" data-i18n-skip> · {strategyAccount.name}</em> : null}</small><strong data-i18n-skip>{selectedStrategyName}</strong></span>
             </div>
             <label className="strategy-profile-select">
               <span>切换策略组</span>
@@ -3058,9 +3098,9 @@ function App() {
           </section>
           </CollapsiblePanel>
 
-          <CollapsiblePanel key={`${bossMode}:overview`} id={`${bossMode}:overview`} title="战斗概览" hint={formatNumber(live.damage)}>
+          <CollapsiblePanel key={`${bossMode}:overview`} id={`${bossMode}:overview`} title="战斗概览" hint={damageText(live.damage ?? 0)}>
           <div className="overview-grid">
-            <Metric label="当前伤害" value={formatNumber(live.damage)} icon={<Swords size={18} />} />
+            <Metric label="当前伤害" value={damageText(live.damage ?? 0)} icon={<Swords size={18} />} />
             <Metric label="Boss 回合" value={String(bossMode === 'chimera' ? live.chimeraTurn ?? 0 : live.hydraTurn ?? 0)} icon={<Activity size={18} />} />
             <Metric label={bossMode === 'chimera' ? '已完成试炼' : '当前目标'} value={bossMode === 'chimera' ? `${completedTrials.length}` : `${live.headCount ?? 0} 个蛇头`} icon={<Check size={20} />} />
           </div>
@@ -3095,7 +3135,7 @@ function App() {
               const catalogHead = hydraHeads.find((head) => head.typeId === identity)
               const head = { ...catalogHead, ...liveHead, canonicalTypeId: identity, name: catalogHead?.name || liveHead.name || `蛇头 ${identity}` }
               const stateLabel = head.dead ? '已死亡' : head.isHydraNeck || head.headState === 'exposed_neck' ? '暴露蛇颈' : head.isDevouring ? '正在吞噬' : '可作为目标'
-              return <article className={`live-hydra-head${head.dead ? ' dead' : ''}`} key={`${head.id ?? head.typeId}-${index}`}><HydraHeadIcon head={head} size="lg" /><span><strong>{hydraHeadDisplayName(head)}</strong><small>{stateLabel}</small></span></article>
+              return <article className={`live-hydra-head${head.dead ? ' dead' : ''}`} key={`${head.id ?? head.typeId}-${index}`}><HydraHeadIcon head={head} size="lg" /><span><strong>{hydraHeadDisplayName(head)}</strong><small>{stateLabel}{!head.dead && typeof head.defence === 'number' ? ` · 防御 ${head.defence.toLocaleString('en-US')}` : ''}</small></span></article>
             })}</div> : <div className="hydra-head-catalog">{hydraHeads.map((head) => <span key={head.typeId}><HydraHeadIcon head={head} size="md" /><small>{hydraHeadDisplayName(head)}</small></span>)}</div>}
           </section>
           </CollapsiblePanel>}
@@ -3108,10 +3148,13 @@ function App() {
             {!data.storageHealth.backups.length && <p>没有有效备份，请保留原文件并从导出的策略恢复。</p>}
           </section>
           </CollapsiblePanel>}
-          {bossMode === 'hydra' && (objectives.devourOrderForecast === true || controller.telemetry?.devourForecast || hydraForecasts.length > 0) && <HydraForecastPanel forecast={controller.telemetry?.devourForecast} history={hydraForecasts} observed={controller.telemetry?.devour?.sequence} heroes={heroes} />}
+          {bossMode === 'hydra' && (objectives.devourOrderForecast === true || controller.telemetry?.devourForecast || hydraForecasts.length > 0) && <HydraForecastPanel forecast={controller.telemetry?.devourForecast} history={hydraForecasts} observed={controller.telemetry?.devour?.sequence} heroes={heroes} language={language} />}
           {bossMode === 'chimera' && <BattleForecastPanel language={language} enabled={objectives.battleForecast !== false} forecast={controller.telemetry?.battleForecast}
-            history={chimeraSimulation?.battleForecasts ?? []} heroes={heroes} onOpenReport={setSimulationReportId} />}
-          {bossMode === 'chimera' && <ChimeraSimulationPanel language={language} overview={chimeraSimulation} heroes={heroes} trialById={trialCatalogById} request={api}
+            history={chimeraSimulation?.battleForecasts ?? []} heroes={heroes} effects={effects} trialById={trialCatalogById} onOpenReport={setSimulationReportId} />}
+          {bossMode === 'hydra' && <HydraSimulationPanel language={language} overview={hydraSimulation} heroes={heroes} heads={hydraHeads} effects={effects} request={api}
+            draft={config} strategyId={activeStrategyId} strategyName={selectedStrategyName} strategyTeam={savedStrategyTeam}
+            pid={selectedPid} onOpenReport={setHydraReportId} />}
+          {bossMode === 'chimera' && <ChimeraSimulationPanel language={language} overview={chimeraSimulation} heroes={heroes} effects={effects} trialById={trialCatalogById} request={api}
             draft={config} strategyId={activeStrategyId} strategyName={selectedStrategyName} strategyTeam={savedStrategyTeam}
             pid={selectedPid} onOpenReport={setSimulationReportId} onSummary={onSimulationSummary} />}
           <CollapsiblePanel key={`${bossMode}:decision`} id={`${bossMode}:decision`} title="规则命中解释"
@@ -3210,8 +3253,15 @@ function App() {
         heroName={(typeId) => heroByRuntimeId(heroes, typeId)?.name ?? (language === 'en' ? `Champion ${typeId}` : `英雄 ${typeId}`)}
         heroAvatar={(typeId) => <HeroAvatar hero={heroByRuntimeId(heroes, typeId)} size="md" />}
         skillName={(heroTypeId, skillTypeId) => heroByRuntimeId(heroes, heroTypeId)?.skills.find((skill) => skill.typeId === skillTypeId)?.name ?? `${skillTypeId}`} />
+      <TeamPicker language={language} open={teamPickerOpen} teamSize={teamSize}
+        initial={{ heroTypeIds: config.team?.heroTypeIds ?? [], heroInstanceIds: config.team?.heroInstanceIds ?? [] }}
+        loadRoster={loadRoster} onClose={() => setTeamPickerOpen(false)} onApply={(chosen) => void applyStrategyTeam(chosen)}
+        heroName={(typeId) => heroByRuntimeId(heroes, typeId)?.name ?? (language === 'en' ? `Champion ${typeId}` : `英雄 ${typeId}`)}
+        heroAvatar={(typeId) => <HeroAvatar hero={heroByRuntimeId(heroes, typeId)} size="md" />} />
       <SimulationReport language={language} simulationId={simulationReportId} onClose={() => setSimulationReportId(null)} heroes={heroes}
-        trialById={trialCatalogById} request={api} onJumpToRule={jumpToRule} />
+        effects={effects} trialById={trialCatalogById} request={api} onJumpToRule={jumpToRule} />
+      <HydraSimulationReport language={language} simulationId={hydraReportId} onClose={() => setHydraReportId(null)} heroes={heroes}
+        heads={hydraHeads} effects={effects} request={api} onJumpToRule={jumpToRule} />
       <Dialog.Root open={logsExpanded} onOpenChange={setLogsExpanded}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />

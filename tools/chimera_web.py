@@ -12,16 +12,13 @@ import ctypes
 import json
 import logging
 from logging.handlers import RotatingFileHandler
-import locale
 import mimetypes
 import os
 import re
 import secrets
-import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -79,21 +76,9 @@ def _runtime_project_root() -> Path:
         # A one-file PyInstaller application is extracted into a temporary
         # directory on every launch. User strategies and caches must never be
         # stored there or beside an EXE that may live in a read-only folder.
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            root = Path(local_app_data) / "WFQ-GAFE" / "RaidBossStrategyStudio"
-        else:
-            root = (
-                Path.home()
-                / "AppData"
-                / "Local"
-                / "WFQ-GAFE"
-                / "RaidBossStrategyStudio"
-            )
-        from preview_runtime import preview_root, seed_preview
-        preview = preview_root(root)
-        seed_preview(root, preview)
-        root = preview
+        # Earlier versions' data is copied in by main() (data_root).
+        from data_root import data_root
+        root = data_root()
         root.mkdir(parents=True, exist_ok=True)
         return root.resolve()
 
@@ -118,17 +103,27 @@ VENDORED_PYTHON = PROJECT_ROOT / "third_party" / "python"
 if VENDORED_PYTHON.is_dir() and str(VENDORED_PYTHON) not in sys.path:
     sys.path.insert(0, str(VENDORED_PYTHON))
 
-from controller_manager import ControllerManager, controller_exit_label, utf8_subprocess_environment, decode_worker_output
-from strategy_storage import atomic_write_json, write_strategy_store, storage_health, recover_strategy_store, restore_strategy_value, revision, StrategyStoreError
+from controller_manager import ControllerManager
+from strategy_storage import atomic_write_json, write_strategy_store, storage_health, recover_strategy_store, restore_strategy_value, revision
 from catalog_stream import static_entity, merge_skill_catalog
 from hydra_state import hydra_devouring_head_ids
 from hydra_forecast_live import recent_forecasts as recent_hydra_forecasts
 from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService,
                                         list_captures as list_chimera_captures,
                                         recent_simulations as recent_chimera_simulations)
-from team_preview import (TeamSnapshotStore, decode_preview, public_preview,  # noqa: E402
-                          sanitize_reference_team)
-from agent_ipc import AgentIpc  # noqa: E402
+from hydra_simulation_service import (HydraSimulationService,
+                                      recent_simulations as recent_hydra_simulations)
+from team_setups import (STRATEGY_TEAM_ROOT, TEAM_SIZE, StrategyTeamStore, TeamSetupError,  # noqa: E402
+                         check_against_captures,
+                         decode_account_bonuses, decode_roster, exported_team, latest_check, preview_team,
+                         remember_check, same_team, simulation_team, team_sources)
+from inject_probe import (REQUEST_BONUSES_BY_TYPE, REQUEST_HYDRA, REQUEST_ROSTER,  # noqa: E402
+                          REQUEST_SKILL_TYPES, REQUEST_TEAM_DATA, request_account_bonuses)
+from boss_skills import BossSkillCatalog, enemy_skill_ids, listed_skills  # noqa: E402
+from account_stores import AccountStores, StrategyAccount  # noqa: E402
+from team_preview import (TeamSnapshotStore, decode_preview, display_preview, portable_snapshot,  # noqa: E402
+                          public_preview, sanitize_reference_team)
+from agent_ipc import AgentIpc, read_agent_status  # noqa: E402
 from boss_modes import (  # noqa: E402
     HYDRA_HEAD_TYPE_IDS,
     HYDRA_RESERVED_HEAD_TYPE_IDS,
@@ -158,14 +153,11 @@ from chimera_catalog_cache import (  # noqa: E402
     skill_display_name,
 )
 from chimera_controller import latest_account_state, validate_strategy_config  # noqa: E402
+from chimera_runtime import usable_account_state  # noqa: E402
 from chimera_runtime import (  # noqa: E402
-    AGENT,
-    USER_STRATEGY,
     identify_account,
     lifecycle_team_ids,
-    require_expected_account,
     strategy_template,
-    worker_command,
 )
 from chimera_icons import (  # noqa: E402
     cache_visual_asset,
@@ -180,8 +172,6 @@ from chimera_icons import (  # noqa: E402
     runtime_effect_options,
     skill_effect_summary,
 )
-from controller_pause import signal_controller_pause  # noqa: E402
-from inject_probe import seed_battle_context, seed_selection_context  # noqa: E402
 from named_mutex import NamedMutex  # noqa: E402
 from raid_processes import (  # noqa: E402
     attach_windows,
@@ -215,7 +205,23 @@ APP_ICON = next(
     BUNDLE_ROOT / "branding" / "alliance-boss-strategy-icon-v3.ico",
 )
 HERO_CATALOG = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
+BOSS_SKILLS = PROJECT_ROOT / "cache" / "boss-skills.json"
 UI_PREFERENCES = PROJECT_ROOT / "config" / "raid-boss-ui-preferences.user.json"
+def snapshot_requested(body: dict[str, Any]) -> bool:
+    """An explicit save: snapshot the strategy group's team (capturePreparedTeam: interfaces before 1.1.1)."""
+    return body.get("snapshotTeam") is True or body.get("capturePreparedTeam") is True
+
+
+def team_hero_ids(team: Any) -> list[int]:
+    """The account's hero ids a strategy group's team names (empty for an imported, unbound team)."""
+    values = team.get("heroInstanceIds") if isinstance(team, dict) else None
+    type_ids = team.get("heroTypeIds") if isinstance(team, dict) else None
+    if (not isinstance(values, list) or not isinstance(type_ids, list) or len(values) != len(type_ids)
+            or not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in values)):
+        return []
+    return list(values)
+
+
 EXPECTED_RULE_KEYS = {
     "name",
     "when",
@@ -444,7 +450,12 @@ class ChimeraService:
         self.active_clients = 0
         self.controller = ControllerManager()
         self.simulations = SimulationService()
+        self.hydra_simulations = HydraSimulationService()
         self.team_snapshots = TeamSnapshotStore()
+        # Strategy groups of each game account (config/accounts/<userId>); the account
+        # of the current request is kept per thread (see use_strategy_account).
+        self.account_stores = AccountStores()
+        self._store_context = threading.local()
         self.team_previews: dict[int, dict[str, Any]] = {}
         self.catalog_epoch = 0
         self.catalog_session = secrets.token_hex(8)
@@ -469,6 +480,8 @@ class ChimeraService:
         hydra_head_type_ids = sorted(
             set(HYDRA_HEAD_TYPE_IDS) | set(installed_hydra_heads)
         )
+        self.boss_skills = BossSkillCatalog(BOSS_SKILLS)
+        self.boss_skill_retry_at = 0.0
         self.hydra_head_catalog: dict[int, dict[str, Any]] = {
             type_id: {
                 "typeId": type_id,
@@ -593,8 +606,36 @@ class ChimeraService:
         self.stopping.set()
         self.controller.shutdown()
 
+    def use_strategy_account(self, pid: Any = None, account: Any = None) -> StrategyAccount:
+        """Strategy groups of the account logged in to this client (else the last account) for this request."""
+        if account is None and isinstance(pid, int) and not isinstance(pid, bool):
+            account = usable_account_state(pid, latest_account_state(pid))
+            if account is None:
+                with self.lock:
+                    item = self.processes.get(pid)
+                account = item.get("account") if isinstance(item, dict) else None
+        resolved = self.account_stores.resolve(account)
+        self._store_context.account = resolved
+        return resolved
+
+    def strategy_account(self) -> StrategyAccount:
+        account = getattr(getattr(self, "_store_context", None), "account", None)
+        if account is not None:
+            return account
+        stores = getattr(self, "account_stores", None)
+        # Without an account store (tests), the shared file of earlier versions.
+        return stores.resolve(None) if stores is not None else StrategyAccount(None, None, STRATEGY_STORE)
+
+    def store_path(self) -> Path:
+        return self.strategy_account().path
+
     def strategy_store(self) -> dict[str, Any]:
-        return load_strategy_store(STRATEGY_STORE)
+        return load_strategy_store(self.store_path())
+
+    def strategy_team_store(self) -> StrategyTeamStore:
+        """The teams saved with this account's strategy groups (ids repeat across accounts)."""
+        key = self.strategy_account().key
+        return StrategyTeamStore(STRATEGY_TEAM_ROOT / key) if key else StrategyTeamStore()
 
     def ui_preferences(self) -> dict[str, str]:
         value = read_json(UI_PREFERENCES, {})
@@ -632,6 +673,7 @@ class ChimeraService:
             "revision": revision(strategy_for_mode(current_store, boss_mode, selected_id)),
             "activeStrategyId": selected_id,
             "strategyProfiles": strategy_profiles_for_mode(current_store, boss_mode),
+            "strategyAccount": self.strategy_account().public(),
         }
 
     def save_strategy(
@@ -650,7 +692,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=selected_id
             )
-            write_strategy_store(STRATEGY_STORE, updated)
+            write_strategy_store(self.store_path(), updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def recover_strategies(self, document: Any = None, boss_mode: str = "chimera") -> None:
@@ -658,7 +700,7 @@ class ChimeraService:
             if self.controller.snapshot()["running"]:
                 raise ValueError("请先暂停接管再恢复策略")
             if document is None:
-                recover_strategy_store(STRATEGY_STORE)
+                recover_strategy_store(self.store_path())
                 return
             boss_mode = normalize_mode(boss_mode)
             if (not isinstance(document, dict) or document.get("format") != "raid-boss-strategy"
@@ -671,51 +713,7 @@ class ChimeraService:
             if isinstance(config.get("team"), dict):
                 config["team"].pop("heroInstanceIds", None)
             store = update_mode_strategy(default_store(), boss_mode, config)
-            restore_strategy_value(STRATEGY_STORE, store)
-
-    def config_with_prepared_team(
-        self, value: Any, pid: Any, boss_mode: str
-    ) -> Any:
-        """Attach the currently visible preparation heroes to a strategy."""
-        if (
-            not isinstance(value, dict)
-            or not isinstance(pid, int)
-            or isinstance(pid, bool)
-        ):
-            return value
-        live = self.live_state(pid, boss_mode)
-        expected_size = int(mode_spec(boss_mode)["teamSize"])
-        hero_type_ids = live.get("teamHeroIds")
-        if (
-            live.get("screen") != "team_selection"
-            or not isinstance(hero_type_ids, list)
-            or len(hero_type_ids) != expected_size
-            or any(
-                not isinstance(hero_id, int)
-                or isinstance(hero_id, bool)
-                or hero_id < 0
-                for hero_id in hero_type_ids
-            )
-        ):
-            return value
-        selected_type_ids = [hero_id for hero_id in hero_type_ids if hero_id > 0]
-        if len(set(selected_type_ids)) != len(selected_type_ids):
-            return value
-        hero_instance_ids = live.get("teamHeroInstanceIds")
-        team = {"heroTypeIds": selected_type_ids}
-        if (
-            isinstance(hero_instance_ids, list)
-            and len(hero_instance_ids) == len(selected_type_ids)
-            and all(
-                isinstance(hero_id, int)
-                and not isinstance(hero_id, bool)
-                and hero_id > 0
-                for hero_id in hero_instance_ids
-            )
-            and len(set(hero_instance_ids)) == len(hero_instance_ids)
-        ):
-            team["heroInstanceIds"] = list(hero_instance_ids)
-        return {**value, "team": team}
+            restore_strategy_value(self.store_path(), store)
 
     def create_strategy_profile(
         self, value: Any, name: Any, boss_mode: str = "chimera"
@@ -738,7 +736,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
-            write_strategy_store(STRATEGY_STORE, updated)
+            write_strategy_store(self.store_path(), updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def rename_strategy_profile(
@@ -753,7 +751,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
-            write_strategy_store(STRATEGY_STORE, updated)
+            write_strategy_store(self.store_path(), updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def select_strategy_profile(
@@ -764,7 +762,7 @@ class ChimeraService:
             updated = select_mode_strategy(
                 self.strategy_store(), boss_mode, strategy_id
             )
-            write_strategy_store(STRATEGY_STORE, updated)
+            write_strategy_store(self.store_path(), updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def delete_strategy_profile(
@@ -775,7 +773,8 @@ class ChimeraService:
             updated = delete_mode_strategy(
                 self.strategy_store(), boss_mode, strategy_id
             )
-            write_strategy_store(STRATEGY_STORE, updated)
+            write_strategy_store(self.store_path(), updated)
+            self.strategy_team_store().delete(boss_mode, strategy_id)
             return self.strategy_bundle(boss_mode, updated)
 
     def export_strategy_profile(
@@ -795,9 +794,15 @@ class ChimeraService:
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             strategy["team"] = portable_team
-            snapshot = self.team_snapshots.find(portable_team.get("heroTypeIds"))
-        # An imported strategy passes its author's team on unchanged.
+            # The team as it was when the strategy group was saved, simulatable by others.
+            saved = self.strategy_team_store().load(boss_mode, selected_id)
+            if saved and same_team(saved.get("heroTypeIds"), portable_team.get("heroTypeIds")):
+                snapshot = exported_team(saved)
+        # An imported strategy passes its author's team on unchanged; otherwise
+        # the newest look of this team on a preparation screen (display only).
         snapshot = snapshot or sanitize_reference_team(strategy.get("referenceTeam"))
+        if snapshot is None and isinstance(team, dict):
+            snapshot = self.team_snapshots.find(strategy["team"].get("heroTypeIds"))
         return {
             "format": "raid-boss-strategy",
             "version": 2 if strategy.get("strategyFlow") is not None else 1,
@@ -861,7 +866,7 @@ class ChimeraService:
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
-            write_strategy_store(STRATEGY_STORE, updated)
+            write_strategy_store(self.store_path(), updated)
             return self.strategy_bundle(boss_mode, updated)
 
     def refresh_processes(self, force: bool = False) -> list[dict[str, Any]]:
@@ -1159,6 +1164,7 @@ class ChimeraService:
                     self.effect_options = updated_effects
                     self._catalog_changed()
         self.update_hydra_heads(rotation.get("hydraHeads"))
+        self.boss_skills.learn(listed_skills(rotation.get("hydraHeads")), static=True)
         catalog = rotation.get("catalog")
         identity = rotation.get("identity")
         stage_id = lifecycle_section.get("stageId")
@@ -1346,6 +1352,8 @@ class ChimeraService:
                 current_heads[actor_id] = head
             bosses = list(current_heads.values())
             self.update_hydra_heads(bosses)
+        if mode_matches:
+            self.boss_skills.learn(listed_skills(bosses))
         boss = next((value for value in bosses if isinstance(value, dict)), {})
         trial_states, completed = self._trial_statuses(state)
         form = chimera.get("currentForm")
@@ -1424,23 +1432,29 @@ class ChimeraService:
         state = self.live_state(pid, boss_mode) if pid is not None else {
             "bossMode": boss_mode, "statusLabel": "没有找到 Raid 账户", "modeReady": False,
         }
-        health = storage_health(STRATEGY_STORE)
+        health = storage_health(self.store_path())
         store = self.strategy_store() if health["ok"] else default_store()
+        prepared = self.prepared_team_preview(pid)
+        sources = self.team_sources(store, boss_mode, pid)
         return {
             "pid": pid, "bossMode": boss_mode,
             "state": state,
             "controller": self.controller.snapshot(boss_mode, after=log_cursor),
             "strategyProfiles": strategy_profiles_for_mode(store, boss_mode),
+            "strategyAccount": self.strategy_account().public(),
             "storageHealth": health,
             **({"hydraForecasts": recent_hydra_forecasts()} if boss_mode == "hydra" else {}),
-            **({"chimeraSimulation": self.simulation_overview()} if boss_mode == "chimera" else {}),
-            "teamPreview": self.team_preview_summary(pid),
+            **({"chimeraSimulation": {**self.simulation_overview(), "teamSources": sources}}
+               if boss_mode == "chimera" else {}),
+            **({"hydraSimulation": {**self.hydra_simulation_overview(), "teamSources": sources}}
+               if boss_mode == "hydra" else {}),
+            "teamPreview": self.team_preview_summary(pid, prepared),
             **self.catalog_payload(catalog_revision),
         }
 
-    def team_preview(self, pid: int | None) -> dict[str, Any] | None:
-        """The preparation-screen team of this account (hero-screen stats, sets, masteries)."""
-        if not isinstance(pid, int):
+    def prepared_team_preview(self, pid: int | None) -> dict[str, Any] | None:
+        """The preparation-screen team with its battle-setup parts (internal; not for the interface)."""
+        if not isinstance(pid, int) or isinstance(pid, bool):
             return None
         try:
             with AgentIpc(pid) as ipc:
@@ -1453,18 +1467,190 @@ class ChimeraService:
             preview = decode_preview(raw)
             if preview is not None:
                 preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                self.check_team_setups(preview)
             cached = {"tick": tick, "preview": preview}
             self.team_previews[pid] = cached
         preview = cached.get("preview") if cached else None
-        if preview is None:
-            return None
-        public = public_preview(preview)
-        if public is not None:
-            self.team_snapshots.remember(public)
-        return public
+        if preview is not None:
+            public = public_preview(preview)
+            if public is not None:
+                self.team_snapshots.remember(public)
+        return preview
 
-    def team_preview_summary(self, pid: int | None) -> dict[str, Any] | None:
-        preview = self.team_preview(pid)
+    def team_preview(self, pid: int | None) -> dict[str, Any] | None:
+        """The preparation-screen team of this account (hero-screen stats, sets, masteries)."""
+        return display_preview(self.prepared_team_preview(pid))
+
+    @staticmethod
+    def check_team_setups(preview: dict[str, Any]) -> None:
+        """Compare the assembled setups with saved battles of the same heroes (background)."""
+        boss_mode = preview.get("bossMode")
+        team = preview_team(preview, boss_mode) if boss_mode in TEAM_SIZE else None
+        if team is None:
+            return
+
+        def work() -> None:
+            try:
+                remember_check(check_against_captures(team["heroes"], team["observatory"], boss_mode))
+            except Exception as error:  # A failed check only leaves the default rule in place.
+                desktop_lifecycle_log(f"team_setup_check_failed {type(error).__name__}: {error}")
+
+        threading.Thread(target=work, name="team-setup-check", daemon=True).start()
+
+    def team_sources(self, store: dict[str, Any], boss_mode: str, pid: int | None = None) -> dict[str, Any]:
+        strategy_id = active_strategy_id(store, boss_mode)
+        config = strategy_for_mode(store, boss_mode, strategy_id)
+        team = config.get("team") if isinstance(config.get("team"), dict) else {}
+        # The current team and every account bonus are read from the running game.
+        return {"strategyId": strategy_id, "accountReadable": isinstance(pid, int), **team_sources(
+            boss_mode, team.get("heroTypeIds"), bound=bool(team_hero_ids(team)),
+            saved=self.strategy_team_store().load(boss_mode, strategy_id),
+            reference=sanitize_reference_team(config.get("referenceTeam")), check=latest_check(boss_mode))}
+
+    @staticmethod
+    def agent_request(pid: Any, ids: list[int], kind: int, slot: str, what: str,
+                      timeout: float = 5.0) -> dict[str, Any]:
+        """Ask the game (read only) for account data and wait for the answer with its nonce."""
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            raise TeamSetupError(f"需要打开游戏读取{what}")
+        nonce = secrets.randbits(62) + 1
+        try:
+            queued = request_account_bonuses(pid, [int(value) for value in ids], nonce, kind=kind)
+        except RuntimeError as error:
+            if "ABI" in str(error) or "incompatible" in str(error):
+                raise TeamSetupError("游戏内模块不是最新版本：请重启一次游戏") from error
+            raise TeamSetupError(f"没有读到{what}：{error}") from error
+        except (OSError, ValueError) as error:
+            raise TeamSetupError(f"没有读到{what}：{error}") from error
+        if not queued.get("queued"):
+            raise TeamSetupError(f"游戏暂时无法读取{what}（{queued.get('agentResult')}），请稍后重试")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with AgentIpc(pid) as ipc:
+                    raw = ipc.read_json(slot)
+            except (FileNotFoundError, ValueError, OSError):
+                raw = None
+            if isinstance(raw, dict) and raw.get("nonce") == nonce:
+                return raw
+            time.sleep(0.05)
+        raise TeamSetupError(f"游戏没有及时返回{what}：请确认游戏在运行后重试")
+
+    @classmethod
+    def account_bonuses(cls, pid: Any, type_ids: list[int]) -> dict[str, Any]:
+        """The current account's academy, building and area bonuses for these hero types (read only)."""
+        raw = cls.agent_request(pid, type_ids, REQUEST_BONUSES_BY_TYPE, "account_bonuses",
+                                "当前账号的学院、建筑和区域加成")
+        return decode_account_bonuses(raw, type_ids)
+
+    def boss_skill_labels(self, timeline: Any, actors: Any = None) -> dict[str, dict[str, Any]]:
+        """Names, descriptions and cooldowns of the skills the bosses used in a simulated battle.
+
+        Skills not yet read from the static data are asked of a running game
+        (read only); without one the report shows what is already known.
+        """
+        used = enemy_skill_ids(timeline, actors)
+        missing = self.boss_skills.missing(used)
+        if missing and time.monotonic() >= self.boss_skill_retry_at:
+            pid = next((
+                int(process["pid"]) for process in self.refresh_processes()
+                if (read_agent_status(int(process["pid"])) or {}).get("compatible") is True
+            ), None)
+            try:
+                if pid is None:
+                    raise TeamSetupError("没有可读取的游戏")
+                for start in range(0, len(missing), 8):
+                    chunk = missing[start:start + 8]
+                    raw = self.agent_request(pid, chunk, REQUEST_SKILL_TYPES, "team_data", "Boss 技能说明", 2.0)
+                    if raw.get("status") != "captured":
+                        raise TeamSetupError(str(raw.get("reason") or "unavailable"))
+                    # Ids the static data does not have are recorded too, so they are not asked again.
+                    self.boss_skills.learn([*(raw.get("skills") or []), *({"typeId": value} for value in chunk)],
+                                           static=True)
+            except TeamSetupError:
+                self.boss_skill_retry_at = time.monotonic() + 60
+        return self.boss_skills.lookup(used)
+
+    @classmethod
+    def roster(cls, pid: Any) -> list[dict[str, Any]]:
+        """The current account's champions, for choosing a strategy group's team (read only)."""
+        return decode_roster(cls.agent_request(pid, [1], REQUEST_ROSTER, "team_data", "账号的英雄列表", 10.0))
+
+    @classmethod
+    def team_data(cls, pid: Any, hero_ids: list[int], boss_mode: str, timeout: float = 5.0) -> dict[str, Any]:
+        """These heroes of the current account as they are now: hero screen data and battle inputs."""
+        kind = REQUEST_TEAM_DATA | (REQUEST_HYDRA if boss_mode == "hydra" else 0)
+        raw = cls.agent_request(pid, hero_ids, kind, "team_data", "策略组英雄现在的装备", timeout)
+        preview = decode_preview(raw)
+        if preview is None or preview.get("status") != "captured":
+            reason = (preview or {}).get("reason") or "unknown"
+            if reason == "heroes_not_found":
+                raise TeamSetupError("当前账号里找不到策略组的英雄（可能切换了账号，或英雄已不在）")
+            raise TeamSetupError(f"没有读到策略组英雄现在的装备（{reason}）")
+        found = [hero.get("heroId") for hero in preview.get("heroes") or []]
+        if sorted(found) != sorted(hero_ids):
+            raise TeamSetupError("当前账号里找不到策略组的部分英雄（可能切换了账号，或英雄已不在）")
+        preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        return preview
+
+    def remember_strategy_team(self, pid: Any, boss_mode: str, strategy_id: str) -> bool:
+        """Snapshot the strategy group's team when it is saved: read from the running game, any screen.
+
+        Without the game (or with another account's heroes) the previous snapshot stays.
+        """
+        config = strategy_for_mode(self.strategy_store(), boss_mode, strategy_id) if strategy_id else {}
+        team = config.get("team") if isinstance(config.get("team"), dict) else {}
+        hero_ids = team_hero_ids(team)
+        if not strategy_id or not hero_ids or not isinstance(pid, int) or isinstance(pid, bool):
+            return False
+        try:
+            preview = self.team_data(pid, hero_ids, boss_mode, timeout=3.0)
+        except TeamSetupError as error:
+            desktop_lifecycle_log(f"strategy_team_snapshot_skipped {error}")
+            return False
+        prepared = preview_team(preview, boss_mode)
+        if prepared is None or not same_team(prepared["heroTypeIds"], team.get("heroTypeIds")):
+            return False
+        try:
+            self.strategy_team_store().save(boss_mode, strategy_id, prepared,
+                                            display=portable_snapshot(display_preview(preview)))
+        except OSError:
+            return False
+        self.check_team_setups(preview)
+        return True
+
+    def simulation_team(self, body: dict[str, Any], config: dict[str, Any], boss_mode: str) -> dict[str, Any] | None:
+        source = str(body.get("teamSource") or "battle")
+        if source == "battle":
+            return None
+        pid = body.get("pid") if isinstance(body.get("pid"), int) and not isinstance(body.get("pid"), bool) else None
+        strategy_id = str(body.get("strategyId") or "")
+        # The team and the author's team come with the saved strategy group, the rules with the draft.
+        stored = strategy_for_mode(self.strategy_store(), boss_mode, strategy_id) if strategy_id else {}
+        config = stored if isinstance(stored.get("team"), dict) else config
+        team = config.get("team") if isinstance(config.get("team"), dict) else {}
+        hero_ids = team_hero_ids(team)
+
+        def current() -> dict[str, Any] | None:
+            if not hero_ids:
+                raise TeamSetupError("这个策略组还没有绑定你账号里的英雄：在“策略组队伍”卡片上选择英雄")
+            preview = self.team_data(pid, hero_ids, boss_mode)
+            self.check_team_setups(preview)
+            team = preview_team(preview, boss_mode)
+            if team is not None:
+                team["display"] = portable_snapshot(display_preview(preview))
+            return team
+
+        return simulation_team(
+            source, boss_mode, team.get("heroTypeIds"),
+            saved=self.strategy_team_store().load(boss_mode, strategy_id) if strategy_id else None,
+            reference=sanitize_reference_team(config.get("referenceTeam")),
+            check=latest_check(boss_mode),
+            current=current if pid is not None else None,
+            bonuses=(lambda type_ids: self.account_bonuses(pid, type_ids)) if pid is not None else None)
+
+    def team_preview_summary(self, pid: int | None, preview: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        preview = preview if preview is not None else self.prepared_team_preview(pid)
         if preview is None:
             return None
         return {"revision": str(preview.get("teamKey") or preview.get("observedAtTick")),
@@ -1476,6 +1662,23 @@ class ChimeraService:
                 "recent": recent_chimera_simulations(8),
                 "battleForecasts": recent_chimera_simulations(6, root=BATTLE_FORECAST_ROOT)}
 
+    def hydra_simulation_overview(self) -> dict[str, Any]:
+        return {"captures": self.hydra_simulations.captures(8), "job": self.hydra_simulations.status(),
+                "recent": recent_hydra_simulations(8)}
+
+    def start_hydra_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
+        config = normalized_strategy(body.get("config"), {}, "hydra")
+        runs = body.get("runs")
+        if not isinstance(runs, int) or isinstance(runs, bool):
+            raise ValueError("模拟场数无效")
+        pid = body.get("pid")
+        return self.hydra_simulations.start(
+            config,
+            {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
+            str(body.get("captureId") or ""), runs,
+            pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+            team=self.simulation_team(body, config, "hydra"))
+
     def start_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
         config = normalized_strategy(body.get("config"), {}, "chimera")
         runs = body.get("runs")
@@ -1486,7 +1689,8 @@ class ChimeraService:
             config,
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
-            pid if isinstance(pid, int) and not isinstance(pid, bool) else None)
+            pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+            team=self.simulation_team(body, config, "chimera"))
 
     def bootstrap(
         self, pid: int | None = None, force: bool = False,
@@ -1502,7 +1706,8 @@ class ChimeraService:
                 if isinstance(running, int) and running in available
                 else self.preferred_process_pid(available, boss_mode)
             )
-        health = storage_health(STRATEGY_STORE)
+        self.use_strategy_account(pid)
+        health = storage_health(self.store_path())
         strategy_bundle = self.strategy_bundle(boss_mode, None if health["ok"] else default_store())
         config = strategy_bundle["config"]
         live = (
@@ -1522,6 +1727,7 @@ class ChimeraService:
             "config": config,
             "activeStrategyId": strategy_bundle["activeStrategyId"],
             "strategyProfiles": strategy_bundle["strategyProfiles"],
+            "strategyAccount": strategy_bundle["strategyAccount"],
             **self.catalog_payload(),
             "revision": strategy_bundle["revision"],
             "storageHealth": health,
@@ -1555,6 +1761,7 @@ class ChimeraService:
             raise RuntimeError(
                 "尚未读取到当前账户的六头蛇准备界面或战斗状态；为避免误操作，暂不启动接管"
             )
+        self.use_strategy_account(pid, account)
         with self.lock:
             bundle = self.strategy_bundle(boss_mode)
             config = normalized_strategy(bundle["config"], bundle["config"], boss_mode)
@@ -1692,6 +1899,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if parsed.path.startswith("/api/"):
+            raw_pid = query.get("pid", [None])[0]
+            try:
+                self.server.service.use_strategy_account(
+                    int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None)
+            except Exception as error:  # Never block a request on the account lookup.
+                desktop_lifecycle_log(f"strategy_account_failed {type(error).__name__}: {error}")
         try:
             if parsed.path == "/api/session":
                 supplied = query.get("token", [""])[0]
@@ -1728,6 +1942,14 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     query.get("logCursor", [None])[0],
                 ))
                 return
+            if parsed.path == "/api/roster":
+                if not self._write_authorized():
+                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    return
+                raw_pid = query.get("pid", [None])[0]
+                pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
+                self._json({"heroes": self.server.service.roster(pid)})
+                return
             if parsed.path == "/api/team-preview":
                 if not self._write_authorized():
                     self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
@@ -1736,16 +1958,19 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
                 self._json({"preview": self.server.service.team_preview(pid)})
                 return
-            if parsed.path == "/api/chimera-simulation":
+            if parsed.path in ("/api/chimera-simulation", "/api/hydra-simulation"):
                 if not self._write_authorized():
                     self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
                     return
+                service = (self.server.service.hydra_simulations if parsed.path == "/api/hydra-simulation"
+                           else self.server.service.simulations)
                 simulation_id = query.get("id", [""])[0]
                 raw_run = query.get("run", [None])[0]
                 if raw_run is not None and str(raw_run).isdigit():
-                    self._json(self.server.service.simulations.load_run(simulation_id, int(raw_run)))
+                    run = service.load_run(simulation_id, int(raw_run))
+                    self._json({**run, "bossSkills": self.server.service.boss_skill_labels(run.get("timeline"), run.get("actors"))})
                 else:
-                    self._json(self.server.service.simulations.load(simulation_id))
+                    self._json(service.load(simulation_id))
                 return
             if parsed.path.startswith("/api/asset/"):
                 parts = [part for part in parsed.path.split("/") if part][2:]
@@ -1795,6 +2020,11 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
+            if self.path != "/api/ui-error":
+                try:
+                    self.server.service.use_strategy_account(body.get("pid"))
+                except Exception as error:  # Never block a request on the account lookup.
+                    desktop_lifecycle_log(f"strategy_account_failed {type(error).__name__}: {error}")
             if self.path == "/api/ui-error":
                 # Only bounded diagnostic strings, never frontend state or the session token.
                 fields = {key: re.sub(r"(?i)(token[=:]\s*)[^\s&]+", r"\1[redacted]", str(body.get(key, ""))[:limit])
@@ -1805,16 +2035,15 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             if self.path == "/api/config":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
                 config = body.get("config")
-                if body.get("capturePreparedTeam") is True:
-                    config = self.server.service.config_with_prepared_team(
-                        config, body.get("pid"), boss_mode
-                    )
+                strategy_id = str(body.get("strategyId") or "") or None
                 result = self.server.service.save_strategy(
                     config, boss_mode,
-                    strategy_id=str(body.get("strategyId") or "") or None,
+                    strategy_id=strategy_id,
                     expected_revision=body.get("expectedRevision"),
                 )
-                self._json({**result, "message": "策略组已保存"})
+                team_saved = snapshot_requested(body) and self.server.service.remember_strategy_team(
+                    body.get("pid"), boss_mode, strategy_id or result["activeStrategyId"])
+                self._json({**result, "message": "策略组和队伍数据已保存" if team_saved else "策略组已保存"})
                 return
             if self.path == "/api/config/recover":
                 self.server.service.recover_strategies(body.get("document"), body.get("bossMode", "chimera"))
@@ -1829,14 +2058,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 strategy_id = str(body.get("strategyId") or "").strip()
                 if action == "create":
                     config = body.get("config")
-                    if body.get("capturePreparedTeam") is True:
-                        config = self.server.service.config_with_prepared_team(
-                            config, body.get("pid"), boss_mode
-                        )
                     result = self.server.service.create_strategy_profile(
                         config, body.get("name"), boss_mode
                     )
                     message = "新策略组已创建"
+                    if snapshot_requested(body) and self.server.service.remember_strategy_team(
+                            body.get("pid"), boss_mode, result["activeStrategyId"]):
+                        message = "新策略组已创建，队伍数据已保存"
                 elif action == "rename":
                     if not strategy_id:
                         raise ValueError("缺少策略组 ID")
@@ -1894,6 +2122,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             if self.path == "/api/chimera-simulation/stop":
                 self.server.service.simulations.stop()
                 self._json({"job": self.server.service.simulations.status()})
+                return
+            if self.path == "/api/hydra-simulation/start":
+                self._json({"job": self.server.service.start_hydra_simulation(body)})
+                return
+            if self.path == "/api/hydra-simulation/stop":
+                self.server.service.hydra_simulations.stop()
+                self._json({"job": self.server.service.hydra_simulations.status()})
                 return
             if self.path == "/api/logs/clear":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
@@ -2065,6 +2300,33 @@ def self_test() -> int:
         ]
     )
     assert 26300 in {head.get("typeId") for head in service.hydra_heads()}
+    # The bosses' skills in a simulated battle are asked of a compatible running game once, then kept.
+    import tempfile
+    global read_agent_status
+    with tempfile.TemporaryDirectory() as folder:
+        real_catalog, real_status = service.boss_skills, read_agent_status
+        service.boss_skills = BossSkillCatalog(Path(folder) / "boss-skills.json")
+        asked: list[tuple[Any, ...]] = []
+
+        def fake_request(pid: Any, ids: list[int], kind: int, slot: str, what: str,
+                         timeout: float = 5.0) -> dict[str, Any]:
+            asked.append((pid, list(ids), kind, slot))
+            return {"status": "captured", "skills": [
+                {"typeId": 1266901, "name": "撞击", "description": "攻击1名敌人。", "defaultCooldown": 0}]}
+
+        service.agent_request = fake_request  # type: ignore[method-assign]
+        service.refresh_processes = lambda force=False: [{"pid": 4242}]  # type: ignore[method-assign]
+        read_agent_status = lambda pid: {"compatible": True}  # noqa: E731
+        try:
+            timeline = [{"source": "enemy", "skillTypeId": 1266901}, {"source": "enemy", "skillTypeId": 1266903},
+                        {"source": "policy", "skillTypeId": 99501}]
+            labels = service.boss_skill_labels(timeline)
+            assert labels == {"1266901": {"name": "撞击", "description": "攻击1名敌人。", "defaultCooldown": 0}}
+            assert asked == [(4242, [1266901, 1266903], REQUEST_SKILL_TYPES, "team_data")]
+            assert service.boss_skill_labels(timeline) == labels and len(asked) == 1
+        finally:
+            del service.agent_request, service.refresh_processes
+            service.boss_skills, read_agent_status = real_catalog, real_status
     # Only the six complete heads are exposed; installed art placeholders are
     # deliberately excluded from the strategy editor.
     for head_type_id in HYDRA_HEAD_TYPE_IDS:
@@ -2147,6 +2409,19 @@ def main() -> int:
                 0x40,
             )
             return 4
+        if getattr(sys, "frozen", False):
+            # Only the single running instance copies, before anything reads the data.
+            from data_root import DATA_DIR_NAME, migrate_legacy_data
+            if PROJECT_ROOT.name == DATA_DIR_NAME:
+                try:
+                    migrated = migrate_legacy_data(PROJECT_ROOT)
+                except OSError as error:
+                    raise RuntimeError(
+                        f"无法把旧版本的策略和记录复制到 {PROJECT_ROOT}：{error}\n\n"
+                        "旧数据没有改动；释放磁盘空间或检查权限后重新打开即可继续。"
+                    ) from error
+                if migrated:
+                    desktop_lifecycle_log(f"data_migrated from={migrated['from']} files={migrated['files']}")
     service = None
     server = None
     server_thread = None

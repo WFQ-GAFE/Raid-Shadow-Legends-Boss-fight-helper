@@ -21,7 +21,8 @@ type SnapshotHero = {
   relic?: { typeId: number | null; rank: number; level: number }
   sets?: { set: number; pieces: number }[]
   equipped?: number
-  stats?: { base: number[]; bonus: number[]; total: number[] }
+  // A simulation report has only the total: the battle stats when the battle started.
+  stats?: { base?: number[]; bonus?: number[]; total: number[] }
   statsReason?: string
 }
 export type TeamSnapshot = {
@@ -33,6 +34,9 @@ export type TeamSnapshot = {
   names?: { sets?: Record<string, string>; blessings?: Record<string, string>; relics?: Record<string, string>; masteries?: Record<string, string> }
   icons?: { sets?: Record<string, string>; blessings?: Record<string, string> }
   capturedAt?: string
+  // 1.1.1 exports: when the author saved the strategy, and the battle data to simulate the team.
+  savedAt?: string
+  simulation?: { format: string; schema: number; data: string }
 }
 export type TeamPreviewSummaryState = { revision: string; status?: string; bossMode?: string; heroes?: number }
 
@@ -150,7 +154,7 @@ export function TeamPreviewDialog({ language, snapshot, title, description, onCl
                   {hero.stats ? <div className="team-preview-stats">
                     {STATS.map(([stat, zh, en]) => (
                       <div key={stat}><small>{t(zh, en)}</small><strong>{statText(stat, hero.stats!.total[stat - 1])}</strong>
-                        <em>{t('基础', 'Base')} {statText(stat, hero.stats!.base[stat - 1])} | {t('加成', 'Bonus')} +{statText(stat, hero.stats!.bonus[stat - 1])}</em></div>
+                        {hero.stats!.base && hero.stats!.bonus && <em>{t('基础', 'Base')} {statText(stat, hero.stats!.base[stat - 1])} | {t('加成', 'Bonus')} +{statText(stat, hero.stats!.bonus[stat - 1])}</em>}</div>
                     ))}
                   </div> : <p className="muted">{t(`没有读到整体属性（${hero.statsReason ?? '未知'}）`, `Overall stats unavailable (${hero.statsReason ?? 'unknown'})`)}</p>}
                   <div className="team-preview-kit">

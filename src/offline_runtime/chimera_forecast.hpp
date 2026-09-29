@@ -6,6 +6,7 @@
 #include "policy_state.hpp"
 #include "policy_channel.hpp"
 #include "static_data_probe.hpp"
+#include "command_breakdown.hpp"
 
 #include <array>
 #include <cstring>
@@ -108,6 +109,13 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
     actions << '[';
     int commands = 0;
     constexpr int max_skill_commands = 20000;
+    PhaseTiming timing;
+    // Damage to the Chimera as its damage statistics count it (unknown without statistics).
+    CommandBreakdown breakdown(model, [&](void* unit) {
+        return unit == chimera && model.get<void*>(state, "ChimeraStatisticsByMultiplier")
+            ? projection.chimera_damage(state) : -1.0;
+    });
+    breakdown.observe(state);
     auto trials_before = read_trials();
     auto dead_before = dead_flags();
     while (!model.get<bool>(state, "BattleFinished") && commands < max_skill_commands) {
@@ -142,6 +150,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
             }
             return generator;
         };
+        timing.lap(PhaseTiming::kOther);
         if (player_action) {
             const std::uint64_t request = ++policy_requests;
             std::string decision_state;
@@ -152,9 +161,11 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
                 stop_detail = error.what();
                 break;
             }
+            timing.lap(PhaseTiming::kDecisionState);
             policy.send("{\"type\":\"decision_request\",\"sequence\":" + std::to_string(request) +
                         ",\"state\":" + decision_state + "}");
             const PolicyReply reply = policy.receive(request);
+            timing.lap(PhaseTiming::kPolicyWait);
             if (reply.automatic) {
                 command = make_original_enemy_ai_command(model, static_data, context, generator_for(auto_generator), active);
                 source = "auto";
@@ -177,6 +188,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
                 source = "policy";
                 ++policy_commands;
             }
+            timing.lap(PhaseTiming::kPlayerCommand);
         } else {
             try {
                 command = make_original_enemy_ai_command(model, static_data, context, generator_for(enemy_generator), active);
@@ -186,10 +198,13 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
                 break;
             }
         }
+        timing.lap(PhaseTiming::kEnemyAi);
         void* skill = model.get<void*>(command, "SkillCommand");
         void* target = skill ? model.get<void*>(skill, "Target") : nullptr;
         const int skill_type_id = skill ? model.get<int>(skill, "SkillTypeId") : 0;
-        model.call(processor, "ApplyCommand", {command});
+        timing.lap(PhaseTiming::kOther);
+        void* processed = model.call(processor, "ApplyCommand", {command});
+        timing.lap(PhaseTiming::kApply);
         const auto trials_after = read_trials();
         const auto dead_after = dead_flags();
         if (commands) actions << ',';
@@ -225,7 +240,9 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
             actions << (dead ? id : -1 - id);  // negative: revived
         }
         actions << "],\"" << reason << "\",[" << rng_before[0] << ',' << rng_before[1] << ',' << rng_before[2] << ','
-                << rng_before[3] << "]]";
+                << rng_before[3] << "],";
+        breakdown.append(actions, processed, state);
+        actions << ']';
         trials_before = trials_after;
         dead_before = dead_after;
         ++commands;
@@ -299,6 +316,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
            << ",\"bossDamageTaken\":" << static_cast<double>(model.get<std::int64_t>(chimera, "DamageTaken")) / 4294967296.0
            << ",\"commands\":" << commands << ",\"policyRequests\":" << policy_requests
            << ",\"policyCommands\":" << policy_commands << ",\"autoCommands\":" << auto_commands
+           << ",\"phaseMs\":" << timing.json()
            << ",\"actors\":" << actors.str() << ",\"trials\":" << trials.str() << ",\"actions\":" << actions.str();
     return report.str();
 }

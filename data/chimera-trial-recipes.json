@@ -28,7 +28,7 @@
     },
     {
       "trialId": 8000503,
-      "name": "Ram/翅膀/苦难：耗尽对决条",
+      "name": "Ram/翅膀/困难：耗尽对决条",
       "form": "Ram",
       "part": "Wing",
       "difficulty": "Hard",
@@ -75,7 +75,7 @@
     },
     {
       "trialId": 8000506,
-      "name": "Ram/尾巴/苦难：虚弱和降低防御下单次技能伤害",
+      "name": "Ram/尾巴/困难：虚弱和降低防御下单次技能伤害",
       "form": "Ram",
       "part": "Tail",
       "difficulty": "Hard",
@@ -124,7 +124,7 @@
     },
     {
       "trialId": 8000509,
-      "name": "Ram/爪子/苦难：阻挡六个眩晕",
+      "name": "Ram/爪子/困难：阻挡六个眩晕",
       "form": "Ram",
       "part": "Paw",
       "difficulty": "Hard",
@@ -172,7 +172,7 @@
     },
     {
       "trialId": 8000512,
-      "name": "Lion/翅膀/苦难：阻挡伤害或不死",
+      "name": "Lion/翅膀/困难：阻挡伤害或不死",
       "form": "Lion",
       "part": "Wing",
       "difficulty": "Hard",
@@ -211,7 +211,7 @@
     },
     {
       "trialId": 8000515,
-      "name": "Lion/尾巴/苦难：反击和组队攻击",
+      "name": "Lion/尾巴/困难：反击和组队攻击",
       "form": "Lion",
       "part": "Tail",
       "difficulty": "Hard",
@@ -257,7 +257,7 @@
     },
     {
       "trialId": 8000518,
-      "name": "Lion/爪子/苦难：反弹或苦痛连接伤害",
+      "name": "Lion/爪子/困难：反弹或苦痛连接伤害",
       "form": "Lion",
       "part": "Paw",
       "difficulty": "Hard",
@@ -296,7 +296,7 @@
     },
     {
       "trialId": 8000521,
-      "name": "Snake/翅膀/苦难：指定数量减益且无阻挡主动技能",
+      "name": "Snake/翅膀/困难：指定数量减益且无阻挡主动技能",
       "form": "Snake",
       "part": "Wing",
       "difficulty": "Hard",
@@ -343,7 +343,7 @@
     },
     {
       "trialId": 8000524,
-      "name": "Snake/尾巴/苦难：多目标复活",
+      "name": "Snake/尾巴/困难：多目标复活",
       "form": "Snake",
       "part": "Tail",
       "difficulty": "Hard",
@@ -382,7 +382,7 @@
     },
     {
       "trialId": 8000527,
-      "name": "Snake/爪子/苦难：降低精准和增加抗性下抵抗",
+      "name": "Snake/爪子/困难：降低精准和增加抗性下抵抗",
       "form": "Snake",
       "part": "Paw",
       "difficulty": "Hard",

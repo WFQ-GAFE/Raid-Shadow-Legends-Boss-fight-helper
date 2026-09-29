@@ -29,7 +29,6 @@ $agentManifestPath = if ([System.IO.Path]::IsPathRooted($AgentDirectory)) {
 else {
     Join-Path $AgentDirectory "Release\RaidChimeraAgent.dll"
 }
-$agentCache = Join-Path $agentRoot "CMakeCache.txt"
 $offlineRuntimeRoot = if ([System.IO.Path]::IsPathRooted($OfflineRuntimeDirectory)) {
     [System.IO.Path]::GetFullPath($OfflineRuntimeDirectory)
 }
@@ -72,16 +71,6 @@ if (-not (Test-Path -LiteralPath $offlineProbe -PathType Leaf)) {
     throw "Build src\offline_runtime (x64 Release) into $OfflineRuntimeDirectory before packaging."
 }
 $offlineProbeSha256 = (Get-FileHash -LiteralPath $offlineProbe -Algorithm SHA256).Hash.ToLowerInvariant()
-if (-not (Test-Path -LiteralPath $agentCache -PathType Leaf)) {
-    throw "The agent CMake cache is missing; configure the agent build before packaging."
-}
-$agentCacheText = Get-Content -LiteralPath $agentCache -Raw
-if ($agentCacheText -notmatch '(?m)^RAID_HYDRA_SELECTOR_HOOK:BOOL=OFF\s*$') {
-    throw "Refusing to package: RAID_HYDRA_SELECTOR_HOOK must be OFF. Live selector capture is retired."
-}
-if ($agentCacheText -notmatch '(?m)^RAID_HYDRA_RESEARCH_CAPTURE:BOOL=OFF\s*$') {
-    throw "Refusing to package: RAID_HYDRA_RESEARCH_CAPTURE must be OFF. Live replay input capture is retired after the GameAssembly crash; use offline capture and simulation."
-}
 $agentSource = Get-Content -LiteralPath (Join-Path $projectRoot "src\agent\agent.cpp") -Raw
 if ($agentSource -notmatch 'kAgentBuildId\s*=\s*(\d+)ULL') {
     throw "The agent source does not declare a readable build ID."
@@ -124,7 +113,6 @@ if (-not $agentBuildIdFound) {
     throw "Refusing to package: the agent binary build ID does not match src\agent\agent.cpp. Rebuild the agent first."
 }
 $agentSha256 = (Get-FileHash -LiteralPath $agent -Algorithm SHA256).Hash.ToLowerInvariant()
-$researchCaptureEnabled = $false
 if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
     throw "The Windows version metadata file is missing."
 }
@@ -160,8 +148,12 @@ try {
         "--hidden-import", "chimera_replay_source",
         "--hidden-import", "chimera_simulation",
         "--hidden-import", "chimera_simulation_service",
+        "--hidden-import", "simulation_common",
+        "--hidden-import", "hydra_simulation",
+        "--hidden-import", "hydra_simulation_service",
         "--hidden-import", "chimera_forecast_live",
         "--hidden-import", "team_preview",
+        "--hidden-import", "data_root",
         "--exclude-module", "tkinter",
         "--exclude-module", "ttkbootstrap",
         "--collect-all", "UnityPy",
@@ -204,7 +196,7 @@ $safetyManifest = [ordered]@{
     version = $version
     agentBuildId = $agentBuildId
     selectorHookEnabled = $false
-    researchInputCaptureEnabled = [bool]$researchCaptureEnabled
+    researchInputCaptureEnabled = $false
     validatedHydraJsonCaptureEnabled = $true
     agentPath = $agentManifestPath
     agentSha256 = $agentSha256
@@ -213,6 +205,18 @@ $safetyManifest = [ordered]@{
     builtAtLocal = [DateTimeOffset]::Now.ToString("o")
 }
 $safetyManifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $distPath "agent-safety.json") -Encoding UTF8
+# Explorer keeps the icon of an executable path in memory; a rebuilt package at
+# the same path (and taskbar pins to it) would keep showing the previous icon.
+try {
+    Add-Type -Namespace RaidBuild -Name Shell -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll")]
+public static extern void SHChangeNotify(int eventId, uint flags, System.IntPtr item1, System.IntPtr item2);
+'@ -ErrorAction Stop
+    [RaidBuild.Shell]::SHChangeNotify(0x08000000, 0x1000, [IntPtr]::Zero, [IntPtr]::Zero)
+}
+catch {
+    Write-Warning "Could not ask Explorer to refresh icons: $($_.Exception.Message)"
+}
 if ($OneDir) {
     $releaseRoot = Split-Path -Parent $executable
     foreach ($document in @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "VERSION")) {

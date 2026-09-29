@@ -10,7 +10,7 @@ function Show-LaunchError {
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
         $Message,
-        "Raid Boss Strategy Center",
+        "RSL-Boss-helper",
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     ) | Out-Null
@@ -23,16 +23,6 @@ function Test-IsAdministrator {
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$desktopExe = Join-Path $projectRoot "build\desktop\ChimeraStrategyCenter\ChimeraStrategyCenter.exe"
-if (-not $SourceConsole -and (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
-    try {
-        Start-Process -FilePath $desktopExe -WorkingDirectory (Split-Path -Parent $desktopExe) | Out-Null
-    }
-    catch {
-        Show-LaunchError "Failed to start the desktop application:`n`n$($_.Exception.Message)"
-    }
-    exit 0
-}
 
 if (-not (Test-IsAdministrator)) {
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
@@ -60,7 +50,7 @@ try {
     if ($SourceConsole) {
         $env:CHIMERA_PROJECT_ROOT = $projectRoot
         $entryPath = Join-Path $projectRoot $entryArgument
-        $host.UI.RawUI.WindowTitle = "Raid Boss Strategy Center - Source Test"
+        $host.UI.RawUI.WindowTitle = "RSL-Boss-helper - Source Test"
         Write-Host "Administrator: True" -ForegroundColor Green
         Write-Host "Raid and account diagnostics will be shown here. Close this window to stop the tool." -ForegroundColor Cyan
         Write-Host ""
@@ -89,7 +79,7 @@ try {
     if ($process.HasExited) {
         Show-LaunchError ((
             "The local UI service exited immediately (exit code {0}).`n`n" +
-            "Close any existing Raid Boss tool window, then try again."
+            "Close any existing RSL-Boss-helper window, then try again."
         ) -f $process.ExitCode)
     }
 }

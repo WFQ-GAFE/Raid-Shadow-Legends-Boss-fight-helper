@@ -8,6 +8,9 @@ from pathlib import Path
 import tempfile
 import uuid
 
+import time
+
+from capture_identity import capture_key, drop_repeats, unique_first
 from chimera_capture_live import ChimeraCaptureMonitor, INPUT_WAIT_SECONDS
 from chimera_replay_source import validate_chimera_replay_source
 from hydra_replay_source import SETTINGS_SOURCE, SETUPS_SOURCE, ReplaySourceError
@@ -175,3 +178,51 @@ def test_monitor_skips_mid_battle_takeover_and_reports_missing_source() -> None:
         assert telemetry["status"] == "unavailable"
         failure = root / telemetry["folder"] / "capture-failure.json"
         assert json.loads(failure.read_text("utf-8"))["battleGeneration"] == 9
+
+
+def write_opening(folder: Path, setup: dict, settings: str = '{"ActiveEngineVersion":11750}') -> Path:
+    folder.mkdir(parents=True)
+    (folder / "battle-setup.json").write_text(json.dumps([setup]), encoding="utf-8")
+    (folder / "battle-settings.json").write_text(settings, encoding="utf-8")
+    return folder
+
+
+def test_openings_that_differ_only_per_battle_are_repeats() -> None:
+    base = {"z": "a", "r": 1, "t": 100, "k": 8, "i": 13029005,
+            "f": {"i": 5, "h": [{"t": 1, "i": 20001, "l": 60, "b": [{"i": 9}], "p": {"h": 1, "r": [{"p": {"1": 0}}]}}]},
+            "s": {"h": [{"i": 26866, "l": 280}]}}
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        first = write_opening(root / "first", base)
+        # Another battle of the same set-up: new id, seed, time and in-game skill order.
+        again = copy.deepcopy(base)
+        again.update(z="b", r=2, t=200)
+        again["f"]["h"][0]["p"] = {"h": 1, "r": [{"p": {"1": 3}}]}
+        repeat = write_opening(root / "repeat", again)
+        # Anything else is another set-up: gear, level, boss, engine settings.
+        levelled = copy.deepcopy(base)
+        levelled["f"]["h"][0]["l"] = 59
+        other = write_opening(root / "other", levelled)
+        patched = write_opening(root / "patched", base, '{"ActiveEngineVersion":11760}')
+        assert capture_key(first) == capture_key(repeat)
+        assert len({capture_key(first), capture_key(other), capture_key(patched)}) == 3
+        assert capture_key(root / "missing") is None
+        assert unique_first([repeat, first, other]) == [repeat, other]
+        # The battle just saved stays; its older repeat goes, other set-ups stay.
+        assert drop_repeats(root, repeat) == ["first"]
+        assert sorted(item.name for item in root.iterdir()) == ["other", "patched", "repeat"]
+
+
+def test_monitor_keeps_one_opening_per_set_up() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        messages: list[str] = []
+        monitor = ChimeraCaptureMonitor(emit=messages.append, work_root=root, run_later=lambda task: task())
+        for generation in (7, 8):
+            source, decision = records(generation)
+            monitor.observe_decision(decision, ipc=FakeIpc(source), config={"mode": "execute", "rules": []})
+            assert monitor.telemetry()["status"] == "saved"
+            time.sleep(0.01)  # folder names carry the time in milliseconds
+        folders = list(root.iterdir())
+        assert len(folders) == 1 and monitor.folder == folders[0]
+        assert any("已删除 1 份队伍配置相同" in message for message in messages)

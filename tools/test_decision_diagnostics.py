@@ -10,8 +10,7 @@ from chimera_controller import evaluate
 from controller_manager import ControllerManager
 from decision_journal import DecisionJournal
 from decision_observability import decision_details
-from lydia_trial_rules import BASE_GROUPS, update_profile
-from test_lydia_trial_rules import profile, state
+from test_lydia_trial_rules import BASE_GROUPS, profile, state, update_profile
 
 
 def traced(snapshot):

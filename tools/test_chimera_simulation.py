@@ -7,7 +7,7 @@ import tempfile
 import time
 
 from chimera_simulation import ChimeraOfflinePolicySession, _rule_index_by_name, action_window, summarize_run
-from chimera_simulation_service import SimulationService, aggregate, derived_seeds, list_captures
+from chimera_simulation_service import SimulationService, aggregate, list_captures, simulation_seeds
 
 
 ONE = 1 << 32
@@ -137,11 +137,15 @@ def test_the_session_stops_instead_of_repeating_a_turn() -> None:
     assert session.decide(state)["reason"] == "no_progress"
 
 
-def test_seeds_start_with_the_captured_battle_and_repeat() -> None:
-    seeds = derived_seeds(1987038969, 10)
+def test_seeds_start_with_the_captured_battle_then_are_fresh() -> None:
+    seeds = simulation_seeds(1987038969, 10)
     assert seeds[0] == 1987038969 and len(set(seeds)) == 10
-    assert seeds == derived_seeds(1987038969, 10)
     assert all(-0x80000000 <= seed <= 0x7FFFFFFF for seed in seeds)
+    # Every simulation draws new seeds (not the same few for one opening).
+    assert simulation_seeds(1987038969, 10)[1:] != seeds[1:]
+    # A repeated draw is skipped.
+    draws = iter([5, 5, 7])
+    assert simulation_seeds(1, 3, draw=lambda bits: next(draws)) == [1, 5 - 0x80000000, 7 - 0x80000000]
 
 
 def test_service_runs_saves_and_loads_a_simulation() -> None:
@@ -184,3 +188,60 @@ def test_service_runs_saves_and_loads_a_simulation() -> None:
         assert [row["source"] for row in detail["timeline"]] == ["enemy", "policy", "policy", "policy"]
         assert detail["timeline"][1]["ruleIndex"] == 1 and detail["timeline"][2]["reservationReleased"] is True
         assert detail["timeline"][3]["trials"][0]["after"] == 1.0
+
+
+def test_service_swaps_the_strategy_team_into_the_opening() -> None:
+    import chimera_simulation_service
+    from test_team_setups import hero, server_hero, write_capture
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        capture = root / "captures" / "abc-1"
+        write_capture(capture, [server_hero(11, 7001, 1)])
+        (capture / "packed").mkdir()
+        (capture / "packed" / "conversion-report.json").write_text("{}", encoding="utf-8")
+        converted, calls = [], []
+
+        def convert(folder, probe):
+            converted.append(folder)
+            (folder / "packed").mkdir()
+            return {}
+
+        def runner(probe, packed, strategy, *, seed, team_selection, **_):
+            calls.append((packed, team_selection))
+            return result(True, seed=1234 if seed is None else seed)
+
+        original = chimera_simulation_service.convert
+        chimera_simulation_service.convert = convert
+        try:
+            service = SimulationService(capture_root=root / "captures", simulation_root=root / "sims",
+                                        runner=runner, bundle_provider=lambda pid: root)
+            team = {"source": "strategy", "heroes": [hero(21, 8001), hero(22, 8002)], "powers": None,
+                    "area": None, "rule": "building", "savedAt": "2026-09-27 10:00:00",
+                    "check": {"compared": 1, "matched": 1}}
+            job = service.start(STRATEGY, {"id": "s1", "name": "测试"}, "abc-1", 2, team=team)
+            for _ in range(200):
+                if service.status()["status"] != "running":
+                    break
+                time.sleep(0.02)
+            assert service.status()["status"] == "complete", service.status()
+        finally:
+            chimera_simulation_service.convert = original
+        team_input = root / "sims" / job["id"] / "team-input"
+        assert converted == [team_input]  # the saved opening itself is never rewritten
+        assert all(packed == team_input / "packed" for packed, _ in calls) and len(calls) == 2
+        assert calls[0][1] == {"heroTypeIds": [8001, 8002], "heroIds": [21, 22]}
+        summary = service.load(job["id"])
+        assert summary["capture"]["teamSource"] == "strategy" and summary["capture"]["teamHeroTypeIds"] == [8001, 8002]
+        assert summary["capture"]["seed"] == 1234 and summary["capture"]["teamSavedAt"] == "2026-09-27 10:00:00"
+        assert json.loads((capture / "capture-provenance.json").read_text("utf-8"))["teamHeroIds"] == [11]
+
+
+def test_parallel_runs_are_at_most_five_and_shrink_with_the_machine() -> None:
+    from chimera_simulation_service import parallel_runs
+    gb = 1024 ** 3
+    assert parallel_runs(10, cores=24, available_memory=32 * gb) == 5
+    assert parallel_runs(2, cores=24, available_memory=32 * gb) == 2  # never more than asked
+    assert parallel_runs(10, cores=4, available_memory=32 * gb) == 2  # two cores stay for the game and tool
+    assert parallel_runs(10, cores=24, available_memory=3 * gb) == 3  # about 1 GB per engine process
+    assert parallel_runs(10, cores=1, available_memory=0) == 1  # always at least one

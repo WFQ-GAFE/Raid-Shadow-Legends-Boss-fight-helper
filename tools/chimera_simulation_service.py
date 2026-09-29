@@ -13,7 +13,7 @@ import gzip
 import json
 import os
 from pathlib import Path
-import random
+import secrets
 import shutil
 import statistics
 import threading
@@ -26,6 +26,11 @@ from chimera_simulation import action_window, form_window, run_simulation, summa
 from convert_hydra_replay_source import ConversionError, convert
 from hydra_forecast_live import (ForecastSetupError, RUNTIME_ROOT, ensure_runtime_bundle, game_build_directory,
                                  newest_static_data, probe_source)
+from simulation_common import action_uses, read_run, write_run
+from forecast_advice import advice, failure_advice
+from capture_identity import unique_first
+from team_preview import TeamSnapshotStore
+from team_setups import prepare_team_input, team_report
 from strategy_storage import atomic_write_json
 
 
@@ -39,9 +44,38 @@ SIMULATION_ROOT = PROJECT_ROOT / "cache" / "chimera-simulations"
 BATTLE_FORECAST_ROOT = PROJECT_ROOT / "cache" / "chimera-battle-forecasts"
 BATTLE_FORECAST_PREFIX = "battle-"
 KEEP_SIMULATIONS = 20
-MAX_RUNS = 20
-PARALLEL_RUNS = 3
-FORM_NAMES = {0: "Ultimate", 1: "Ram", 2: "Lion", 3: "Viper"}
+# 100 runs: rare outcomes (about 1 in 20 to 100) become visible; ~10 MB per Hydra simulation.
+MAX_RUNS = 100
+# Runs at once: at most five, fewer on a smaller machine (see parallel_runs).
+MAX_PARALLEL_RUNS = 5
+# Each run is one offline engine process: about one busy core and 300-450 MB
+# (up to its 2 GB limit); two cores stay for the game and this tool.
+RESERVED_CORES = 2
+MEMORY_PER_RUN = 1024 ** 3
+
+
+def _available_memory() -> int | None:
+    import ctypes
+
+    class MemoryStatus(ctypes.Structure):
+        _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                    ("available", ctypes.c_ulonglong), ("total_page", ctypes.c_ulonglong),
+                    ("available_page", ctypes.c_ulonglong), ("total_virtual", ctypes.c_ulonglong),
+                    ("available_virtual", ctypes.c_ulonglong), ("available_extended", ctypes.c_ulonglong)]
+    try:
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(MemoryStatus)
+        return int(status.available) if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else None
+    except (AttributeError, OSError):
+        return None
+
+
+def parallel_runs(runs: int, cores: int | None = None, available_memory: int | None = None) -> int:
+    """How many runs to simulate at once: at most five, fewer without enough cores or free memory."""
+    cores = cores if cores is not None else (os.cpu_count() or 2)
+    memory = available_memory if available_memory is not None else _available_memory()
+    by_memory = MAX_PARALLEL_RUNS if memory is None else memory // MEMORY_PER_RUN
+    return int(max(1, min(MAX_PARALLEL_RUNS, runs, cores - RESERVED_CORES, by_memory)))
 
 
 def _read_json(path: Path) -> Any:
@@ -66,6 +100,13 @@ def difficulty_for_stage(stage_id: object) -> int | None:
     return stage_id % 10 if isinstance(stage_id, int) and 13000000 < stage_id < 14000000 else None
 
 
+def _verdict_with_advice(verdict: dict[str, Any]) -> dict[str, Any]:
+    """A battle-forecast verdict; records from before 1.1.1 get their explanation on reading."""
+    if verdict.get("advice") or verdict.get("status") not in ("unavailable", "not_opening"):
+        return verdict
+    return {**verdict, "advice": advice("chimera", verdict.get("reason"))}
+
+
 def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, Any]]:
     """Saved Chimera captures that a simulation can use, newest first."""
     base = root or CAPTURE_ROOT
@@ -75,7 +116,7 @@ def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, A
     except OSError:
         return []
     result = []
-    for folder in folders:
+    for folder in unique_first(folders):  # an opening repeating a newer one's set-up adds nothing
         provenance = _read_json(folder / "capture-provenance.json")
         if not isinstance(provenance, dict) or provenance.get("type") != "verified_chimera_replay_source":
             continue
@@ -96,12 +137,16 @@ def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, A
     return result
 
 
-def derived_seeds(captured_seed: int, count: int) -> list[int]:
-    """The captured seed first, then reproducible other 32-bit seeds."""
-    generator = random.Random(captured_seed)
+def simulation_seeds(captured_seed: int, count: int,
+                     draw: Callable[[int], int] = secrets.randbits) -> list[int]:
+    """The captured seed first (an exact replay), then fresh random 32-bit seeds.
+
+    Every simulation draws new ones, like the server gives every real battle a
+    new seed: repeated simulations of one opening explore more outcomes.
+    """
     seeds = [captured_seed]
     while len(seeds) < count:
-        value = generator.getrandbits(32) - 0x80000000
+        value = draw(32) - 0x80000000
         if value not in seeds:
             seeds.append(value)
     return seeds
@@ -254,9 +299,10 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
             "form": action.get("form"), "actorId": action.get("actorId"), "actorTypeId": action.get("actorTypeId"),
             "source": action.get("source"), "skillTypeId": action.get("skillTypeId"), "targetId": action.get("targetId"),
             "damage": round(float(action.get("damage") or 0)), "trials": changes,
-            "deaths": action.get("deaths") or [],
+            "deaths": action.get("deaths") or [], "uses": action_uses(action.get("uses")),
             "rule": decision.get("rule"), "ruleIndex": decision.get("ruleIndex"),
             "reservationReleased": decision.get("reservationReleased") is True,
+            **({"state": decision["snapshot"]} if isinstance(decision.get("snapshot"), dict) else {}),
         })
     return rows
 
@@ -270,31 +316,67 @@ def _prune(root: Path) -> None:
         shutil.rmtree(stale, ignore_errors=True)
 
 
-def recent_simulations(limit: int = 10, root: Path | None = None) -> list[dict[str, Any]]:
-    base = root or SIMULATION_ROOT
+_row_cache: dict[tuple[str, str], tuple[tuple[int, int], dict[str, Any] | None]] = {}
+_row_cache_lock = threading.Lock()
+
+
+def summary_row(folder: Path, build: Callable[[str, dict[str, Any]], dict[str, Any]]) -> dict[str, Any] | None:
+    """A history row built from a simulation's summary, re-read only when the summary changes.
+
+    The interface polls the history every second and a 100-run summary is
+    several hundred KB.
+    """
+    path = folder / "summary.json"
     try:
-        folders = sorted((item for item in base.iterdir() if item.is_dir()),
-                         key=lambda item: item.stat().st_mtime, reverse=True)[:limit]
+        stat = path.stat()
+    except OSError:
+        return None
+    key, stamp = (str(path), build.__qualname__), (stat.st_mtime_ns, stat.st_size)
+    with _row_cache_lock:
+        cached = _row_cache.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    summary = _read_json(path)
+    row = build(folder.name, summary) if isinstance(summary, dict) else None
+    with _row_cache_lock:
+        _row_cache[key] = (stamp, row)
+    return row
+
+
+def recent_folders(base: Path, limit: int) -> list[Path]:
+    try:
+        return sorted((item for item in base.iterdir() if item.is_dir()),
+                      key=lambda item: item.stat().st_mtime, reverse=True)[:limit]
     except OSError:
         return []
-    result = []
-    for folder in folders:
-        summary = _read_json(folder / "summary.json")
-        if isinstance(summary, dict):
-            aggregate_value = summary.get("aggregate") or {}
-            result.append({"id": folder.name, "createdAt": summary.get("createdAt"),
-                           "strategyName": summary.get("strategy", {}).get("name"),
-                           "captureId": summary.get("capture", {}).get("id"),
-                           "status": summary.get("status"), "runs": aggregate_value.get("runs"),
-                           "allMandatoryRuns": aggregate_value.get("allMandatoryRuns"),
-                           "finishedRuns": aggregate_value.get("finishedRuns"),
-                           "stuckRuns": len(aggregate_value.get("stuckRuns") or []),
-                           **({"verdict": summary["verdict"]} if isinstance(summary.get("verdict"), dict) else {})})
-    return result
+
+
+def _history_row(name: str, summary: dict[str, Any]) -> dict[str, Any]:
+    aggregate_value = summary.get("aggregate") or {}
+    return {"id": name, "createdAt": summary.get("createdAt"),
+            "strategyName": summary.get("strategy", {}).get("name"),
+            "captureId": summary.get("capture", {}).get("id"),
+            "status": summary.get("status"), "runs": aggregate_value.get("runs"),
+            "allMandatoryRuns": aggregate_value.get("allMandatoryRuns"),
+            "finishedRuns": aggregate_value.get("finishedRuns"),
+            "stuckRuns": len(aggregate_value.get("stuckRuns") or []),
+            **({"verdict": _verdict_with_advice(summary["verdict"])}
+               if isinstance(summary.get("verdict"), dict) else {})}
+
+
+def recent_simulations(limit: int = 10, root: Path | None = None) -> list[dict[str, Any]]:
+    rows = (summary_row(folder, _history_row) for folder in recent_folders(root or SIMULATION_ROOT, limit))
+    return [row for row in rows if row is not None]
 
 
 class SimulationService:
-    """One simulation at a time, run in the background of the desktop app."""
+    """One simulation at a time, run in the background of the desktop app.
+
+    The Chimera service; HydraSimulationService (hydra_simulation_service.py)
+    replaces the capture lookup, runner arguments, summaries and run view.
+    """
+
+    boss_mode = "chimera"
 
     def __init__(self, capture_root: Path = CAPTURE_ROOT, simulation_root: Path = SIMULATION_ROOT,
                  runner: Callable[..., dict[str, Any]] = run_simulation,
@@ -335,14 +417,13 @@ class SimulationService:
             return copy.deepcopy(self.job) if self.job else None
 
     def start(self, strategy: dict[str, Any], strategy_meta: dict[str, Any], capture_id: str, runs: int,
-              pid: int | None = None) -> dict[str, Any]:
+              pid: int | None = None, team: dict[str, Any] | None = None) -> dict[str, Any]:
+        """``team``: another team to put into the saved opening (team_setups), or None for its own."""
         if not isinstance(strategy, dict):
             raise ValueError("缺少策略")
         controller.require_list_execution(strategy)
         runs = max(1, min(MAX_RUNS, int(runs)))
-        folder = (self.capture_root / str(capture_id)).resolve()
-        if folder.parent != self.capture_root.resolve() or not (folder / "capture-provenance.json").is_file():
-            raise ValueError("找不到这次战斗的开局数据")
+        folder = self._capture_folder(str(capture_id))
         with self.lock:
             if self.job and self.job.get("status") == "running":
                 raise RuntimeError("已有模拟正在进行")
@@ -351,13 +432,70 @@ class SimulationService:
                         "currentBossTurn": None, "phase": "preparing", "message": "准备离线引擎",
                         "startedAt": time.strftime("%H:%M:%S")}
             self.cancel.clear()
-        thread = threading.Thread(target=self._work, name="chimera-simulation", daemon=True,
-                                  args=(simulation_id, copy.deepcopy(strategy), dict(strategy_meta), folder, runs, pid))
+        thread = threading.Thread(target=self._work, name=f"{self.boss_mode}-simulation", daemon=True,
+                                  args=(simulation_id, copy.deepcopy(strategy), dict(strategy_meta), folder, runs, pid,
+                                        copy.deepcopy(team) if team else None))
         thread.start()
         return self.status() or {}
 
     def stop(self) -> None:
         self.cancel.set()
+
+    # --- Boss-specific steps (Chimera here; overridden for Hydra) ---
+
+    def _capture_folder(self, capture_id: str) -> Path:
+        folder = (self.capture_root / capture_id).resolve()
+        if folder.parent != self.capture_root.resolve() or not (folder / "capture-provenance.json").is_file():
+            raise ValueError("找不到这次战斗的开局数据")
+        return folder
+
+    def _capture_facts(self, provenance: dict[str, Any]) -> dict[str, Any]:
+        facts = {key: provenance.get(key) for key in ("stageId", "seed", "teamHeroTypeIds", "bossHeroTypeId")}
+        facts["difficulty"] = difficulty_for_stage(provenance.get("stageId"))
+        return facts
+
+    def _runner_arguments(self, capture: Path, provenance: dict[str, Any]) -> dict[str, Any]:
+        static_state = {}
+        static = _read_json(capture / "decision-static.json")
+        if isinstance(static, dict):
+            static_state.update(static)
+        opening = _first_state(capture) or {}
+        if isinstance(opening.get("rotationIdentity"), dict):
+            static_state["rotationIdentity"] = opening["rotationIdentity"]
+        start_selection = opening.get("chimeraStartSelection")
+        return {"static_state": static_state,
+                "team_selection": {"heroTypeIds": provenance.get("teamHeroTypeIds") or [],
+                                   "heroIds": provenance.get("teamHeroIds") or []},
+                "start_selection": start_selection if isinstance(start_selection, dict) else None}
+
+    @staticmethod
+    def _team_arguments(arguments: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+        """Runner inputs that name the team, for a swapped-in team."""
+        updated = {**arguments, "team_selection": {"heroTypeIds": provenance["teamHeroTypeIds"],
+                                                   "heroIds": provenance["teamHeroIds"]}}
+        selection = arguments.get("start_selection")
+        if isinstance(selection, dict):
+            updated["start_selection"] = {**selection, "heroIds": provenance["teamHeroIds"],
+                                          "heroTypeIds": provenance["teamHeroTypeIds"]}
+        return updated
+
+    @staticmethod
+    def _progress(values: dict[str, Any]) -> tuple[str, int]:
+        return "currentBossTurn", int(values.get("bossTurns") or 0)
+
+    @staticmethod
+    def _summarize(result: dict[str, Any], strategy: dict[str, Any]) -> dict[str, Any]:
+        return summarize_run(result, strategy)
+
+    @staticmethod
+    def _aggregate(summaries: list[dict[str, Any]], strategy: dict[str, Any]) -> dict[str, Any]:
+        return aggregate(summaries, strategy)
+
+    @staticmethod
+    def _run_view(result: dict[str, Any]) -> dict[str, Any]:
+        engine = result.get("engine") or {}
+        return {"actors": engine.get("actors", []), "trials": engine.get("trials", []),
+                "timeline": run_timeline(result)}
 
     def _update(self, **values: Any) -> None:
         with self.lock:
@@ -365,7 +503,7 @@ class SimulationService:
                 self.job.update(values)
 
     def _work(self, simulation_id: str, strategy: dict[str, Any], meta: dict[str, Any], capture: Path,
-              runs: int, pid: int | None) -> None:
+              runs: int, pid: int | None, team: dict[str, Any] | None = None) -> None:
         output = self.simulation_root / simulation_id
         summary: dict[str, Any] = {"schema": 1, "id": simulation_id, "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                                    "status": "running", "strategy": {**meta, "rules": len(strategy.get("rules", []))},
@@ -374,31 +512,38 @@ class SimulationService:
             output.mkdir(parents=True, exist_ok=False)
             atomic_write_json(output / "strategy.json", strategy)
             provenance = _read_json(capture / "capture-provenance.json") or {}
-            summary["capture"].update({key: provenance.get(key) for key in
-                                       ("stageId", "seed", "teamHeroTypeIds", "bossHeroTypeId")})
-            summary["capture"]["difficulty"] = difficulty_for_stage(provenance.get("stageId"))
+            summary["capture"].update(self._capture_facts(provenance))
             bundle = self.bundle_provider(pid)
             probe = bundle / "raid_offline_probe.exe"
             packed = capture / "packed"
             if not (packed / "conversion-report.json").is_file():
                 shutil.rmtree(packed, ignore_errors=True)
                 convert(capture, probe)
-            static_state = {}
-            static = _read_json(capture / "decision-static.json")
-            if isinstance(static, dict):
-                static_state.update(static)
-            opening = _first_state(capture) or {}
-            if isinstance(opening.get("rotationIdentity"), dict):
-                static_state["rotationIdentity"] = opening["rotationIdentity"]
-            start_selection = opening.get("chimeraStartSelection")
-            team = {"heroTypeIds": provenance.get("teamHeroTypeIds") or [],
-                    "heroIds": provenance.get("teamHeroIds") or []}
+            # The runs read their own copy: a newer battle with the same set-up
+            # replaces this opening meanwhile (capture_identity.drop_repeats).
+            shutil.copytree(packed, output / "battle-input")
+            packed = output / "battle-input"
+            arguments = self._runner_arguments(capture, provenance)
+            summary["capture"]["teamSource"] = team.get("source") if team else "battle"
+            battle_setup = capture / "battle-setup.json"
+            if team is not None:
+                # The same opening (boss, stage, seed) with the chosen team swapped in.
+                team_input = output / "team-input"
+                provenance = prepare_team_input(capture, team["heroes"], self.boss_mode, team_input,
+                                                area=team.get("area"), rule=team["rule"], powers=team.get("powers"))
+                convert(team_input, probe)
+                packed = team_input / "packed"
+                battle_setup = team_input / "battle-setup.json"
+                arguments = self._team_arguments(arguments, provenance)
+                summary["capture"].update(teamHeroTypeIds=provenance["teamHeroTypeIds"],
+                                          teamSavedAt=team.get("savedAt"), teamCheck=team.get("check"))
             # The memory the live controller would start the next battle with.
             memory = controller.SkillCapabilityMemory.load(controller.DEFAULT_CAPABILITY_CACHE,
                                                            controller.DEFAULT_CAPABILITY_SEED)
-            seeds = derived_seeds(int(provenance.get("seed", 0)), runs)
+            seeds = simulation_seeds(int(provenance.get("seed", 0)), runs)
             summaries: list[dict[str, Any] | None] = [None] * runs
             progress: dict[int, int] = {}
+            opening: dict[str, Any] = {}
 
             def one(index: int) -> None:
                 if self.cancel.is_set():
@@ -406,15 +551,16 @@ class SimulationService:
                 seed = None if index == 0 else seeds[index]
 
                 def on_progress(values: dict[str, Any]) -> None:
-                    progress[index] = values.get("bossTurns") or 0
-                    self._update(currentBossTurn=max(progress.values()))
+                    key, value = self._progress(values)
+                    progress[index] = value
+                    self._update(**{key: max(progress.values())})
 
                 result = self.runner(probe, packed, strategy, seed=seed, capability_memory=memory,
-                                     static_state=static_state, team_selection=team,
-                                     start_selection=start_selection if isinstance(start_selection, dict) else None,
-                                     cancel=self.cancel, on_progress=on_progress)
-                atomic_write_json(output / f"run-{index + 1:02d}.json", result)
-                run_summary = summarize_run(result, strategy)
+                                     cancel=self.cancel, on_progress=on_progress, **arguments)
+                write_run(output, index + 1, result)
+                if index == 0:
+                    opening["stats"] = result.get("openingStats") or {}
+                run_summary = self._summarize(result, strategy)
                 run_summary["index"] = index + 1
                 summaries[index] = run_summary
                 with self.lock:
@@ -424,23 +570,26 @@ class SimulationService:
                         self.job["phase"] = "running"
 
             self._update(phase="running", message=f"正在模拟 0/{runs} 场")
-            with ThreadPoolExecutor(max_workers=min(PARALLEL_RUNS, runs)) as pool:
+            with ThreadPoolExecutor(max_workers=parallel_runs(runs)) as pool:
                 list(pool.map(one, range(runs)))
             done = [item for item in summaries if item is not None]
+            summary["team"] = self._team_report(battle_setup, opening.get("stats") or {}, team, provenance)
             summary["runs"] = done
-            summary["aggregate"] = aggregate(done, strategy)
+            summary["aggregate"] = self._aggregate(done, strategy)
             summary["status"] = "cancelled" if self.cancel.is_set() else "complete"
             self._update(status=summary["status"], phase=summary["status"],
                          message="模拟完成" if summary["status"] == "complete" else "已停止")
         except (ForecastSetupError, ConversionError, ValueError, OSError) as error:
             summary["status"] = "failed"
             summary["reason"] = str(error)
-            self._update(status="failed", phase="failed", reason=str(error), message=f"模拟无法进行：{error}")
+            note = failure_advice(self.boss_mode, error)
+            self._update(status="failed", phase="failed", reason=str(error), message=f"模拟无法进行：{error}",
+                         **({"advice": note} if note else {}))
         except Exception as error:  # Never let a simulation take down the app.
             summary["status"] = "failed"
             summary["reason"] = f"{type(error).__name__}: {error}"
             self._update(status="failed", phase="failed", reason=type(error).__name__,
-                         message=f"模拟失败：{type(error).__name__}")
+                         message=f"模拟失败：{type(error).__name__}", advice=failure_advice(self.boss_mode, error))
         finally:
             try:
                 if output.is_dir():
@@ -448,6 +597,17 @@ class SimulationService:
             except OSError:
                 pass
             _prune(self.simulation_root)
+
+    @staticmethod
+    def _team_report(battle_setup: Path, stats: dict[str, Any], team: dict[str, Any] | None,
+                     provenance: dict[str, Any]) -> dict[str, Any] | None:
+        """The team this simulation ran with, for the report's team view (never fails the job)."""
+        try:
+            display = team.get("display") if team else TeamSnapshotStore().find(provenance.get("teamHeroTypeIds"))
+            return team_report(battle_setup, stats, source=team.get("source") if team else "battle",
+                               display=display, saved_at=team.get("savedAt") if team else None)
+        except Exception:  # The report works without it.
+            return None
 
     def _folder(self, simulation_id: str) -> Path:
         root = (self.battle_forecast_root if str(simulation_id).startswith(BATTLE_FORECAST_PREFIX)
@@ -466,11 +626,9 @@ class SimulationService:
 
     def load_run(self, simulation_id: str, index: int) -> dict[str, Any]:
         folder = self._folder(simulation_id)
-        result = _read_json(folder / f"run-{int(index):02d}.json")
+        result = read_run(folder, index)
         if not isinstance(result, dict):
             raise FileNotFoundError("这一场的记录不存在")
         engine = result.get("engine") or {}
         return {"index": int(index), "status": result.get("status"), "reason": result.get("reason"),
-                "seed": engine.get("seed"), "actors": engine.get("actors", []),
-                "trials": engine.get("trials", []), "stuck": result.get("stuck"),
-                "timeline": run_timeline(result)}
+                "seed": engine.get("seed"), "stuck": result.get("stuck"), **self._run_view(result)}

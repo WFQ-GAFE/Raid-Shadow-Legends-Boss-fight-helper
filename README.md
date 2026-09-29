@@ -8,123 +8,59 @@
 
 **[下载最新版 / Download the latest release](https://github.com/WFQ-GAFE/Raid-Shadow-Legends-Boss-fight-helper/releases/latest)** · **[加入 Discord 社区 / Join the Discord community](https://discord.gg/Tv2rWKgbVr)**
 
-A local Windows strategy editor and battle controller for the Chimera and Hydra encounters in **RAID: Shadow Legends**.
+A Windows helper for the Chimera and Hydra fights in **RAID: Shadow Legends**: write skill rules for your team, let the tool fight by them, and test the rules offline before a real battle.
 
-一款面向 **RAID: Shadow Legends** 奇美拉与六头蛇战斗的本地 Windows 策略编辑器和战斗控制器。
+**RAID: Shadow Legends** 奇美拉与六头蛇战斗的 Windows 助手：为队伍编写技能规则，让工具按规则出手，并在实战前离线检验规则。
 
-Current release: **1.1.0**. See the [1.1.0 release notes](docs/1.1.0-release-notes.md).
+Current version: **1.1.1** ([release notes](docs/1.1.1-release-notes.md)) · 当前版本：**1.1.1**（[更新说明](docs/1.1.1-release-notes.md)）
 
-当前版本：**1.1.0**，更新内容见 [1.1.0 发布说明](docs/1.1.0-release-notes.md)。
+## Getting started / 开始使用
 
-本地固定启动入口：`build\release\RSL-Boss-helper.exe`。桌面快捷方式指向这个文件；后续发布更新同一路径，快捷方式无需重建。1.1.0 起工具改名，旧入口 `AllianceBossStrategyStudio.exe` 不再更新，请把快捷方式改为指向新文件（策略、日志和缓存位置不变）。发布时如文件被占用，请关闭工具后重试。构建与发布说明见 [通用 release](docs/release-workflow.md)。
+1. Download `RSL-Boss-helper-1.1.1.exe` from the latest release and run it; no installation is needed (Windows x64 with the Microsoft Edge WebView2 Runtime).<br>
+   从最新版本下载 `RSL-Boss-helper-1.1.1.exe` 直接运行，无需安装（Windows x64，需要 Microsoft Edge WebView2 运行库）。
+2. Start RAID, pick your account in the tool and choose Chimera or Hydra. Open the boss preparation screen and the tool reads your team.<br>
+   打开游戏，在工具中选择账号和奇美拉或六头蛇模式。打开 Boss 准备界面，工具会读取你的队伍。
+3. Write rules in **Strategy Tree** (or import a strategy someone shared) and set **Battle Goals**. On the preparation screen, click **Start** under **Controller**: the tool starts the battle and plays it from the opening.<br>
+   在「策略树」编写规则（或导入别人分享的策略），设好「战斗目标」。在准备界面点「接管控制」里的「开始执行」，工具会开始战斗并从开局接管。
+4. After updating the tool, restart the game once. Your strategies are kept in `%LOCALAPPDATA%\RSL-Boss-helper` and carried over from earlier versions automatically.<br>
+   更新工具后请重启一次游戏。策略保存在 `%LOCALAPPDATA%\RSL-Boss-helper`，旧版本的策略会自动带过来。
 
-规则数量条件：[仅统计增益或减益的设置方法](docs/1.0.5-effect-count-conditions.md)。
+## What's new in 1.1.1 / 1.1.1 新功能
 
-Stability fixes and verification / 稳定性修复与验收：[1.0.5 修复说明](docs/1.0.5-stability-fixes.md).
+- **Hydra strategy simulation:** after the tool has played a Hydra battle from its opening, choose that battle under **Strategy Simulation** and click **Simulate current rules**.<br>
+  **六头蛇策略模拟：** 工具从开局接管过一场六头蛇战斗后，在「策略模拟」选择这场开局，点击「模拟当前规则」。
+- **Simulate any team:** set a strategy's team with **Choose champions** (the game only needs to be open), then simulate it in any saved battle, even against a boss it never fought.<br>
+  **模拟任意队伍：** 用「选择英雄」设定策略组的队伍（游戏开着即可），再放进任意保存的开局模拟，即使这支队伍没打过这个 Boss。
+- **Better reports:** up to 100 runs, the team and stats used, the bosses' skills, and what every action set off (ally attacks, counterattacks, provoked attacks) with each champion's damage.<br>
+  **更完整的报告：** 最多 100 场，显示用的队伍和属性、Boss 的技能，以及每次出手引发的组队攻击、反击、激怒攻击和每名英雄打了多少。
+- **Hydra:** new target **Lowest-DEF Head**; **Selected Champions Are Never Devoured** now counts real swallows only.<br>
+  **六头蛇：** 新增目标「防御最低蛇头」；「所选英雄从未被吞噬」只按真正被吞下判定。
+- Strategy groups are kept per game account.<br>
+  策略组按游戏账号分开保存。
 
-The application reads live battle state from the selected RAID client, evaluates user-defined rules, and submits guarded in-game actions. It includes an English and Chinese interface, separate Chimera and Hydra workspaces, multiple saved strategy profiles, live team discovery, hero and skill catalogs, target priorities, and independent run logs.
+## Features / 主要功能
 
-本应用会从选定的 RAID 客户端读取实时战斗状态，评估用户定义的规则，并提交经过安全校验的游戏内操作。它提供中英文界面、相互独立的奇美拉与六头蛇工作区、多个可保存的策略组、实时队伍识别、英雄与技能目录、目标优先级以及独立的运行日志。
+- **Skill rules:** ordered rules with conditions on buffs and debuffs, cooldowns, turns and which champions are alive, preferred targets, and a default skill order as fallback. You can still play manually at any time.<br>
+  **技能规则：** 按顺序执行的规则，可设置增益/减益、冷却、回合、英雄存活等条件和优先目标，没有可用规则时按默认技能顺序出手。随时可以手动操作。
+- **Chimera:** follows forms and trials, keeps skills reserved for trials, and regroups for free when the required trials or the damage goal can no longer be reached.<br>
+  **奇美拉：** 跟踪形态和试炼，为试炼保留技能；必要试炼或伤害目标已无法达成时免费重整。
+- **Hydra:** targets heads by type, and regroups for free when the devour order breaks your conditions or the damage goal is missed; an opening forecast can predict the devour order.<br>
+  **六头蛇：** 按蛇头类型选择目标；吞噬顺序违反设定条件或伤害未达标时免费重整；开局推演可以提前预测吞噬顺序。
+- **Offline simulation:** replay saved Chimera and Hydra battles in a copy of the game's own engine with your rules, and see where they succeed or stall.<br>
+  **离线模拟：** 用游戏自己的引擎副本按你的规则重打保存的奇美拉和六头蛇战斗，查看规则在哪里成功、在哪里卡住。
+- **Sharing:** export and import strategies, including the author's team setup.<br>
+  **分享：** 导入导出策略，并附带作者的队伍配置。
+- English and Chinese interface.<br>
+  中英文界面。
 
-## Current capabilities / 当前功能
+## Please note / 注意
 
-### Shared features / 通用功能
+Automating play may break the game's terms of service and can lead to account penalties; use it at your own risk. The tool does not bypass protections, change network traffic or modify server data, and every action is checked again inside the game before it is carried out.
 
-- Detects running RAID accounts and binds a controller session to both the player name and player ID.<br>
-  检测正在运行的 RAID 账户，并将控制器会话同时绑定到玩家名称和玩家 ID。
-- Reads the currently selected preparation team and refreshes it when heroes are changed.<br>
-  读取准备界面中当前选择的队伍，并在更换英雄时刷新队伍信息。
-- Builds local hero, skill, effect, trial, and visual-asset catalogs from RAID data.<br>
-  根据 RAID 数据在本地建立英雄、技能、效果、试炼和视觉资源目录。
-- Supports multiple named strategy profiles for different teams.<br>
-  支持为不同队伍创建多个命名策略组。
-- Exports and imports portable strategy files without account-specific champion instance IDs.<br>
-  支持导入和导出可移植的策略文件，其中不包含账户专属的英雄实例 ID。
-- Provides English as the default language, with Chinese available from the language selector.<br>
-  默认使用英文，并可通过语言选择器切换为中文。
-- Shows hero portraits, skill icons, buff/debuff icons, and encounter-specific boss icons.<br>
-  显示英雄头像、技能图标、增益/减益图标以及各战斗专属的 Boss 图标。
-- Keeps Chimera and Hydra strategies, live state, and run logs separate.<br>
-  将奇美拉与六头蛇的策略、实时状态和运行日志相互独立保存。
-- Supports strict ordered rules, fallback skill orders, nested AND/OR/NOT condition groups, effect and cooldown checks, exact champion alive/dead checks, remaining-turn checks, and preferred targets.<br>
-  支持严格的规则顺序、备用技能顺序、可嵌套的 AND/OR/NOT 条件组、效果与冷却检查、指定英雄存活/死亡检查、剩余回合检查和优先目标。
-- Revalidates the account, acting hero, skill readiness, legal targets, battle mode, and current turn on the game thread before executing an action.<br>
-  执行动作前，会在游戏线程中再次校验账户、行动英雄、技能就绪状态、合法目标、战斗模式和当前回合。
-- Allows normal manual interaction. A stale action is rejected safely when manual input or turn progression changes the battle state.<br>
-  允许玩家正常进行手动操作；当手动输入或回合推进改变战斗状态时，过期动作会被安全拒绝。
+自动化操作可能违反游戏条款并导致账号受罚，风险由使用者自行承担。本工具不绕过保护、不改动网络通信或服务器数据，每个操作在执行前都会在游戏内再次校验。
 
-### Chimera / 奇美拉
+## Developers / 开发者
 
-- Tracks forms, form transitions, trials, trial chains, damage, effects, cooldowns, and legal targets.<br>
-  跟踪形态、形态切换、试炼、试炼链、伤害、效果、技能冷却和合法目标。
-- Supports trial-aware automatic decisions and structured recipes for known trial categories.<br>
-  支持能够识别当前试炼的自动决策，以及针对已知试炼类型的结构化方案。
-- Handles Mythical champion transformations and keeps the two forms' skill catalogs separate.<br>
-  支持神话英雄变形，并将两种形态的技能目录分开处理。
-- Can perform a guarded free regroup when a required trial becomes impossible or when the opening whole-battle simulation predicts that the goals cannot be met, then verify the same five champions before re-entering battle.<br>
-  当必要试炼已不可能完成，或开局整场模拟预计目标无法达成时，可以在安全校验下执行免费重整，并在重新进入战斗前确认仍为相同的五名英雄。
+Source, design notes, build and release steps are in [`docs`](docs). Licensed under the GNU General Public License v3.0 (`LICENSE`); third-party licenses are listed in `THIRD_PARTY_NOTICES.md`.
 
-### Hydra / 六头蛇
-
-- Identifies Hydra heads by head type rather than by screen position.<br>
-  根据蛇头类型而不是屏幕位置识别六头蛇目标。
-- Supports conditions and target priorities for all heads, any head, or preferred head types.<br>
-  支持针对全部蛇头、任一蛇头或优先蛇头类型设置条件和目标优先级。
-- Uses loose head matching so respawns and rotation changes do not invalidate a strategy unnecessarily.<br>
-  使用宽松的蛇头匹配方式，避免蛇头重生或轮换变化无谓地使策略失效。
-- Tracks total encounter damage without accumulating obsolete per-head health entries after respawns.<br>
-  跟踪整场战斗的总伤害，并且不会在蛇头重生后不断累积已经失效的单个蛇头生命值记录。
-- Can stop at the result screen when the damage target is met or safely restart with the verified six-champion team when it is not.<br>
-  达成伤害目标时可以停留在结算界面；未达成时，可以在确认六名英雄队伍无误后安全地重新战斗。
-- Prioritizes dead allies for revive skills and falls back to automatic legal-target selection when no preferred target is available.<br>
-  复活技能会优先选择已死亡的队友；没有可用的优先目标时，则回退到自动选择合法目标。
-- Experimental devour-order forecast: at battle start, the battle is simulated for up to 1,000 turns in an isolated copy of the game's own engine with the running strategy. After the forecast matches every live turn played so far, a predicted mark order that violates the devour-order conditions triggers a free regroup. See `docs/1.0.6-hydra-devour-forecast.md`.<br>
-  实验性吞噬顺序推演：开战后在隔离的原版引擎副本中用当前策略模拟最多 1000 回合；推演与已进行的实战回合逐项一致后，若预计的标记顺序违反吞噬顺序条件，即执行免费重整。详见 `docs/1.0.6-hydra-devour-forecast.md`。
-- Experimental Chimera strategy simulation: replay a saved Chimera opening in the isolated original engine with the rules being edited, once with the original seed and optionally with other seeds, and report completed trials, mandatory-trial progress, damage, deaths and per-rule usage. See `docs/1.0.6-chimera-strategy-simulation.md`.<br>
-  实验性奇美拉策略模拟：用已保存的奇美拉开局数据，在隔离的原版引擎中按正在编辑的规则重打整场（第 1 场为原战斗，其余换随机种子），报告能完成的试炼、必要试炼进度、伤害、阵亡和每条规则的使用情况；模拟严格按规则出手，规则让英雄无动作可用时该场中断并记录原因。接管时还会在开局后台模拟整场战斗，与实战逐项核对一致后，预计无法完成目标或规则会卡住即免费重整。详见 `docs/1.0.6-chimera-strategy-simulation.md`。
-- 队伍配置预览与分享：在 Boss 准备界面读取所选英雄在游戏英雄界面上的整体属性（基础与加成）、套装件数、专精、祝福和圣物（含游戏图标）；导出策略组时一并导出，导入后作为“作者的队伍”供参考。详见 `docs/1.0.6-team-preview.md`。
-
-## Repository layout / 仓库结构
-
-- `src/agent` — native IL2CPP state agent and guarded command queue<br>
-  `src/agent` — 原生 IL2CPP 状态代理与带安全校验的指令队列
-- `tools/chimera_controller.py` — live state evaluation and strategy execution<br>
-  `tools/chimera_controller.py` — 实时状态评估与策略执行
-- `tools/chimera_web.py` — local React application service and controller bridge<br>
-  `tools/chimera_web.py` — 本地 React 应用服务与控制器桥接层
-- `tools/boss_modes.py` — Chimera/Hydra mode and strategy-profile handling<br>
-  `tools/boss_modes.py` — 奇美拉/六头蛇模式与策略组处理
-- `src/offline_runtime`, `tools/hydra_forecast.py`, `tools/hydra_forecast_live.py` — isolated original-engine Hydra forecast<br>
-  `src/offline_runtime`、`tools/hydra_forecast.py`、`tools/hydra_forecast_live.py` — 隔离原版引擎的六头蛇开局推演
-- `tools/chimera_inventory.py` — read-only offline inventory of the local RAID installation<br>
-  `tools/chimera_inventory.py` — 对本地 RAID 安装内容进行只读离线清点
-- `ui` — React, TypeScript, and Vite interface<br>
-  `ui` — 使用 React、TypeScript 和 Vite 构建的界面
-- `config` — example strategies and local user-strategy location<br>
-  `config` — 示例策略与本地用户策略的存放位置
-- `data` — stable encounter definitions and rotation catalogs<br>
-  `data` — 稳定的战斗定义与轮换目录
-- `docs` — state contracts, strategy reference, and historical research notes<br>
-  `docs` — 状态契约、策略参考和历史研究记录
-- `third_party` — vendored runtime/build dependencies and their licenses<br>
-  `third_party` — 随项目提供的运行/构建依赖及其许可证
-
-Local user strategies, caches, logs, compiled binaries, and build output are excluded from Git.
-
-本地用户策略、缓存、日志、已编译的二进制文件和构建输出均不会纳入 Git。
-
-## Safety boundaries / 安全边界
-
-Injection and automated play may violate the game's rules and can result in account penalties. Use this project at your own risk.
-
-注入和自动化游戏操作可能违反游戏规则，并可能导致账户受到处罚。使用本项目的风险由用户自行承担。
-
-The project does not implement anti-detection, stealth loading, protection bypasses, network manipulation, or server-side data modification. State-changing actions are allowed only after local state validation, and every submitted action is checked again inside the game process.
-
-本项目不实现反检测、隐蔽加载、保护绕过、网络操控或服务器端数据修改。只有通过本地状态校验后才允许执行会改变状态的操作，并且每个已提交的动作都会在游戏进程内部再次接受检查。
-
-## License / 许可证
-
-This project is licensed under the GNU General Public License v3.0. See `LICENSE` for the full text. Third-party licenses are listed in `THIRD_PARTY_NOTICES.md` and the corresponding directories under `third_party`.
-
-本项目采用 GNU General Public License v3.0 许可证。完整条款请参阅 `LICENSE`。第三方许可证列于 `THIRD_PARTY_NOTICES.md` 以及 `third_party` 下的对应目录中。
+源码说明、设计记录以及构建和发布步骤见 [`docs`](docs)。本项目采用 GNU General Public License v3.0（`LICENSE`），第三方许可证见 `THIRD_PARTY_NOTICES.md`。
