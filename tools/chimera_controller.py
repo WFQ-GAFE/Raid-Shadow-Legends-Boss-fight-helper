@@ -14,12 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from damage_units import damage_text
 from decision_observability import emit_telemetry, record_rule, decision_details, decision_context, devour_details, pick
 from agent_ipc import AgentIpc
 from lifecycle_observability import ObservedIpc
-from hydra_state import hydra_head_is_devouring, hydra_devouring_head_ids
+from hydra_state import hydra_head_is_devouring, hydra_devouring_head_ids, hydra_swallowed_hero_ids
 from boss_modes import (
     canonical_hydra_head_type_id,
+    hydra_head_defence,
     hydra_head_has_native_markers,
     hydra_head_is_exposed_neck,
     load_strategy_store,
@@ -59,7 +61,6 @@ LIFECYCLE_RESTART_HYDRA_RESULT = 6
 LIFECYCLE_RESTART_CHIMERA_RESULT = 7
 LIFECYCLE_START_NONCE = 0x80000001
 LIFECYCLE_FREE_REGROUP_NONCE = 0x80000002
-LIFECYCLE_PREPARE_FREE_REGROUP_NONCE = 0x80000100
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.GetTickCount64.argtypes = []
 kernel32.GetTickCount64.restype = ctypes.c_ulonglong
@@ -937,10 +938,13 @@ class HydraDevourRetryTrigger:
     actual_hero_name: str
     observed_sequence: tuple[str, ...]
     mark_limit: int | None = None
+    swallowed: bool = False
 
 
-# isAnyOf/isNoneOf constrain one mark position; neverMarked forbids the
-# selected heroes as any mark target (optionally within the first N marks).
+# isAnyOf/isNoneOf constrain one mark position. neverMarked ("never devoured";
+# the historical key name) forbids the selected heroes being actually swallowed
+# (optionally by one of the first N marks); being marked alone, or dying before
+# the swallow, does not count.
 HYDRA_DEVOUR_RELATIONS = frozenset({"isAnyOf", "isNoneOf", "neverMarked"})
 
 
@@ -965,7 +969,7 @@ def hydra_devour_requirement_text(
         return f"该位置必须是以下英雄之一：{hero_labels}"
     if relation == "neverMarked":
         scope = f"前 {mark_limit} 个标记内" if mark_limit else "整场战斗中"
-        return f"以下英雄{scope}不能成为吞噬目标：{hero_labels}"
+        return f"以下英雄{scope}不能被吞下：{hero_labels}"
     return f"该位置不能是以下英雄之一：{hero_labels}"
 
 
@@ -1525,15 +1529,6 @@ def decision_rotation_observation_key(
     )
 
 
-def latest_decision_state(pid: int) -> dict[str, Any] | None:
-    try:
-        with AgentIpc(pid) as ipc:
-            state = ipc.decision()
-            return state if is_battle_decision_state(state) else None
-    except FileNotFoundError:
-        return None
-
-
 def is_battle_decision_state(state: Any) -> bool:
     """Reject catalog snapshots that share the native decision-state channel."""
     return isinstance(state, dict) and state.get("type") == "decision_state"
@@ -1708,6 +1703,24 @@ def observe_hydra_devour_sequence(
             sequence.append(new_mark)
             tracker["lastMarkedActorId"] = actor_id
 
+    # Heroes actually swallowed, each tied to the latest mark on them.
+    inside_now = hydra_swallowed_hero_ids(state)
+    inside_before = tracker.get("swallowedInside")
+    inside_before = set(inside_before) if isinstance(inside_before, (set, list, tuple)) else set()
+    swallows = tracker.get("swallows")
+    if not isinstance(swallows, list):
+        swallows = []
+        tracker["swallows"] = swallows
+    if tracker.get("armed") is True:
+        for actor_id in sorted(inside_now - inside_before):
+            position = next((index for index in range(len(sequence), 0, -1)
+                             if sequence[index - 1].get("actorId") == actor_id), None)
+            if position is None:
+                continue
+            mark = sequence[position - 1]
+            swallows.append({"actorId": actor_id, "heroTypeId": mark.get("heroTypeId"),
+                             "name": mark.get("name"), "markIndex": position})
+    tracker["swallowedInside"] = inside_now
     tracker["lastContext"] = context
     tracker["lastHydraTurn"] = hydra_turn
     tracker["lastPlayerTurn"] = player_turn
@@ -1744,24 +1757,24 @@ def evaluate_hydra_devour_retry_trigger(
                 if isinstance(value, int) and not isinstance(value, bool) and value > 0
             )
             mark_limit = hydra_devour_mark_limit(condition)
-            considered = sequence if mark_limit is None else sequence[:mark_limit]
-            hit = next(
+            # Only an actual swallow counts; a mark's swallow comes when the next
+            # mark lands, so the condition stays open for the whole battle.
+            swallows = tracker.get("swallows", []) if isinstance(tracker, dict) else []
+            actual = next(
                 (
-                    (position, item)
-                    for position, item in enumerate(considered, 1)
+                    item
+                    for item in swallows
                     if item.get("heroTypeId") in forbidden
+                    and (mark_limit is None or item.get("markIndex", 0) <= mark_limit)
                 ),
                 None,
             )
-            if hit is None:
-                if mark_limit is not None and len(sequence) >= mark_limit:
-                    evaluated.add(index)
+            if actual is None:
                 continue
             evaluated.add(index)
-            position, actual = hit
             return HydraDevourRetryTrigger(
                 condition_index=index,
-                mark_index=position,
+                mark_index=int(actual.get("markIndex") or 0),
                 relation="neverMarked",
                 expected_hero_type_ids=forbidden,
                 actual_hero_type_id=actual["heroTypeId"],
@@ -1771,6 +1784,7 @@ def evaluate_hydra_devour_retry_trigger(
                     for item in sequence
                 ),
                 mark_limit=mark_limit,
+                swallowed=True,
             ), new_mark, armed
         mark_index = condition.get("markIndex")
         if (
@@ -1841,6 +1855,12 @@ def hydra_target_sort_key(entity: dict[str, Any]) -> tuple[float, int]:
     )
 
 
+def hydra_defence_sort_key(entity: dict[str, Any]) -> tuple[float, float, int]:
+    """Lowest current defence (buffs and debuffs included) first, then lowest health."""
+    defence = hydra_head_defence(entity)
+    return (defence if defence is not None else math.inf, *hydra_target_sort_key(entity))
+
+
 def hydra_priority_targets(
     selector: dict[str, Any], bosses: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -1849,8 +1869,8 @@ def hydra_priority_targets(
     ordered: list[dict[str, Any]] = []
     used_actor_ids: set[int] = set()
 
-    def append_targets(values: list[dict[str, Any]]) -> None:
-        for boss in sorted(values, key=hydra_target_sort_key):
+    def append_targets(values: list[dict[str, Any]], key=hydra_target_sort_key) -> None:
+        for boss in sorted(values, key=key):
             actor_id = boss.get("id")
             if not isinstance(actor_id, int) or actor_id in used_actor_ids:
                 continue
@@ -1884,7 +1904,8 @@ def hydra_priority_targets(
                 boss
                 for boss in remaining
                 if hydra_head_is_exposed_neck(boss)
-            ]
+            ],
+            hydra_defence_sort_key,
         )
     elif fallback == "lowestHp":
         append_targets(remaining)
@@ -2074,16 +2095,16 @@ def states_for_rule_targets(
                 }
         if selected is not None:
             selected_targets.append(selected)
-    elif selector_type == "exposedNeck":
-        selected = next(
+    elif selector_type in {"exposedNeck", "lowestDefenseBoss"}:
+        # Lowest current defence first; each candidate gets its chance to
+        # satisfy the rule's target conditions before the rule is skipped.
+        selected_targets.extend(sorted(
             (
                 boss for boss in bosses
-                if hydra_head_is_exposed_neck(boss)
+                if selector_type == "lowestDefenseBoss" or hydra_head_is_exposed_neck(boss)
             ),
-            None,
-        )
-        if selected is not None:
-            selected_targets.append(selected)
+            key=hydra_defence_sort_key,
+        ))
     elif selector_type == "lowestHpBoss":
         selected = min(
             bosses,
@@ -3352,6 +3373,7 @@ def select_target(
         )
     if selector_type in {
         "lowestHpBoss",
+        "lowestDefenseBoss",
         "devouringHead",
         "exposedNeck",
         "hydraHeadPriority",
@@ -3417,6 +3439,8 @@ def select_target(
             or (
                 candidates[0]
                 if selector_type in {"hydraHeadPriority", "hydraHeadSlot"}
+                else min(candidates, key=hydra_defence_sort_key)
+                if selector_type in {"exposedNeck", "lowestDefenseBoss"}
                 else min(candidates, key=hydra_target_sort_key)
             )
         )
@@ -4588,7 +4612,7 @@ def result_screen_reached(
     if config is None:
         print(
             "战斗已结束，已停留在结算画面；"
-            f"伤害 {raw_damage if damage is not None else '未知'}，"
+            f"伤害 {damage_text(damage) if damage is not None else '未知'}，"
             f"完成试炼 {ledger.get('completedChallengeCount', '未知')}。"
             "工具不会保存结果或开始下一轮。",
             flush=True,
@@ -4627,7 +4651,7 @@ def result_screen_reached(
         trials_met = not missing_ids
         if damage_met and trials_met:
             print(
-                f"奇美拉全部目标已达成：伤害 {damage:g}/{minimum_damage:g}，"
+                f"奇美拉全部目标已达成：伤害 {damage_text(damage)}/{damage_text(minimum_damage)}，"
                 f"必要试炼 {len(mandatory_ids)}/{len(mandatory_ids)}；"
                 "已停留在结算画面并暂停接管，不会自动保存结果。",
                 flush=True,
@@ -4643,9 +4667,9 @@ def result_screen_reached(
         )
         execute = execute_requested and config.get("mode") == "execute"
         damage_label = (
-            f"{damage:g}/{minimum_damage:g}"
+            f"{damage_text(damage)}/{damage_text(minimum_damage)}"
             if damage is not None
-            else f"未知/{minimum_damage:g}"
+            else f"未知/{damage_text(minimum_damage)}"
         )
         missing_label = (
             ", ".join(map(str, missing_ids)) if missing_ids else "无"
@@ -4711,7 +4735,7 @@ def result_screen_reached(
         return True
     if damage >= minimum_damage:
         print(
-            f"六头蛇伤害目标已达成：{damage:g}/{minimum_damage:g}；"
+            f"六头蛇伤害目标已达成：{damage_text(damage)}/{damage_text(minimum_damage)}；"
             "已停留在结算画面并暂停接管，不会自动保存结果。",
             flush=True,
         )
@@ -4724,7 +4748,7 @@ def result_screen_reached(
     execute = execute_requested and config.get("mode") == "execute"
     if behavior != "free_regroup_and_retry_manual" or not execute:
         print(
-            f"六头蛇战斗结束时伤害未达目标：{damage:g}/{minimum_damage:g}；"
+            f"六头蛇战斗结束时伤害未达目标：{damage_text(damage)}/{damage_text(minimum_damage)}；"
             "当前设置不执行自动重整，已停留在结算画面。",
             flush=True,
         )
@@ -4734,7 +4758,7 @@ def result_screen_reached(
     maximum = int(objectives.get("maxRegroupRetries", 10))
     if maximum > 0 and used >= maximum:
         print(
-            f"六头蛇伤害未达目标（{damage:g}/{minimum_damage:g}），"
+            f"六头蛇伤害未达目标（{damage_text(damage)}/{damage_text(minimum_damage)}），"
             f"且已达到自动重整上限 {maximum}；已停留在结算画面。",
             flush=True,
         )
@@ -4743,7 +4767,7 @@ def result_screen_reached(
         raise RuntimeError("六头蛇自动重整缺少已验证的控制会话")
 
     print(
-        f"六头蛇伤害未达目标：{damage:g}/{minimum_damage:g}；"
+        f"六头蛇伤害未达目标：{damage_text(damage)}/{damage_text(minimum_damage)}；"
         f"正在执行第 {used + 1} 次免费重整并重新开战。",
         flush=True,
     )
@@ -5365,36 +5389,6 @@ def select_ready_boss_damage(
         target_id=boss_id,
         target_label=str(boss.get("name", "奇美拉")),
         trial_id=trial_id,
-    )
-
-
-def select_basic_boss_preparation(
-    name: str, state: dict[str, Any]
-) -> Decision | None:
-    boss = current_boss(state)
-    if boss is None or not isinstance(boss.get("id"), int):
-        return None
-    boss_id = int(boss["id"])
-    skill = next(
-        (
-            candidate
-            for candidate in state.get("skills", [])
-            if isinstance(candidate, dict)
-            and candidate.get("slot") == 1
-            and candidate.get("ready") is True
-            and candidate.get("blocked") is not True
-            and candidate.get("passive") is not True
-            and boss_id in candidate.get("validTargetIds", [])
-        ),
-        None,
-    )
-    if skill is None:
-        return None
-    return Decision(
-        rule=name,
-        skill=skill,
-        target_id=boss_id,
-        target_label=str(boss.get("name", "奇美拉")),
     )
 
 
@@ -6891,8 +6885,6 @@ def evaluate(
     planner_state: dict[str, Any] | None = None,
 ) -> Decision | None:
     require_list_execution(config)
-    state.pop("_flowTrace", None)
-    state.pop("_flowRevision", None)
     automatic_trial_ids = objective_trial_ids(config, state)
     rules = config.get("rules", [])
     input_state = state
@@ -7165,6 +7157,8 @@ def remember_trial_contributor(
 _HYDRA_FORECAST_MONITOR: Any = None
 _CHIMERA_CAPTURE_MONITOR: Any = None
 _CHIMERA_CAPTURE_TELEMETRY: Any = None
+_HYDRA_CAPTURE_MONITOR: Any = None
+_HYDRA_CAPTURE_TELEMETRY: Any = None
 
 
 def chimera_capture_monitor() -> Any:
@@ -7200,6 +7194,34 @@ def observe_chimera_capture(
     if key is not None and key != _CHIMERA_CAPTURE_TELEMETRY:
         _CHIMERA_CAPTURE_TELEMETRY = key
         emit_telemetry(chimeraCapture=telemetry)
+
+
+def observe_hydra_capture(
+    state: dict[str, Any],
+    ipc: AgentIpc,
+    config: dict[str, Any] | None = None,
+    capability_memory: SkillCapabilityMemory | None = None,
+) -> None:
+    """Saves each Hydra battle's start data for the strategy simulation."""
+    global _HYDRA_CAPTURE_MONITOR, _HYDRA_CAPTURE_TELEMETRY
+    try:
+        if _HYDRA_CAPTURE_MONITOR is None:
+            from chimera_capture_live import HydraCaptureMonitor
+
+            _HYDRA_CAPTURE_MONITOR = HydraCaptureMonitor()
+        _HYDRA_CAPTURE_MONITOR.observe_decision(state, ipc=ipc, config=config,
+                                                capability_memory=capability_memory)
+        telemetry = _HYDRA_CAPTURE_MONITOR.telemetry()
+    except Exception as error:  # Capture must never stop control.
+        telemetry = {"status": "unavailable", "reason": f"{type(error).__name__}: {error}"}
+    key = (
+        {name: telemetry.get(name) for name in ("status", "reason", "folder")}
+        if telemetry is not None
+        else None
+    )
+    if key is not None and key != _HYDRA_CAPTURE_TELEMETRY:
+        _HYDRA_CAPTURE_TELEMETRY = key
+        emit_telemetry(hydraCapture=telemetry)
 
 
 _CHIMERA_FORECAST_MONITOR: Any = None
@@ -7349,6 +7371,8 @@ def process_state(
                     runtime_state=runtime_state,
                 )
             return False
+    if ACTIVE_BOSS_MODE == "hydra":
+        observe_hydra_capture(state, ipc, config, capability_memory)
     if ACTIVE_BOSS_MODE == "hydra" and runtime_state is not None:
         devour_retry, new_mark, devour_tracking_armed = (
             evaluate_hydra_devour_retry_trigger(config, state, runtime_state)
@@ -7395,10 +7419,12 @@ def process_state(
             requirement = hydra_devour_requirement_text(
                 devour_retry.relation, expected_labels, devour_retry.mark_limit
             )
+            what = (f"第 {devour_retry.mark_index} 个标记的“{devour_retry.actual_hero_name}”已被吞下"
+                    if devour_retry.swallowed else
+                    f"第 {devour_retry.mark_index} 个标记目标为“{devour_retry.actual_hero_name}”")
             print(
                 f"六头蛇吞噬顺序重整条件 {devour_retry.condition_index + 1} 已触发："
-                f"第 {devour_retry.mark_index} 个标记目标为"
-                f"“{devour_retry.actual_hero_name}”，但{requirement}；"
+                f"{what}，但{requirement}；"
                 f"当前已观察顺序：{' → '.join(devour_retry.observed_sequence)}。",
                 flush=True,
             )
@@ -7434,8 +7460,8 @@ def process_state(
             if forecast_retry is not None and forecast_retry.cause == "damage":
                 print(
                     "六头蛇开局推演触发重整：预计整场伤害 "
-                    f"{forecast_retry.predicted_damage / 1e8:.1f} 亿，低于最低伤害 "
-                    f"{forecast_retry.minimum_damage / 1e8:.1f} 亿。",
+                    f"{damage_text(forecast_retry.predicted_damage)}，低于最低伤害 "
+                    f"{damage_text(forecast_retry.minimum_damage)}。",
                     flush=True,
                 )
             elif forecast_retry is not None:
@@ -7457,10 +7483,13 @@ def process_state(
                     forecast_retry.actual_hero_type_id,
                     f"英雄 {forecast_retry.actual_hero_type_id}",
                 )
+                what = (f"预计第 {forecast_retry.mark_index} 个标记的“{actual_label}”约第 "
+                        f"{forecast_retry.apply_turn} 回合被吞下"
+                        if forecast_retry.swallowed else
+                        f"预计第 {forecast_retry.mark_index} 个标记（约第 "
+                        f"{forecast_retry.apply_turn} 回合）为“{actual_label}”")
                 print(
-                    f"六头蛇开局推演触发重整条件 {forecast_retry.condition_index + 1}："
-                    f"预计第 {forecast_retry.mark_index} 个标记（约第 "
-                    f"{forecast_retry.apply_turn} 回合）为“{actual_label}”，"
+                    f"六头蛇开局推演触发重整条件 {forecast_retry.condition_index + 1}：{what}，"
                     f"但{requirement}。",
                     flush=True,
                 )
@@ -7498,8 +7527,8 @@ def process_state(
             "目标进度："
             f"必要试炼 {len(objective_report.completed_trial_ids)}/"
             f"{len(objective_report.mandatory_trial_ids)}，"
-            f"伤害 {objective_report.current_damage:g}/"
-            f"{objective_report.minimum_damage:g}",
+            f"伤害 {damage_text(objective_report.current_damage)}/"
+            f"{damage_text(objective_report.minimum_damage)}",
             flush=True,
         )
     if objective_report.mandatory_impossible:

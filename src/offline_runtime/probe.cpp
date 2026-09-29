@@ -289,8 +289,14 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
                                                  input_directory / L"battle-settings.msgpack",
                                                  override_seed ? &seed : nullptr, policy);
         } else {
+            // "<turn limit>" or "<turn limit>:<seed>" (validated by the launcher).
+            const auto colon = parameter.find(L':');
+            int seed = 0;
+            if (colon != std::wstring::npos) seed = std::stoi(parameter.substr(colon + 1));
             result = run_policy_forecast(model, static_data, progress, input_directory / L"battle-setup.msgpack",
-                                         input_directory / L"battle-settings.msgpack", std::stoi(parameter), policy);
+                                         input_directory / L"battle-settings.msgpack",
+                                         std::stoi(parameter.substr(0, colon)), policy,
+                                         colon != std::wstring::npos ? &seed : nullptr);
         }
         emit(isolated + "\"phase\":\"policy_forecast_executed\"," + result);
         return 0;
@@ -313,9 +319,18 @@ int launch(const std::wstring& mode, const fs::path& input_argument, const std::
                 throw std::runtime_error("Seed must be a 32-bit integer");
         }
     } else {
-        const int max_game_turn = std::stoi(parameter);
-        if (max_game_turn < 1 || max_game_turn > 1000)
+        const auto colon = parameter.find(L':');
+        std::size_t used = 0;
+        const std::wstring limit = parameter.substr(0, colon);
+        const int max_game_turn = std::stoi(limit, &used);
+        if (used != limit.size() || max_game_turn < 1 || max_game_turn > 1000)
             throw std::runtime_error("Game turn limit must be between 1 and 1000");
+        if (colon != std::wstring::npos) {
+            const std::wstring seed_text = parameter.substr(colon + 1);
+            const long long seed = std::stoll(seed_text, &used);
+            if (used != seed_text.size() || seed < INT_MIN || seed > INT_MAX)
+                throw std::runtime_error("Seed must be a 32-bit integer");
+        }
     }
     const auto exe = executable();
     const fs::path input = fs::weakly_canonical(input_argument);

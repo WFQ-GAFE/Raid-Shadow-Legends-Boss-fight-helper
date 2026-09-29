@@ -31,7 +31,7 @@
 | 回合与当前英雄 | `battle.round/turn/playerTurnCount/hydraBattle/finished/waitingForManualCommand`；`activeHeroId/activeHeroTypeId/activeHeroTurnCount/activeHeroFormIndex` | 拒绝本步，不能选默认技能补位 |
 | 当前英雄技能 | 每个可见主动技能的 `skillId/slot/typeId/ready/passive/blocked/cooldown/validTargetIds`；合法目标保留原版返回顺序 | 不能决定技能或目标，拒绝本步 |
 | 己方六名英雄 | actor ID、英雄类型和实例 ID、队伍位置、存活/生命、当前形态、效果列表与状态、冷却 | 无法正确计算规则及救出/死亡变化，拒绝本步 |
-| 场上全部蛇头 | actor ID、类型、存活/生命、断颈、吞噬/消化目标、效果列表与状态；新生蛇头要及时出现 | 不能复现 `devouringHead`、`exposedNeck` 和 `hydraHeadPriority` 目标，拒绝本步 |
+| 场上全部蛇头 | actor ID、类型、存活/生命、断颈、吞噬/消化目标、效果列表与状态、当前战斗属性（`numericObservation`，防御用于暴露蛇颈和防御最低蛇头）；新生蛇头要及时出现 | 不能复现 `devouringHead`、`exposedNeck` 和 `hydraHeadPriority` 目标，拒绝本步 |
 | 效果 | 效果实例 ID、类型/种类、施加者、来源技能、应用回合、剩余回合；保留同类型的多个实例 | 无法复现效果条件和标记事件，拒绝本步 |
 | 战斗状态 | `hydra.turnCount`、当前 RNG 四个 32 位状态字、随机种子与场次 Setup ID | 无法校验共享随机流和场次，拒绝预测 |
 

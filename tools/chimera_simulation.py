@@ -22,6 +22,7 @@ import time
 from typing import Any, Callable
 
 import chimera_controller as controller
+from simulation_common import battle_snapshot, decision_rule_index, opening_stats, rule_index_by_name, stuck_report
 
 
 SCHEMA = 1
@@ -30,7 +31,7 @@ DEFAULT_TIMEOUT_SECONDS = 330.0
 FIXED_ONE = 4294967296.0
 # One engine action row (see src/offline_runtime/chimera_forecast.hpp).
 ACTION_FIELDS = ("turn", "bossTurns", "form", "actorId", "actorTypeId", "source", "skillTypeId",
-                 "targetId", "damage", "trials", "deaths", "autoReason", "rng")
+                 "targetId", "damage", "trials", "deaths", "autoReason", "rng", "uses")
 FORM_INTERVAL = 5
 # Decisions for the same actor on the same battle turn before a run counts as
 # not progressing (e.g. rules switching a mythic form back and forth).
@@ -45,29 +46,8 @@ def _integer(value: object, minimum: int = 0) -> bool:
     return type(value) is int and value >= minimum
 
 
-def _selected_rule(trace: object) -> tuple[int | None, str | None]:
-    for entry in trace if isinstance(trace, list) else []:
-        if isinstance(entry, dict) and entry.get("outcome") == "selected":
-            index = entry.get("index")
-            return (index if isinstance(index, int) else None), entry.get("name")
-    return None, None
-
-
-def _rule_index_by_name(strategy: dict[str, Any], decided: str | None) -> int | None:
-    """1-based rule whose name the decision's label extends.
-
-    First-turn skills, trial-automation fallbacks and mythic follow-ups are
-    labelled "<rule name> · <detail>" without passing through the rule trace.
-    """
-    if not isinstance(decided, str):
-        return None
-    best: tuple[int, int] | None = None
-    for index, rule in enumerate(strategy.get("rules") or [], 1):
-        name = rule.get("name") if isinstance(rule, dict) else None
-        if isinstance(name, str) and name and (decided == name or decided.startswith(name + " · ")):
-            if best is None or len(name) > best[1]:
-                best = (index, len(name))
-    return best[0] if best else None
+# Kept for callers of the earlier name.
+_rule_index_by_name = rule_index_by_name
 
 
 class ChimeraOfflinePolicySession:
@@ -140,29 +120,10 @@ class ChimeraOfflinePolicySession:
 
     def _stuck(self, state: dict[str, Any], reason: str, detail: str | None) -> dict[str, Any]:
         """Where the live takeover would stall: what the hero had and why no rule fired."""
-        battle = state.get("battle") if isinstance(state.get("battle"), dict) else {}
         chimera = state.get("chimera") if isinstance(state.get("chimera"), dict) else {}
-        reserved = {value for value in state.get("_reservedStrictSkillTypeIds") or [] if isinstance(value, int)}
-        owners = controller.trial_rule_skill_owners(self.strategy.get("rules") or [], state)
-        reserved.update(owners)
-        skills = []
-        for skill in state.get("skills", []):
-            if not isinstance(skill, dict) or not isinstance(skill.get("typeId"), int):
-                continue
-            skills.append({"typeId": skill["typeId"], "slot": skill.get("slot"), "ready": skill.get("ready") is True,
-                           "cooldown": skill.get("cooldown"), "defaultCooldown": skill.get("defaultCooldown"),
-                           "validTargets": len(skill.get("validTargetIds") or []),
-                           "reserved": skill["typeId"] in reserved})
-        try:
-            rules = controller.no_decision_report(self.strategy, state)
-        except Exception:
-            rules = []
-        return {"status": "stuck", "reason": reason, "detail": detail, "stuck": {
-            "reason": reason, "turn": battle.get("turn"), "bossTurns": chimera.get("turnCount"),
-            "form": controller.canonical_chimera_form(chimera.get("currentForm")),
-            "activeHeroId": state.get("activeHeroId"), "activeHeroTypeId": state.get("activeHeroTypeId"),
-            "activeHeroFormIndex": state.get("activeHeroFormIndex"), "skills": skills, "rules": rules[:40],
-            "detail": detail}}
+        return {"status": "stuck", "reason": reason, "detail": detail, "stuck": stuck_report(
+            self.strategy, state, reason, detail, bossTurns=chimera.get("turnCount"),
+            form=controller.canonical_chimera_form(chimera.get("currentForm")))}
 
     def decide(self, supplied: object) -> dict[str, Any]:
         if not isinstance(supplied, dict) or supplied.get("bossMode") != "chimera":
@@ -186,6 +147,7 @@ class ChimeraOfflinePolicySession:
             controller.refresh_trial_planner_runtime(self.runtime_state, state)
             controller.annotate_chimera_form_first_turn(state, self.runtime_state)
             state["_decisionTrace"] = []
+            state["_decisionTraceLite"] = True
             state["_reservedStrictSkillTypeIds"] = []
             decision = controller.pending_mythic_followup_decision(self.runtime_state, state)
             if decision is None:
@@ -196,7 +158,6 @@ class ChimeraOfflinePolicySession:
                     "detail": str(error)[:300]}
         finally:
             controller.ACTIVE_BOSS_MODE = previous_mode
-        rule_index, rule_name = _selected_rule(state.get("_decisionTrace"))
         if decision is None:
             return self._stuck(state, "no_matching_rule", diagnostic)
         skill = decision.skill if isinstance(decision.skill, dict) else {}
@@ -223,8 +184,7 @@ class ChimeraOfflinePolicySession:
                        for entry in state.get("_decisionTrace") or [])
         return {"status": "command", "actorId": state["activeHeroId"], "skillTypeId": skill["typeId"],
                 "skillSlot": skill.get("slot"), "targetId": decision.target_id, "rule": decision.rule,
-                "ruleIndex": (rule_index if rule_name == decision.rule
-                              else _rule_index_by_name(self.strategy, decision.rule)),
+                "ruleIndex": decision_rule_index(self.strategy, state, decision.rule),
                 "trialId": decision.trial_id, **({"reservationReleased": True} if released else {})}
 
 
@@ -303,13 +263,15 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
             if cancel is not None and cancel.is_set():
                 raise SimulationError("simulation_cancelled")
             decision = session.decide(state)
+            if "openingStats" not in result:
+                result["openingStats"] = opening_stats(state)
             battle = state.get("battle", {})
             chimera = state.get("chimera", {})
             decisions.append({
                 "sequence": sequence, "turn": battle.get("turn"), "playerTurnCount": battle.get("playerTurnCount"),
                 "bossTurns": chimera.get("turnCount"), "form": chimera.get("currentFormIndex"),
                 "activeHeroId": state.get("activeHeroId"), "activeHeroTypeId": state.get("activeHeroTypeId"),
-                "damage": battle.get("currentDamage"), **decision})
+                "damage": battle.get("currentDamage"), "snapshot": battle_snapshot(state), **decision})
             if on_progress is not None and len(decisions) % 10 == 1:
                 on_progress({"decisions": len(decisions), "bossTurns": chimera.get("turnCount")})
             process.stdin.write(_reply_line(decision, sequence).encode("utf-8"))

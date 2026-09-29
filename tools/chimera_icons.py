@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import hashlib
-import importlib
 import io
 import os
 import re
@@ -34,7 +33,6 @@ _GAME_SKILL_CACHE_CHECKED: set[int] = set()
 _GAME_REWARD_CACHE_CHECKED = False
 _GAME_BUILD_MEMORY: Path | None = None
 _ICON_CACHE_LOCK = threading.RLock()
-tk: Any = None
 
 
 def _record_asset_extraction_error(stage: str, source: Path, error: Exception) -> None:
@@ -1278,161 +1276,6 @@ def ensure_icon_cache() -> dict[str, Path]:
     """Extract effect icons once, serializing concurrent startup/API requests."""
     with _ICON_CACHE_LOCK:
         return _ensure_icon_cache_unlocked()
-
-
-class ChimeraIconRepository:
-    def __init__(self, master: tk.Misc) -> None:
-        # The React desktop shell does not use Tk.  Resolve it only when the
-        # retained legacy development UI explicitly constructs this class, so
-        # PyInstaller does not bundle Tcl/Tk in the current release.
-        global tk
-        if tk is None:
-            tk = importlib.import_module("tkinter")
-        self.master = master
-        self.paths = ensure_icon_cache()
-        self._photos: dict[tuple[str, str], tk.PhotoImage] = {}
-
-    @staticmethod
-    def _edge(size: str) -> int:
-        return {"small": 30, "medium": 46, "large": 64}.get(size, 30)
-
-    def _path_photo(self, path: Path, key: tuple[str, str]) -> tk.PhotoImage | None:
-        try:
-            photo = tk.PhotoImage(master=self.master, file=str(path))
-            edge = self._edge(key[1])
-            largest = max(photo.width(), photo.height())
-            if largest > edge:
-                factor = max(1, (largest + edge - 1) // edge)
-                photo = photo.subsample(factor, factor)
-            self._photos[key] = photo
-            return photo
-        except tk.TclError:
-            return None
-
-    def _placeholder(self, key: tuple[str, str], kind: str) -> tk.PhotoImage:
-        cached = self._photos.get(key)
-        if cached is not None:
-            return cached
-        edge = self._edge(key[1])
-        photo = tk.PhotoImage(master=self.master, width=edge, height=edge)
-        background = "#263648" if kind == "hero" else "#302a47"
-        foreground = "#60a6c8" if kind == "hero" else "#d9b65d"
-        photo.put(background, to=(0, 0, edge, edge))
-        photo.put(foreground, to=(3, 3, edge - 3, edge - 3))
-        photo.put(background, to=(6, 6, edge - 6, edge - 6))
-        if kind == "hero":
-            radius = max(3, edge // 7)
-            center = edge // 2
-            photo.put(foreground, to=(center - radius, 7, center + radius, 7 + radius * 2))
-            photo.put(foreground, to=(edge // 4, edge // 2, edge - edge // 4, edge - 7))
-        else:
-            center = edge // 2
-            photo.put(foreground, to=(center - 2, 7, center + 2, edge - 7))
-            photo.put(foreground, to=(edge // 3, center - 2, edge - edge // 3, center + 2))
-        self._photos[key] = photo
-        return photo
-
-    def photo(self, name: str | None, size: str = "small") -> tk.PhotoImage:
-        key = (str(name or "alliance_chimera"), size)
-        cached = self._photos.get(key)
-        if cached is not None:
-            return cached
-        path = self.paths.get(key[0]) or self.paths.get("alliance_chimera")
-        if path and path.is_file():
-            photo = tk.PhotoImage(master=self.master, file=str(path))
-            if size == "small" and max(photo.width(), photo.height()) > 34:
-                photo = photo.subsample(2, 2)
-        else:
-            edge = 26 if size == "small" else 46
-            photo = tk.PhotoImage(master=self.master, width=edge, height=edge)
-            photo.put("#263648", to=(0, 0, edge, edge))
-            photo.put("#d9b65d", to=(3, 3, edge - 3, edge - 3))
-            photo.put("#51657a", to=(6, 6, edge - 6, edge - 6))
-        self._photos[key] = photo
-        return photo
-
-    def hero_photo(
-        self, hero_id: int | None, hero: dict[str, Any] | None = None, size: str = "medium"
-    ) -> tk.PhotoImage:
-        hero = hero if isinstance(hero, dict) else {}
-        source = hero.get("avatar") or hero.get("avatarUrl")
-        key = (f"hero:{hero_id}:{source}", size)
-        cached = self._photos.get(key)
-        if cached is not None:
-            return cached
-        path = cache_visual_asset(source, "hero", hero_id)
-        if path:
-            photo = self._path_photo(path, key)
-            if photo is not None:
-                return photo
-        return self._placeholder(
-            ("placeholder:hero" if source else key[0], size), "hero"
-        )
-
-    def skill_photo(
-        self,
-        hero_id: int | None,
-        skill: dict[str, Any] | None,
-        size: str = "medium",
-    ) -> tk.PhotoImage:
-        skill = skill if isinstance(skill, dict) else {}
-        source = skill.get("icon") or skill.get("iconUrl")
-        identity = skill.get("typeId") or f"{hero_id}-{skill.get('slot', 'unknown')}"
-        key = (f"skill:{identity}:{source}", size)
-        cached = self._photos.get(key)
-        if cached is not None:
-            return cached
-        path = cache_visual_asset(source, "skill", identity)
-        if path:
-            photo = self._path_photo(path, key)
-            if photo is not None:
-                return photo
-        return self._placeholder(
-            ("placeholder:skill" if source else key[0], size), "skill"
-        )
-
-    def prefetch_catalog(self, catalog: dict[int, dict[str, Any]]) -> int:
-        """Download uncached game art away from Tk's UI thread."""
-        cached = 0
-        for hero_id, hero in catalog.items():
-            if not isinstance(hero, dict):
-                continue
-            if cache_visual_asset(
-                hero.get("avatar") or hero.get("avatarUrl"),
-                "hero",
-                hero_id,
-                allow_network=True,
-            ):
-                cached += 1
-            for skill in hero.get("skills", []):
-                if not isinstance(skill, dict):
-                    continue
-                identity = skill.get("typeId") or f"{hero_id}-{skill.get('slot', 'unknown')}"
-                if cache_visual_asset(
-                    skill.get("icon") or skill.get("iconUrl"),
-                    "skill",
-                    identity,
-                    allow_network=True,
-                ):
-                    cached += 1
-        return cached
-
-    def trial_photo(self, trial: dict[str, Any]) -> tk.PhotoImage:
-        for effect in trial.get("effects", []):
-            if isinstance(effect, dict) and isinstance(effect.get("id"), int):
-                icon = EFFECT_TYPE_ICONS.get(effect["id"])
-                if icon:
-                    return self.photo(icon)
-        form_fallback = {"Ram": "Duel", "Lion": "HungerCounter", "Snake": "ContinuousDamage"}
-        return self.photo(form_fallback.get(str(trial.get("form")), "alliance_chimera"))
-
-    def effect_photo(self, token: Any, size: str = "small") -> tk.PhotoImage:
-        token = canonical_effect_token(token)
-        option = EFFECT_BY_TOKEN.get(str(token))
-        if option:
-            return self.photo(option["icon"], size)
-        text = str(token or "")
-        return self.photo(EFFECT_TYPE_ICONS.get(int(text)) if text.isdigit() else text, size)
 
 
 # Team preview icons: artifact sets (the game's own icon name per set), blessings,

@@ -1,7 +1,8 @@
-"""Save each Chimera battle's start data and a per-decision trace.
+"""Save each Chimera or Hydra battle's start data and a per-decision trace.
 
-The saved folder (cache/chimera-capture/<setup>-<ms>/) is the input for
-checking the offline original engine against a real battle: the battle's own
+The saved folder (cache/chimera-capture/<setup>-<ms>/, or cache/hydra-capture/
+for Hydra) is the input for the offline strategy simulation and for checking
+the offline original engine against a real battle: the battle's own
 BattleSetup/BattleSettings as the game serialized them, and for every player
 decision the turn, active hero, battle RNG words, Chimera form, trial
 progress and the command the controller submitted. Nothing here changes how
@@ -15,12 +16,14 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+from capture_identity import drop_repeats
 from chimera_replay_source import validate_chimera_replay_source
-from hydra_replay_source import ReplaySourceError
+from hydra_replay_source import ReplaySourceError, validate_replay_source
 from strategy_storage import atomic_write_bytes, atomic_write_json
 
 
@@ -28,6 +31,7 @@ PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
 WORK_ROOT = PROJECT_ROOT / "cache" / "chimera-capture"
+HYDRA_WORK_ROOT = PROJECT_ROOT / "cache" / "hydra-capture"
 KEEP_WORK_DIRECTORIES = 20
 INPUT_WAIT_SECONDS = 20.0
 MAX_BUFFERED_RECORDS = 20_000
@@ -89,10 +93,20 @@ def trace_record(state: dict[str, Any]) -> dict[str, Any]:
 class ChimeraCaptureMonitor:
     """One per controller process; follows the battle generation in decisions."""
 
+    boss_mode = "chimera"
+    source_type = "chimera_replay_source"
+    label = "奇美拉"
+    # Complete decision states (large) for engine-parity checks.
+    record_states = True
+
     def __init__(self, emit: Callable[[str], None] | None = None, work_root: Path = WORK_ROOT,
                  validator: Callable[..., tuple[dict[str, Any], bytes, bytes]] = validate_chimera_replay_source,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 run_later: Callable[[Callable[[], None]], None] | None = None):
         self.emit = emit or (lambda text: print(text, flush=True))
+        # Housekeeping off the decision loop (tests pass a synchronous runner).
+        self.run_later = run_later or (lambda task: threading.Thread(
+            target=task, name="capture-housekeeping", daemon=True).start())
         self.work_root = work_root
         self.validator = validator
         self.clock = clock
@@ -130,7 +144,7 @@ class ChimeraCaptureMonitor:
 
     def _append_state(self, state: dict[str, Any]) -> None:
         """Complete decision state (minus repeated static data), gzip member per line."""
-        if self.status == "not_from_opening":
+        if self.status == "not_from_opening" or not self.record_states:
             return
         if self.static_payload is None:
             static = {key: state[key] for key in STATIC_STATE_KEYS if key in state}
@@ -190,13 +204,14 @@ class ChimeraCaptureMonitor:
         for record in pending:
             self._append({key: value for key, value in record.items() if key != "generation"})
         pending_states, self.state_buffer = self.state_buffer, []
-        try:
-            with open(folder / "decision-states.jsonl.gz", "ab") as stream:
-                for line in pending_states:
-                    stream.write(line)
-            self.states += len(pending_states)
-        except OSError:
-            pass
+        if pending_states:
+            try:
+                with open(folder / "decision-states.jsonl.gz", "ab") as stream:
+                    for line in pending_states:
+                        stream.write(line)
+                self.states += len(pending_states)
+            except OSError:
+                pass
         if self.static_payload is not None:
             try:
                 atomic_write_json(folder / "decision-static.json", self.static_payload)
@@ -219,7 +234,7 @@ class ChimeraCaptureMonitor:
                     "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
             except OSError:
                 pass
-        self.emit(f"奇美拉开局数据未保存（{reason}）；不影响本场战斗。")
+        self.emit(f"{self.label}开局数据未保存（{reason}）；不影响本场战斗。")
 
     def _try_capture(self, ipc: Any) -> None:
         source = ipc.replay_input()
@@ -228,7 +243,7 @@ class ChimeraCaptureMonitor:
             if waited > INPUT_WAIT_SECONDS:
                 self._fail("代理未发布本局开局数据")
             return
-        if source.get("type") != "chimera_replay_source" or source.get("status") != "captured":
+        if source.get("type") != self.source_type or source.get("status") != "captured":
             self._fail(f"代理未取得本局开局数据：{source.get('reason') or source.get('status')}")
             return
         account = ipc.account()
@@ -253,12 +268,22 @@ class ChimeraCaptureMonitor:
             self._fail(f"写入失败：{error}")
             return
         self.status = "saved"
-        self.emit(f"奇美拉开局数据已保存（用于离线模拟核对）：{folder.name}")
+        self.emit(f"{self.label}开局数据已保存（用于离线模拟核对）：{folder.name}")
+        self.run_later(lambda: self._drop_repeats(folder))
+
+    def _drop_repeats(self, folder: Path) -> None:
+        """Only the newest opening of each set-up is kept: a repeat differs only in its seed."""
+        try:
+            removed = drop_repeats(self.work_root, folder)
+        except Exception:  # Housekeeping never disturbs the takeover.
+            return
+        if removed:
+            self.emit(f"已删除 {len(removed)} 份队伍配置相同的旧{self.label}开局数据（只保留最新一份）")
 
     def observe_decision(self, state: dict[str, Any], *, ipc: Any, config: dict[str, Any] | None = None,
                          capability_memory: Any = None) -> None:
         generation = state.get("battleGeneration")
-        if type(generation) is not int or generation <= 0 or state.get("bossMode") != "chimera":
+        if type(generation) is not int or generation <= 0 or state.get("bossMode") != self.boss_mode:
             return
         if generation != self.generation:
             self._reset(generation, state)
@@ -294,6 +319,22 @@ class ChimeraCaptureMonitor:
         return {"status": self.status, "reason": self.reason, "fromOpening": self.from_opening,
                 "folder": self.folder.name if self.folder else None, "records": self.records,
                 "states": self.states}
+
+
+class HydraCaptureMonitor(ChimeraCaptureMonitor):
+    """Hydra openings, for the Hydra strategy simulation (no full decision states:
+    a thousand-turn battle would make them very large)."""
+
+    boss_mode = "hydra"
+    source_type = "hydra_replay_source"
+    label = "六头蛇"
+    record_states = False
+
+    def __init__(self, emit: Callable[[str], None] | None = None, work_root: Path = HYDRA_WORK_ROOT,
+                 validator: Callable[..., tuple[dict[str, Any], bytes, bytes]] = validate_replay_source,
+                 clock: Callable[[], float] = time.monotonic,
+                 run_later: Callable[[Callable[[], None]], None] | None = None):
+        super().__init__(emit=emit, work_root=work_root, validator=validator, clock=clock, run_later=run_later)
 
 
 def recent_captures(limit: int = 5, root: Path | None = None) -> list[dict[str, Any]]:

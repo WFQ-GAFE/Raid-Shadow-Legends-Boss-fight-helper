@@ -8,8 +8,8 @@ from typing import Any
 
 
 SHARED_STATE_MAGIC = 0x52434950
-SHARED_STATE_VERSION = 5
-AGENT_BUILD_ID = 2026092702
+SHARED_STATE_VERSION = 7
+AGENT_BUILD_ID = 2026092902
 COMMAND_VERSION = 4
 AGENT_STATE_INITIALIZING = 1
 AGENT_STATE_READY = 2
@@ -43,6 +43,8 @@ RotationCatalogJsonSlot = _slot_type(262144, "RotationCatalogJsonSlot")
 DiagnosticJsonSlot = _slot_type(8192, "DiagnosticJsonSlot")
 ReplayInputJsonSlot = _slot_type(2097152, "ReplayInputJsonSlot")
 TeamPreviewJsonSlot = _slot_type(524288, "TeamPreviewJsonSlot")
+AccountBonusesJsonSlot = _slot_type(65536, "AccountBonusesJsonSlot")
+TeamDataJsonSlot = _slot_type(524288, "TeamDataJsonSlot")
 
 
 class AgentSharedState(ctypes.Structure):
@@ -66,6 +68,8 @@ class AgentSharedState(ctypes.Structure):
         ("diagnostic", DiagnosticJsonSlot),
         ("replay_input", ReplayInputJsonSlot),
         ("team_preview", TeamPreviewJsonSlot),
+        ("account_bonuses", AccountBonusesJsonSlot),
+        ("team_data", TeamDataJsonSlot),
     ]
 
 
@@ -84,7 +88,9 @@ assert ctypes.sizeof(RotationCatalogJsonSlot) == 262160
 assert ctypes.sizeof(DiagnosticJsonSlot) == 8208
 assert ctypes.sizeof(ReplayInputJsonSlot) == 2097168
 assert ctypes.sizeof(TeamPreviewJsonSlot) == 524304
-assert ctypes.sizeof(AgentSharedState) == 3244224
+assert ctypes.sizeof(AccountBonusesJsonSlot) == 65552
+assert ctypes.sizeof(TeamDataJsonSlot) == 524304
+assert ctypes.sizeof(AgentSharedState) == 3834080
 
 
 class AgentLayoutMismatch(OSError):
@@ -284,8 +290,14 @@ class AgentIpc:
     def replay_input(self) -> dict[str, Any] | None:
         return self.read_json("replay_input")
 
+    def account_bonuses(self) -> dict[str, Any] | None:
+        return self.read_json("account_bonuses")
+
     def team_preview(self) -> dict[str, Any] | None:
         return self.read_json("team_preview")
+
+    def team_data(self) -> dict[str, Any] | None:
+        return self.read_json("team_data")
 
     def wait_until_ready(self, timeout_seconds: float = 15.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_seconds

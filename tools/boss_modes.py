@@ -50,7 +50,6 @@ MODE_SPECS: dict[str, dict[str, Any]] = {
 # Stone (26000) and Electric (26280) are installed art placeholders without
 # combat parameters, localization, portraits, or complete skill definitions.
 HYDRA_HEAD_TYPE_IDS = (26040, 26080, 26120, 26160, 26200, 26240)
-HYDRA_HEAD_TYPE_ID_SET = frozenset(HYDRA_HEAD_TYPE_IDS)
 HYDRA_RESERVED_HEAD_TYPE_IDS = frozenset({26000, 26280})
 HYDRA_EXPOSED_NECK_SKILL_TYPE_IDS = frozenset({260009, 260010, 260011})
 HYDRA_MARKER_SKILL_TYPE_IDS = frozenset({260006, 260007, 260008})
@@ -126,6 +125,19 @@ def hydra_head_has_native_markers(value: Any) -> bool:
     return len(skill_type_ids & HYDRA_MARKER_SKILL_TYPE_IDS) >= 2
 
 
+def hydra_head_defence(value: Any) -> float | None:
+    """Current defence with buffs and debuffs, from the battle stats (Q32.32), if reported."""
+    observation = value.get("numericObservation") if isinstance(value, dict) else None
+    stats = observation.get("statsRaw") if isinstance(observation, dict) else None
+    raw = stats.get("Defence") if isinstance(stats, dict) else None
+    if not isinstance(raw, (str, int)) or isinstance(raw, bool):
+        return None
+    try:
+        return int(raw) / 2**32
+    except ValueError:
+        return None
+
+
 def normalize_hydra_head(value: dict[str, Any]) -> dict[str, Any]:
     """Add stable identity and inferred neck state without losing actor data."""
     result = dict(value)
@@ -136,6 +148,9 @@ def normalize_hydra_head(value: dict[str, Any]) -> dict[str, Any]:
     if hydra_head_is_exposed_neck(value):
         result["isHydraNeck"] = True
         result["headState"] = "exposed_neck"
+    defence = hydra_head_defence(value)
+    if defence is not None:
+        result["defence"] = round(defence)
     return result
 
 HYDRA_BATTLE_TURN_CONDITION_KEYS = frozenset(

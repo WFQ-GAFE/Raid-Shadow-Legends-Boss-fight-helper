@@ -138,6 +138,9 @@ class HydraOfflinePolicySession:
         self.last_player_turn = -1
         self.last_sequence = -1
         self.stopped = False
+        # The state the last decision was made on, with its rule trace
+        # (simulation reports read the selected rule and stuck reasons).
+        self.last_state: dict[str, Any] | None = None
 
     @staticmethod
     def _unknown(reason: str, state: object) -> dict[str, Any]:
@@ -155,6 +158,7 @@ class HydraOfflinePolicySession:
             self.stopped = True
             return self._unknown(issue, supplied_state)
         state = copy.deepcopy(supplied_state)
+        self.last_state = state
         battle = state["battle"]
         generation = state["battleGeneration"]
         turn = battle["turn"]
@@ -192,6 +196,7 @@ class HydraOfflinePolicySession:
                     state, {"screen": "battle", "battle": self.team_selection})
             self.capability_memory.observe_state(state)
             state["_decisionTrace"] = []
+            state["_decisionTraceLite"] = True
             state["_reservedStrictSkillTypeIds"] = []
             decision = controller.pending_mythic_followup_decision(self.runtime_state, state)
             if decision is None:

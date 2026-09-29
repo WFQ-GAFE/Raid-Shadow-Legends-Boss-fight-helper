@@ -18,26 +18,25 @@ def test_agent_source_and_controller_share_the_input_capture_build_id() -> None:
     source = (PROJECT_ROOT / "src" / "agent" / "agent.cpp").read_text(encoding="utf-8")
     match = re.search(r"kAgentBuildId\s*=\s*(\d+)ULL", source)
     assert match is not None
-    assert int(match.group(1)) == AGENT_BUILD_ID == 2026092702
+    assert int(match.group(1)) == AGENT_BUILD_ID == 2026092902
 
 
-def test_live_hydra_research_capture_is_blocked_at_build_and_package_time() -> None:
-    cmake = (PROJECT_ROOT / "src" / "agent" / "CMakeLists.txt").read_text(encoding="utf-8")
+def test_retired_hydra_research_capture_is_gone_and_blocked_at_package_time() -> None:
     package = (PROJECT_ROOT / "tools" / "build_chimera_desktop.ps1").read_text(encoding="utf-8")
     source = (PROJECT_ROOT / "src" / "agent" / "agent.cpp").read_text(encoding="utf-8")
-    assert "if(RAID_HYDRA_RESEARCH_CAPTURE)" in cmake
-    assert "RAID_HYDRA_RESEARCH_CAPTURE must be OFF" in package
-    assert "#if defined(RAID_HYDRA_RESEARCH_CAPTURE)\n#error" in source
+    assert "RAID_HYDRA_RESEARCH_CAPTURE" not in source and "RAID_HYDRA_SELECTOR_HOOK" not in source
+    assert not (PROJECT_ROOT / "src" / "agent" / "battle_input_capture.hpp").exists()
+    assert not (PROJECT_ROOT / "src" / "agent" / "hydra_selector_capture.hpp").exists()
+    for marker in ("hydra_mark_selector_observation_installed", "RandomHungerVictimSelectedFrom", "hydraReplayInput"):
+        assert f'"{marker}"' in package  # Packaging refuses a binary that still carries it.
 
 
 def test_il2cpp_gc_handles_keep_the_full_pointer_width() -> None:
     """A 32-bit handle crashed Unity 6000 when passed back to get_target."""
     api = (PROJECT_ROOT / "src" / "agent" / "il2cpp_api.hpp").read_text(encoding="utf-8")
-    capture = (PROJECT_ROOT / "src" / "agent" / "battle_input_capture.hpp").read_text(encoding="utf-8")
     assert "using GcHandleNew = std::uintptr_t (*)(void*, bool);" in api
     assert "using GcHandleGetTarget = void* (*)(std::uintptr_t);" in api
     assert "using GcHandleFree = void (*)(std::uintptr_t);" in api
-    assert "std::uintptr_t handle_{};" in capture
 
 
 def test_previous_crash_build_requires_full_game_restart() -> None:

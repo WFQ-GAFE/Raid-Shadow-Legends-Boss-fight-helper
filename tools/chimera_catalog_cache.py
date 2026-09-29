@@ -152,59 +152,6 @@ def ensure_ui_catalog_cache() -> dict[str, Any]:
     return rebuilt
 
 
-def cached_trials(catalog: dict[str, Any], difficulty_id: int) -> list[dict[str, Any]]:
-    for difficulty in catalog.get("difficulties", []):
-        if isinstance(difficulty, dict) and difficulty.get("difficultyId") == difficulty_id:
-            return [
-                copy.deepcopy(value)
-                for value in difficulty.get("trials", [])
-                if isinstance(value, dict)
-            ]
-    return []
-
-
-def cache_live_rewards(
-    catalog: dict[str, Any],
-    difficulty_id: int,
-    trials: list[dict[str, Any]],
-    reward_fingerprint: str | None,
-) -> dict[str, Any]:
-    """Persist a newly observed reward rotation without retaining battle progress."""
-    if not reward_fingerprint:
-        return catalog
-    updated = copy.deepcopy(catalog)
-    for difficulty in updated.get("difficulties", []):
-        if not isinstance(difficulty, dict) or difficulty.get("difficultyId") != difficulty_id:
-            continue
-        live_by_id = {
-            value.get("id"): value
-            for value in trials
-            if isinstance(value, dict) and isinstance(value.get("id"), int)
-        }
-        for cached in difficulty.get("trials", []):
-            live = live_by_id.get(cached.get("id")) if isinstance(cached, dict) else None
-            if isinstance(live, dict) and isinstance(live.get("reward"), dict):
-                cached["reward"] = copy.deepcopy(live["reward"])
-        break
-    updated["rewardRotationFingerprint"] = reward_fingerprint
-    live_rotations = updated.setdefault("liveRewardRotations", {})
-    rotation = live_rotations.setdefault(reward_fingerprint, {})
-    rotation[str(difficulty_id)] = [
-        {"id": value.get("id"), "reward": copy.deepcopy(value.get("reward"))}
-        for value in trials
-        if isinstance(value, dict)
-        and isinstance(value.get("id"), int)
-        and isinstance(value.get("reward"), dict)
-    ]
-    if updated != catalog:
-        UI_CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        UI_CATALOG_CACHE.write_text(
-            json.dumps(updated, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    return updated
-
-
 def cache_live_rotation_catalog(
     catalog: dict[str, Any],
     live_catalog: dict[str, Any],
@@ -249,39 +196,6 @@ def cache_live_rotation_catalog(
             encoding="utf-8",
         )
     return updated
-
-
-def infer_trial_difficulty_id(config: dict[str, Any], default: int = 5) -> int:
-    values: list[int] = []
-    objectives = config.get("objectives")
-    if isinstance(objectives, dict):
-        values.extend(
-            value
-            for value in objectives.get("mandatoryTrialIds", [])
-            if isinstance(value, int)
-        )
-    for rule in config.get("rules", []):
-        if not isinstance(rule, dict):
-            continue
-        when = rule.get("when")
-        if isinstance(when, dict):
-            for key in (
-                "completedTrialsAll",
-                "incompleteTrialsAll",
-                "activeTrialsAny",
-                "eligibleTrialsAny",
-                "lockedTrialsAny",
-                "impossibleTrialsAny",
-            ):
-                values.extend(value for value in when.get(key, []) if isinstance(value, int))
-        action = rule.get("action")
-        if isinstance(action, dict):
-            values.extend(value for value in action.get("trialIds", []) if isinstance(value, int))
-    for trial_id in values:
-        difficulty_id = (trial_id - 8_000_000) // 100
-        if 1 <= difficulty_id <= 6:
-            return difficulty_id
-    return default
 
 
 def load_hero_catalog(defaults: dict[int, dict[str, Any]]) -> dict[int, dict[str, Any]]:

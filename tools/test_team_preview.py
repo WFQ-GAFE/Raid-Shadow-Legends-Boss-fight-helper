@@ -49,6 +49,11 @@ def test_decodes_hero_screen_stats_sets_and_names() -> None:
     assert ava["stats"]["total"][6:8] == [0.27, 1.28]
     assert ava["sets"] == [{"set": 1, "pieces": 5}, {"set": 47, "pieces": 4}] and ava["equipped"] == 9
     assert ava["relic"] == {"typeId": 53, "rank": 4, "level": 15}
+    # A piece without a set has no set icon but is still equipped.
+    raw = raw_preview()
+    raw["heroes"][0]["artifacts"][8]["set"] = 0
+    ava = decode_preview(raw)["heroes"][0]
+    assert ava["sets"] == [{"set": 1, "pieces": 4}, {"set": 47, "pieces": 4}] and ava["equipped"] == 9
     second = preview["heroes"][1]
     assert "stats" not in second and second["statsReason"] == "hero_stats_failed" and "blessing" not in second
     assert len(preview["heroes"]) == 2  # an undecodable hero is left out

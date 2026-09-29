@@ -15,6 +15,8 @@ from typing import Any
 import chimera_controller as controller
 from hydra_forecast import (
     ForecastError,
+    damage_ambiguous_turn,
+    damage_thresholds,
     evaluate_conditions,
     mark_stream,
     strategy_forecast_issue,
@@ -146,10 +148,25 @@ def test_mark_stream_deduplicates_and_requires_both_event_sources():
 
 
 def test_strategies_depending_on_unreproduced_inputs_are_refused():
-    strategy = {"bossMode": "hydra", "rules": [
-        {"when": {"currentDamageAtLeast": 5}, "action": {"type": "cast"}}]}
-    assert strategy_forecast_issue(strategy) == "condition_not_forecastable:currentDamageAtLeast"
+    assert strategy_forecast_issue({"bossMode": "hydra", "rules": [
+        {"action": {"type": "executeTrialRecipe"}}]}) == "action_not_forecastable:executeTrialRecipe"
     assert strategy_forecast_issue({"bossMode": "hydra", "rules": [{"action": {"type": "cast"}}]}) is None
+
+
+def test_current_damage_conditions_are_forecast_with_a_rounding_margin():
+    strategy = {"bossMode": "hydra", "rules": [
+        {"when": {"currentDamageAtLeast": 5_000_000}, "action": {"type": "cast"}},
+        {"when": {"conditionTree": {"children": [{"currentDamageBelow": 20_000_000}]}}, "action": {"type": "cast"}},
+        {"when": {"currentDamageAtLeast": True}, "action": {"type": "cast"}}]}
+    assert strategy_forecast_issue(strategy) is None
+    assert damage_thresholds(strategy) == [5_000_000.0, 20_000_000.0]
+    # The live counter rounds each head's damage: within 2e-4 of the total (at least 50) it could go either way.
+    far = [{"turn": 1, "damage": 0}, {"turn": 5, "damage": 4_990_000}, {"turn": 9, "damage": 5_010_000}]
+    assert damage_ambiguous_turn(strategy, far) is None
+    near = far + [{"turn": 12, "damage": 19_997_000}, {"turn": 15, "damage": 21_000_000}]
+    assert damage_ambiguous_turn(strategy, near) == 12
+    assert damage_ambiguous_turn(strategy, [{"turn": 3, "damage": 4_999_960}]) == 3
+    assert damage_ambiguous_turn({"rules": [{"when": {"round": 1}}]}, near) is None
 
 
 def test_window_difference_reports_rng_and_actor_divergence():
@@ -190,6 +207,8 @@ def test_monitor_refuses_forecast_that_differs_from_the_live_battle():
         assert monitor.battle.status == "unavailable"
         assert any("不一致" in text for text in messages)
         assert monitor.telemetry()["reason"] == "live_window_differs"
+        advice = monitor.telemetry()["advice"]
+        assert advice["code"] == "live_window_differs" and "手动操作" in advice["action"] and advice["actionEn"]
 
 
 def test_monitor_refuses_forecast_with_a_different_opening_mark():
@@ -257,36 +276,89 @@ def test_never_marked_condition_in_forecast():
     assert verdict["unresolved"][0]["reason"] == "forecast_shorter_than_battle"
 
 
-def test_never_marked_condition_is_evaluated_live_on_each_new_mark():
+def test_never_devoured_condition_triggers_live_only_on_an_actual_swallow():
     config = {"objectives": {"devourOrderRetryConditions": [
         {"relation": "neverMarked", "heroTypeIds": [102], "markLimit": 3}]}}
+
+    def step(runtime, marked, turn, swallowed=(), dead=()):
+        state = live_state(0, turn=turn, marked_actor=marked)
+        state["battle"]["playerTurnCount"] = turn
+        state["hydra"] = {"turnCount": turn}
+        state["pointers"] = {"context": 7}
+        for hero in state["heroes"]:
+            if hero["id"] in swallowed:
+                hero["effects"].append({"effectKind": "Devoured", "effectKindId": 9024, "producerId": 50})
+            if hero["id"] in dead:
+                hero["dead"] = True
+        return controller.evaluate_hydra_devour_retry_trigger(config, state, runtime)
+
     runtime: dict[str, Any] = {}
     names = []
-    for marked, turn in ((0, 1), (1, 20), (2, 40)):
-        state = live_state(0, turn=turn, marked_actor=marked)
-        state["battle"]["playerTurnCount"] = turn
-        state["hydra"] = {"turnCount": turn}
-        state["pointers"] = {"context": 7}
-        trigger, new_mark, armed = controller.evaluate_hydra_devour_retry_trigger(config, state, runtime)
+    for marked, turn, swallowed in ((0, 1, ()), (1, 20, (0,)), (2, 40, (1,))):
+        trigger, new_mark, armed = step(runtime, marked, turn, swallowed)
         names.append(new_mark and new_mark["heroTypeId"])
-        if marked < 2:
-            assert trigger is None
-    assert armed is True and names == [100, 101, 102]
-    assert trigger is not None and trigger.relation == "neverMarked"
-    assert trigger.mark_index == 3 and trigger.mark_limit == 3
-    text = controller.hydra_devour_requirement_text(trigger.relation, "英雄2", trigger.mark_limit)
-    assert "前 3 个标记内不能成为吞噬目标" in text
-    # Outside the limit the same hero no longer triggers a regroup.
-    runtime = {}
-    limited = {"objectives": {"devourOrderRetryConditions": [
-        {"relation": "neverMarked", "heroTypeIds": [102], "markLimit": 2}]}}
-    for marked, turn in ((0, 1), (1, 20), (2, 40)):
-        state = live_state(0, turn=turn, marked_actor=marked)
-        state["battle"]["playerTurnCount"] = turn
-        state["hydra"] = {"turnCount": turn}
-        state["pointers"] = {"context": 7}
-        trigger, _, _ = controller.evaluate_hydra_devour_retry_trigger(limited, state, runtime)
+        # Hero 102 (actor 2) is marked third: being marked alone never regroups.
         assert trigger is None
+    assert armed is True and names == [100, 101, 102]
+    # The next mark lands and the head swallows actor 2: now it counts.
+    trigger, _, _ = step(runtime, 0, 60, (2,))
+    assert trigger is not None and trigger.relation == "neverMarked" and trigger.swallowed
+    assert trigger.mark_index == 3 and trigger.mark_limit == 3 and trigger.actual_hero_type_id == 102
+    text = controller.hydra_devour_requirement_text(trigger.relation, "英雄2", trigger.mark_limit)
+    assert "前 3 个标记内不能被吞下" in text
+    assert "整场战斗中不能被吞下" in controller.hydra_devour_requirement_text("neverMarked", "英雄2")
+    # Marked, then dead before the swallow: that is a death, not a devour.
+    runtime = {}
+    for marked, turn, swallowed, dead in ((0, 1, (), ()), (1, 20, (0,), ()), (2, 40, (1,), ()), (None, 60, (), (2,))):
+        trigger, _, _ = step(runtime, marked, turn, swallowed, dead)
+        assert trigger is None
+    # A swallow caused by a mark beyond the limit does not regroup.
+    runtime = {}
+    config = {"objectives": {"devourOrderRetryConditions": [
+        {"relation": "neverMarked", "heroTypeIds": [102], "markLimit": 2}]}}
+    for marked, turn, swallowed in ((0, 1, ()), (1, 20, (0,)), (2, 40, (1,)), (0, 60, (2,))):
+        trigger, _, _ = step(runtime, marked, turn, swallowed)
+        assert trigger is None
+
+
+def test_never_devoured_condition_uses_forecast_swallows():
+    marks = [{"markIndex": 1, "heroTypeId": 100, "actorId": 0, "applyTurn": 0},
+             {"markIndex": 2, "heroTypeId": 102, "actorId": 2, "applyTurn": 100},
+             {"markIndex": 3, "heroTypeId": 101, "actorId": 1, "applyTurn": 200},
+             {"markIndex": 4, "heroTypeId": 105, "actorId": 5, "applyTurn": 300}]
+    forecast = {"status": "complete", "marks": marks, "horizon": "battle_finished",
+                "swallows": [{"swallowIndex": 1, "turn": 100, "actorId": 0, "heroTypeId": 100, "markIndex": 1},
+                             {"swallowIndex": 2, "turn": 300, "actorId": 1, "heroTypeId": 101, "markIndex": 3}]}
+    # Hero 102 was marked (second) but died before its swallow; hero 105 was
+    # marked last and the battle ended first: neither was devoured.
+    for hero in (102, 105):
+        assert evaluate_conditions([{"relation": "neverMarked", "heroTypeIds": [hero]}], forecast)["verdict"] == "continue"
+    verdict = evaluate_conditions([{"relation": "neverMarked", "heroTypeIds": [101]}], forecast)
+    violation = verdict["violations"][0]
+    assert verdict["verdict"] == "retry" and violation["swallowed"] and violation["markIndex"] == 3
+    assert violation["applyTurn"] == 300
+    # Within the first two marks hero 101 is not devoured (its swallow comes from mark 3).
+    assert evaluate_conditions([{"relation": "neverMarked", "heroTypeIds": [101], "markLimit": 2}],
+                               forecast)["verdict"] == "continue"
+    # Records without swallow data keep the mark-based reading.
+    legacy = {key: value for key, value in forecast.items() if key != "swallows"}
+    assert evaluate_conditions([{"relation": "neverMarked", "heroTypeIds": [102]}], legacy)["verdict"] == "retry"
+
+
+def test_swallow_stream_ties_each_swallow_to_its_mark():
+    from hydra_forecast import swallow_stream
+
+    report = {"playerActors": [{"actorId": 0, "heroTypeId": 100}, {"actorId": 1, "heroTypeId": 101}],
+              "resultSwallowEvents": [{"actorId": 0, "effectId": 7, "applyTurn": 104, "turn": 104},
+                                      {"actorId": 0, "effectId": 7, "applyTurn": 104, "turn": 104},
+                                      {"actorId": 9, "effectId": 8, "applyTurn": 110, "turn": 110},
+                                      {"actorId": 1, "effectId": 9, "applyTurn": 207, "turn": 207}]}
+    marks = [{"markIndex": 1, "actorId": 0, "applyTurn": 0}, {"markIndex": 2, "actorId": 1, "applyTurn": 104},
+             {"markIndex": 3, "actorId": 0, "applyTurn": 207}]
+    assert swallow_stream(report, marks) == [
+        {"swallowIndex": 1, "turn": 104, "actorId": 0, "heroTypeId": 100, "markIndex": 1},
+        {"swallowIndex": 2, "turn": 207, "actorId": 1, "heroTypeId": 101, "markIndex": 2}]
+    assert swallow_stream({"playerActors": []}, marks) is None
 
 
 def test_never_marked_condition_validation_and_web_normalization():
@@ -341,7 +413,7 @@ def test_monitor_regroups_on_damage_without_devour_conditions():
         trigger = drive(monitor, cfg, [live_state(0), live_state(1)])
         assert trigger is not None and trigger.cause == "damage"
         assert trigger.predicted_damage == 5_000_000_000
-        assert any("预计整场伤害 50.0 亿" in text and "未达到" in text for text in messages)
+        assert any("预计整场伤害 5.00B" in text and "未达到" in text for text in messages)
         telemetry = monitor.telemetry()
         assert telemetry["predictedDamage"] == 5_000_000_000
         assert telemetry["minimumDamage"] == 10_000_000_000
@@ -351,6 +423,33 @@ def test_monitor_regroups_on_damage_without_devour_conditions():
         monitor = monitor_with(result, messages, Path(folder))
         assert drive(monitor, cfg, [live_state(0), live_state(1)]) is None
         assert any("已达到" in text and "继续战斗" in text for text in messages)
+
+
+def test_monitor_regroups_only_on_violations_before_a_damage_threshold_is_close():
+    cfg = config([{"markIndex": 2, "relation": "isNoneOf", "heroTypeIds": [101]}])
+    for ambiguous_turn, regroups in ((50, True), (40, False), (30, False)):
+        with tempfile.TemporaryDirectory() as folder:
+            messages: list[str] = []
+            result = forecast_result([(0, 0, 100), (40, 1, 101)])  # the violating mark lands on turn 40
+            result["damageAmbiguousTurn"] = ambiguous_turn
+            monitor = monitor_with(result, messages, Path(folder))
+            trigger = drive(monitor, cfg, [live_state(0), live_state(1)])
+            assert (trigger is not None) is regroups, ambiguous_turn
+            if not regroups:
+                assert monitor.telemetry()["reason"] == "damage_threshold_too_close"
+                assert monitor.telemetry()["advice"]["code"] == "damage_threshold_too_close"
+                assert any("伤害阈值" in text for text in messages)
+            else:
+                assert "advice" not in monitor.telemetry()
+    # A damage verdict is decided at the end of the battle: any close threshold defers to the live battle.
+    with tempfile.TemporaryDirectory() as folder:
+        result = forecast_result([(0, 0, 100), (40, 1, 101)])
+        result.update(hydraDamage=5_000_000_000, damageAmbiguousTurn=900)
+        monitor = monitor_with(result, [], Path(folder))
+        damage_config = config([])
+        damage_config["objectives"]["minimumDamage"] = 10_000_000_000
+        assert drive(monitor, damage_config, [live_state(0), live_state(1)]) is None
+        assert monitor.telemetry()["reason"] == "damage_threshold_too_close"
 
 
 def test_forecast_launches_never_open_a_console_window():

@@ -2,7 +2,9 @@
 
 固定启动文件：`build\release\RSL-Boss-helper.exe`。
 
-在 Windows 中为这个文件创建桌面快捷方式。不要把 EXE 本身复制到桌面，也不要让快捷方式指向带版本号的旧文件；快捷方式必须继续指向上述固定路径。当前程序版本为 1.1.0，以后升级版本时该路径也不变。策略和日志继续使用原用户数据目录。
+在 Windows 中为这个文件创建桌面快捷方式。不要把 EXE 本身复制到桌面，也不要让快捷方式指向带版本号的旧文件；快捷方式必须继续指向上述固定路径。当前程序版本为 1.1.1，以后升级版本时该路径也不变。
+
+用户数据（策略、缓存、日志）在 `%LOCALAPPDATA%\RSL-Boss-helper`。1.1.1 首次启动时，在取得单实例锁之后、读取任何数据之前，`tools/data_root.py` 把旧版本的数据复制过来一次，按从新到旧取第一个存在的：1.1.1 测试版的 `WFQ-GAFE\RSL-Boss-helper`、1.0.6/1.1.0 的 `WFQ-GAFE\RaidBossStrategyStudio-Flow-1.0.6`、1.0.5 的 `WFQ-GAFE\RaidBossStrategyStudio`（都在 `%LOCALAPPDATA%` 下）。不复制可重建的内容（`runtime` 中的游戏文件副本和代理副本、提取的图标），不覆盖新目录中已有的文件，完成后写入 `config/data-migration.json`，之后不再复制。旧目录只读取、不修改，旧版本仍能使用自己的数据。
 
 1.1.0 起工具由 Alliance Boss Strategy Studio 改名为 RSL-Boss-helper，固定入口随之改为 `RSL-Boss-helper.exe`；旧入口 `AllianceBossStrategyStudio.exe` 保留原样、不再更新，已有快捷方式需改为指向新入口一次。
 

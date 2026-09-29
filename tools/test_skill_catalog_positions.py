@@ -1,4 +1,3 @@
-import copy
 import threading
 from unittest.mock import patch
 from catalog_stream import merge_skill_catalog

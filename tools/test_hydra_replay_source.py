@@ -10,7 +10,7 @@ import unittest
 import uuid
 
 from agent_ipc import (AGENT_BUILD_ID, SHARED_STATE_VERSION, AgentSharedState,
-                       DiagnosticJsonSlot, ReplayInputJsonSlot)
+                       DiagnosticJsonSlot, ReplayInputJsonSlot, TeamPreviewJsonSlot)
 from hydra_replay_source import (ReplaySourceCollector, ReplaySourceError,
                                  SETTINGS_SOURCE, SETUPS_SOURCE,
                                  validate_replay_source)
@@ -58,11 +58,20 @@ def records() -> tuple[dict, dict, dict]:
 
 class ReplaySourceTests(unittest.TestCase):
     def test_shared_slot_layout_and_version(self):
-        self.assertEqual((SHARED_STATE_VERSION, AGENT_BUILD_ID), (5, 2026092702))
+        self.assertEqual((SHARED_STATE_VERSION, AGENT_BUILD_ID), (7, 2026092902))
         self.assertEqual(ctypes.sizeof(ReplayInputJsonSlot), 2_097_168)
         self.assertEqual(AgentSharedState.replay_input.offset,
                          AgentSharedState.diagnostic.offset + ctypes.sizeof(DiagnosticJsonSlot))
-        self.assertEqual(ctypes.sizeof(AgentSharedState), 2_719_920)
+        # The team_preview slot (1.0.6) follows replay_input.
+        self.assertEqual(AgentSharedState.team_preview.offset,
+                         AgentSharedState.replay_input.offset + ctypes.sizeof(ReplayInputJsonSlot))
+        # The account_bonuses slot (1.1.1) follows team_preview.
+        self.assertEqual(AgentSharedState.account_bonuses.offset,
+                         AgentSharedState.team_preview.offset + ctypes.sizeof(TeamPreviewJsonSlot))
+        # The team_data slot (1.1.1, agent 2026092901) follows account_bonuses.
+        self.assertEqual(AgentSharedState.team_data.offset,
+                         AgentSharedState.account_bonuses.offset + 65_552)
+        self.assertEqual(ctypes.sizeof(AgentSharedState), 3_834_080)
 
     def test_saves_original_bounded_json_once_after_opening_identity(self):
         source, decision, account = records()

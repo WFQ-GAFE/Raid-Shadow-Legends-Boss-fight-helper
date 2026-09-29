@@ -75,7 +75,7 @@
 - 2026-09-25：抓取构建完成（预览包 `out/chimera-forecast-preview-1.0.6-20260925-r7`，代理 2026092501）。代理对奇美拉也发布本场 `BattleSetup`/`BattleSettings`（`chimera_replay_source`）、每个决策的战斗 RNG 四字和开战时选择的 5 名英雄（`chimeraStartSelection`）；控制器校验后保存到 `cache/chimera-capture/<setup>-<ms>/`，并逐决策记录回合、行动英雄、RNG、形态、试炼进度和提交的指令（`live-trace.jsonl`）。只保存从开局接管的战斗，最多保留 20 场；不影响出手。
 - 对比工具 `out/chimera-sim-research-20260925/compare_chimera_capture.py` 已用合成战斗自检：659/659 个决策窗口全部一致。
 - 2026-09-25 r8：抓取目录同时保存完整决策状态（`decision-states.jsonl.gz`，静态试炼目录单独存为 `decision-static.json`）、开局时的策略（`strategy.json`）与能力记忆（`capability-memory.json`）。
-- 2026-09-26：第一场真实奇美拉抓取（难度 6，15 次实战指令）通过三项核对：引擎重放 15/15 窗口一致；离线 decision_state 与实战逐字段一致；离线策略选出的 15 个指令与实战相同。在此基础上实现了“策略模拟”（开局推演阶段），见 [1.0.6 奇美拉策略模拟](1.0.6-chimera-strategy-simulation.md)。
+- 2026-09-26：第一场真实奇美拉抓取（终极噩梦，15 次实战指令）通过三项核对：引擎重放 15/15 窗口一致；离线 decision_state 与实战逐字段一致；离线策略选出的 15 个指令与实战相同。在此基础上实现了“策略模拟”（开局推演阶段），见 [1.0.6 奇美拉策略模拟](1.0.6-chimera-strategy-simulation.md)。
 
 ## 需要你配合的事
 

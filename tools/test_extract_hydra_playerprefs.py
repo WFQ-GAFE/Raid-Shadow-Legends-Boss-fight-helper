@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 import uuid
 
-from tools.extract_hydra_playerprefs import (
+from extract_hydra_playerprefs import (
     cache_user_id_from_value_name,
     decode_cache_value,
     select_exact_battle,

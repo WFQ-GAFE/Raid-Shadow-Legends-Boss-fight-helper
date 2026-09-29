@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 from strategy_storage import atomic_write_json
+from team_setups import hero_battle_inputs
 
 
 PROJECT_ROOT = Path(
@@ -99,23 +100,29 @@ def decode_hero(item: dict[str, Any]) -> dict[str, Any] | None:
     elif item.get("statsReason"):
         hero["statsReason"] = item["statsReason"]
     sets: dict[int, int] = {}
-    for artifact in item.get("artifacts") or []:
-        set_id = _integer(artifact.get("set")) if isinstance(artifact, dict) else None
+    artifacts = [artifact for artifact in item.get("artifacts") or [] if isinstance(artifact, dict)]
+    for artifact in artifacts:
+        set_id = _integer(artifact.get("set"))
         if set_id:
             sets[set_id] = sets.get(set_id, 0) + 1
-    hero["equipped"] = sum(sets.values())
+    # Every equipped piece counts, including those without a set (set 0).
+    hero["equipped"] = len(artifacts)
     hero["sets"] = [{"set": set_id, "pieces": count}
                     for set_id, count in sorted(sets.items(), key=lambda pair: (-pair[1], pair[0]))]
     relic = item.get("relic") if isinstance(item.get("relic"), dict) else None
     if relic and _integer(relic.get("typeId")):
         hero["relic"] = {"typeId": relic["typeId"], "rank": _integer(relic.get("rank")) or 0,
                          "level": _integer(relic.get("level")) or 0}
+    # Battle-setup parts for simulating this team (1.1.1 agent); never shown or exported.
+    battle = hero_battle_inputs(item, model)
+    if battle is not None:
+        hero["battle"] = battle
     return hero
 
 
 def decode_preview(raw: Any) -> dict[str, Any] | None:
-    """The agent's team_preview slot → a team description."""
-    if not isinstance(raw, dict) or raw.get("type") != "team_preview":
+    """The agent's team_preview or team_data slot → a team description."""
+    if not isinstance(raw, dict) or raw.get("type") not in ("team_preview", "team_data"):
         return None
     result: dict[str, Any] = {"schema": SCHEMA, "bossMode": raw.get("bossMode"),
                               "observedAtTick": raw.get("observedAtTick"),
@@ -128,6 +135,13 @@ def decode_preview(raw: Any) -> dict[str, Any] | None:
               if hero is not None]
     names = raw.get("names") if isinstance(raw.get("names"), dict) else {}
     icons = raw.get("icons") if isinstance(raw.get("icons"), dict) else {}
+    observatory = {}
+    for location, value in (raw.get("observatory") or {}).items() if isinstance(raw.get("observatory"), dict) else ():
+        parsed = _json(value)
+        if isinstance(parsed, dict):
+            observatory[str(location)] = parsed
+    if observatory:
+        result["observatory"] = observatory
     result.update(
         status="captured", heroes=heroes,
         names={key: value for key, value in names.items() if isinstance(value, dict)},
@@ -141,6 +155,16 @@ def public_preview(preview: dict[str, Any] | None) -> dict[str, Any] | None:
     return copy.deepcopy(preview) if preview is not None else None
 
 
+def display_preview(preview: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The preview for the interface, without the (large) battle-setup parts."""
+    if preview is None:
+        return None
+    shown = {key: value for key, value in preview.items() if key != "observatory"}
+    shown["heroes"] = [{key: value for key, value in hero.items() if key != "battle"}
+                       for hero in preview.get("heroes") or []]
+    return copy.deepcopy(shown)
+
+
 def team_key(type_ids: Any) -> str | None:
     """Order-free identity of a team: its heroes' type ids."""
     values = sorted(value for value in (type_ids or []) if _integer(value) and value > 0)
@@ -149,7 +173,8 @@ def team_key(type_ids: Any) -> str | None:
 
 def portable_snapshot(public: dict[str, Any]) -> dict[str, Any]:
     """A shareable team description: no account-specific hero ids."""
-    heroes = [{key: value for key, value in hero.items() if key != "heroId"} for hero in public.get("heroes") or []]
+    heroes = [{key: value for key, value in hero.items() if key not in ("heroId", "battle")}
+              for hero in public.get("heroes") or []]
     return {"schema": SCHEMA, "bossMode": public.get("bossMode"), "heroes": heroes,
             "names": public.get("names") or {}, "icons": public.get("icons") or {},
             "capturedAt": public.get("capturedAt") or time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -161,11 +186,19 @@ def sanitize_reference_team(value: Any) -> dict[str, Any] | None:
         return None
     if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > MAX_SNAPSHOT_BYTES:
         return None
-    return {"schema": value.get("schema"), "bossMode": value.get("bossMode"),
-            "heroes": [hero for hero in value["heroes"][:6] if isinstance(hero, dict)],
-            "names": value.get("names") if isinstance(value.get("names"), dict) else {},
-            "icons": value.get("icons") if isinstance(value.get("icons"), dict) else {},
-            "capturedAt": value.get("capturedAt")}
+    result = {"schema": value.get("schema"), "bossMode": value.get("bossMode"),
+              "heroes": [hero for hero in value["heroes"][:6] if isinstance(hero, dict)],
+              "names": value.get("names") if isinstance(value.get("names"), dict) else {},
+              "icons": value.get("icons") if isinstance(value.get("icons"), dict) else {},
+              "capturedAt": value.get("capturedAt")}
+    # 1.1.1: the author's heroes and gear as battle data, for simulating the author's team.
+    simulation = value.get("simulation")
+    if (isinstance(simulation, dict) and isinstance(simulation.get("data"), str)
+            and isinstance(simulation.get("format"), str) and _integer(simulation.get("schema"))):
+        result["simulation"] = {key: simulation[key] for key in ("format", "schema", "data")}
+    if isinstance(value.get("savedAt"), str):
+        result["savedAt"] = value["savedAt"]
+    return result
 
 
 class TeamSnapshotStore:

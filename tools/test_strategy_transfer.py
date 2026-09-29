@@ -81,6 +81,33 @@ def main() -> None:
         service.team_snapshots = TeamSnapshotStore(Path(temporary) / "other")
         again = service.export_strategy_profile(received["activeStrategyId"], "hydra")
         assert again["teamSnapshot"]["heroes"][0]["typeId"] == 300
+
+        # 1.1.1: the team as it was when the strategy group was saved. Its display
+        # data and its battle data travel with the export (no account ids, no
+        # account bonuses); the importer keeps them as the author's team and passes
+        # them on unchanged.
+        from team_setups import unpack_simulation
+        heroes = [{"model": {"heroId": 1001 + index, "typeId": type_id, "grade": 6, "level": 60,
+                             "skills": [{"i": type_id * 10, "l": 3}], "masteries": [500101]},
+                   "parts": {"artifacts": [{"i": 9000 + index}], "sets": [], "academy": {"g": [1]}}}
+                  for index, type_id in enumerate([100, 200, 300])]
+        display = {"schema": 2, "bossMode": "hydra", "heroes": [{"typeId": 100, "equipped": 9}],
+                   "names": {}, "icons": {}, "capturedAt": "2026-09-29 10:00:00"}
+        service.strategy_team_store().save("hydra", "default", {
+            "heroTypeIds": [100, 200, 300], "heroIds": [1001, 1002, 1003], "heroes": heroes}, display=display)
+        own = service.export_strategy_profile("default", "hydra")
+        assert own["teamSnapshot"]["heroes"] == display["heroes"] and own["teamSnapshot"]["savedAt"]
+        author = unpack_simulation(own["teamSnapshot"]["simulation"])
+        assert author["heroTypeIds"] == [100, 200, 300] and [hero["model"]["heroId"] for hero in author["heroes"]] == [1, 2, 3]
+        assert "academy" not in author["heroes"][0]["parts"] and author["heroes"][2]["parts"]["artifacts"] == [{"i": 9002}]
+        received = service.import_strategy_profile(own, "hydra")
+        assert received["config"]["referenceTeam"]["simulation"] == own["teamSnapshot"]["simulation"]
+        passed_on = service.export_strategy_profile(received["activeStrategyId"], "hydra")
+        assert passed_on["teamSnapshot"]["simulation"] == own["teamSnapshot"]["simulation"]
+        # A snapshot of another team (the strategy's team changed since) is not exported.
+        service.strategy_team_store().save("hydra", "default", {
+            "heroTypeIds": [100, 200, 400], "heroIds": [1001, 1002, 1004], "heroes": heroes}, display=display)
+        assert "simulation" not in (service.export_strategy_profile("default", "hydra").get("teamSnapshot") or {})
     print("strategy-transfer-tests-ok")
 
 

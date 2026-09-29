@@ -8,6 +8,8 @@
 #include <vector>
 #include <type_traits>
 #include <cstring>
+#include <functional>
+#include <unordered_map>
 
 // Used exclusively after the isolated worker has initialized its own runtime.
 // Pointers here never refer to objects in another process.
@@ -15,6 +17,42 @@ struct ManagedRuntime {
     HMODULE library;
     void* image{};
     mutable std::vector<std::uintptr_t> roots;
+    // Exports, fields and methods found by name never change while the worker
+    // runs, and a decision state reads thousands of them: remember each lookup
+    // by owner and name pointer, confirming the text so a reused pointer never
+    // aliases another name.
+    struct LookupKey {
+        const void* owner;
+        const char* name;
+        int extra;
+        bool operator==(const LookupKey& other) const noexcept {
+            return owner == other.owner && name == other.name && extra == other.extra;
+        }
+    };
+    struct LookupKeyHash {
+        std::size_t operator()(const LookupKey& key) const noexcept {
+            std::size_t hash = std::hash<const void*>()(key.owner);
+            hash ^= std::hash<const void*>()(key.name) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+            hash ^= static_cast<std::size_t>(key.extra) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+            return hash;
+        }
+    };
+    struct LookupValue {
+        std::string name;
+        void* value{};
+    };
+    mutable std::unordered_map<LookupKey, LookupValue, LookupKeyHash> lookups;
+    static constexpr int kExportLookup = -1;
+    static constexpr int kFieldLookup = -2;
+    template <typename Resolve>
+    void* cached(const void* owner, const char* name, int extra, Resolve resolve) const {
+        const LookupKey key{owner, name, extra};
+        const auto found = lookups.find(key);
+        if (found != lookups.end() && found->second.name == name) return found->second.value;
+        void* value = resolve();
+        if (value) lookups[key] = LookupValue{name, value};
+        return value;
+    }
     ManagedRuntime(const ManagedRuntime&) = delete;
     ManagedRuntime& operator=(const ManagedRuntime&) = delete;
     ~ManagedRuntime() {
@@ -43,9 +81,10 @@ struct ManagedRuntime {
         }
     }
     template <typename T> T api(const char* name) const {
-        auto result = reinterpret_cast<T>(GetProcAddress(library, name));
+        void* result = cached(nullptr, name, kExportLookup,
+                              [&] { return reinterpret_cast<void*>(GetProcAddress(library, name)); });
         if (!result) throw std::runtime_error(std::string("Missing runtime export: ") + name);
-        return result;
+        return reinterpret_cast<T>(result);
     }
     ManagedRuntime(HMODULE module, void* domain, const char* assembly_name = "Unity.SharedModel.dll") : library(module) {
         std::size_t count = 0;
@@ -67,7 +106,10 @@ struct ManagedRuntime {
         return api<void* (*)(void*)>("il2cpp_object_get_class")(object);
     }
     void* field(void* object, const char* name) const {
-        auto value = api<void* (*)(void*, const char*)>("il2cpp_class_get_field_from_name")(object_class(object), name);
+        void* type = object_class(object);
+        auto value = cached(type, name, kFieldLookup, [&] {
+            return api<void* (*)(void*, const char*)>("il2cpp_class_get_field_from_name")(type, name);
+        });
         if (!value) throw std::runtime_error(std::string("Missing field: ") + name);
         return value;
     }
@@ -76,7 +118,9 @@ struct ManagedRuntime {
         return api<void* (*)(void*)>("il2cpp_class_from_type")(type);
     }
     void* method(void* type, const char* name, int arguments) const {
-        auto value = api<void* (*)(void*, const char*, int)>("il2cpp_class_get_method_from_name")(type, name, arguments);
+        auto value = cached(type, name, arguments, [&] {
+            return api<void* (*)(void*, const char*, int)>("il2cpp_class_get_method_from_name")(type, name, arguments);
+        });
         if (!value) throw std::runtime_error(std::string("Missing method: ") + name);
         return value;
     }
