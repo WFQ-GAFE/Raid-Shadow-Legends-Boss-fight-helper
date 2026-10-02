@@ -5,15 +5,19 @@ const path = require('node:path');
 const ts = require('../node_modules/typescript');
 const React = require('react');
 const { renderToString } = require('react-dom/server');
-function load(name) {
-  const source = fs.readFileSync(path.join(__dirname, '../src', name + '.tsx'), 'utf8');
+function load(name, extension = '.tsx', modules = {}) {
+  const source = fs.readFileSync(path.join(__dirname, '../src', name + extension), 'utf8');
   const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const exports = {};
-  new Function('require', 'exports', js)(require, exports);
+  new Function('require', 'exports', js)((id) => modules[id] ?? require(id), exports);
   return exports;
 }
-const { DecisionRows } = load('DecisionRows');
+// The rows render in a window set to Chinese.
+const { formatMessage } = load('i18n/format', '.ts');
+const zh = JSON.parse(fs.readFileSync(path.join(__dirname, '../src/i18n/messages/zh-CN.json'), 'utf8'));
+const i18n = { tr: (key, params) => formatMessage('zh-CN', zh[key], params), backendText: (value) => String(value ?? '') };
+const { DecisionRows } = load('DecisionRows', '.tsx', { './i18n': i18n });
 const legacyReservation = { rule: '第一总督阿莫科 · 遗产守护者 → 自己', matched: false,
   reason: 'skill_reserved_for_trial_rule', skillTypeId: 98903,
   reservedByRules: ['第一总督阿莫科 · 遗产守护者 → 自己'] };
@@ -36,7 +40,7 @@ test('diagnostics tolerate absent/malformed rows and still render valid conditio
 });
 
 test('the root error fallback remains visible and offers recovery and pause controls', () => {
-  const { UiErrorBoundary } = load('UiErrorBoundary');
+  const { UiErrorBoundary } = load('UiErrorBoundary', '.tsx', { './i18n': i18n });
   const boundary = new UiErrorBoundary({ children: null });
   boundary.state = { failed: true, status: '' };
   const html = renderToString(boundary.render());

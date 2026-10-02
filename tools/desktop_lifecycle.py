@@ -4,6 +4,7 @@ from pathlib import Path
 import threading
 import time
 from strategy_storage import atomic_write_bytes
+from ui_text import ui_text
 
 
 def persistent_agent(source: Path, root: Path) -> Path:
@@ -13,7 +14,7 @@ def persistent_agent(source: Path, root: Path) -> Path:
     target = root.resolve() / 'runtime' / 'agents' / digest / 'RaidChimeraAgent.dll'
     if target.is_file():
         if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
-            raise RuntimeError('本地代理文件校验失败，请重新安装工具。')
+            raise RuntimeError(ui_text("desktop.agentFileInvalid"))
         return target  # Do not replace a correct DLL that a game may have loaded.
     try:
         atomic_write_bytes(target, payload)
@@ -51,7 +52,7 @@ class WindowStartup:
                 break
             if time.monotonic() >= deadline:
                 if not self.closed.is_set():
-                    notify('窗口未能完成初始化，请重新打开工具。')
+                    notify(ui_text("desktop.windowNotReady"))
                 return
         if self.closed.is_set():
             return
@@ -64,4 +65,4 @@ class WindowStartup:
                 window.load_url(url)
         except Exception:
             if not self.closed.is_set():
-                notify('窗口初始化失败，请重新打开工具。')
+                notify(ui_text("desktop.windowFailed"))

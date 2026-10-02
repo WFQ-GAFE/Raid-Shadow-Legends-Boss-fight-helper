@@ -9,6 +9,7 @@ from pathlib import Path
 from agent_ipc import AGENT_BUILD_ID, reload_block_reason
 import controller_manager as controller_module
 from controller_manager import ControllerManager
+from ui_text import render
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,8 +83,8 @@ def test_controller_refuses_to_reload_previous_crash_build() -> None:
 
     launch.assert_not_called()
     assert calls == [[str(os.getpid()), "--check-only"]]
-    assert manager.snapshot()["status"] == "启动失败"
-    assert "阻止在线卸载或重载" in manager.snapshot()["error"]
+    assert render(manager.snapshot()["status"], "zh-CN") == "启动失败"
+    assert "阻止在线卸载或重载" in render(manager.snapshot()["error"], "zh-CN")
 
 
 def test_an_older_agent_layout_is_reported_not_mapped() -> None:

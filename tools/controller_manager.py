@@ -23,6 +23,7 @@ from inject_probe import seed_battle_context, seed_selection_context
 from strategy_storage import atomic_write_json, revision
 from decision_journal import DecisionJournal
 from desktop_lifecycle import remove_session_file
+from ui_text import render, ui_text
 
 class LaunchCancelled(Exception):
     pass
@@ -55,21 +56,23 @@ def decode_worker_output(value: bytes | str) -> str:
 
 def controller_exit_label(code: int, stop_requested: bool) -> str:
     if code == 6:
-        return "安全中断"
+        return ui_text("manager.safeStop")
     if code == 7:
-        return "已免费重整"
+        return ui_text("manager.freeRegrouped")
     if code == 8:
-        return "游戏内暂停"
+        return ui_text("manager.pausedInGame")
     if code == 0 and stop_requested:
-        return "已暂停"
+        return ui_text("manager.paused")
     if code == 0:
-        return "已完成"
-    return f"异常停止（代码 {code}）"
+        return ui_text("manager.finished")
+    return ui_text("manager.abnormalStop", code=code)
 
 
 def diagnostic_console_text(line: str) -> str:
     # Keep user-facing explanations, excluding account binding and raw guard
     # dumps. Structured whitelisted records carry the decision inputs instead.
+    # The journal keeps the Chinese text that message tokens stand for.
+    line = render(line, "zh-CN")
     if "账户" in line or "玩家 ID" in line:
         return "[账户相关提示已省略]"
     line = line.split("；校验详情：", 1)[0]
@@ -98,7 +101,7 @@ class ControllerManager:
         self.preparation_process: subprocess.Popen[Any] | None = None
         self.pid: int | None = None
         self.boss_mode = "chimera"
-        self.status = "已停止"
+        self.status = ui_text("manager.stopped")
         self.error: str | None = None
         self.logs_by_mode: dict[str, deque[str]] = {
             mode: deque(maxlen=800) for mode in MODE_SPECS
@@ -134,10 +137,10 @@ class ControllerManager:
                 strategyId=self.strategy_id, runningRevision=self.running_revision,
                 decisionNumber=self.decision_numbers[mode], **fields)
             if not critical_written and not critical_was_disabled and written:
-                self.logs_by_mode[mode].append("关键事件日志无法保存，请检查日志目录；普通诊断日志仍可用。")
+                self.logs_by_mode[mode].append(ui_text("manager.criticalLogFailed"))
                 self.log_sequences[mode] += 1
         if not written and not was_disabled:
-            self.logs_by_mode[mode].append(f"出手诊断无法保存：{self.journal.error}；本次仍可查看窗口日志。")
+            self.logs_by_mode[mode].append(ui_text("manager.diagnosticsFailed", error=self.journal.error))
             self.log_sequences[mode] += 1
 
     def append(self, line: str, boss_mode: str | None = None) -> None:
@@ -215,12 +218,12 @@ class ControllerManager:
         boss_mode = normalize_mode(boss_mode)
         with self.lock:
             if self.closing:
-                raise RuntimeError("主工具正在关闭")
+                raise RuntimeError(ui_text("manager.closing"))
             if self.preparing or (self.process is not None and self.process.poll() is None):
-                raise RuntimeError("控制器已经在运行")
+                raise RuntimeError(ui_text("manager.alreadyRunning"))
             self.pid = pid
             self.boss_mode = boss_mode
-            self.status = "正在准备代理…"
+            self.status = ui_text("manager.preparingAgent")
             self.error = None
             self.stop_requested = False
             self.preparing = True
@@ -248,10 +251,10 @@ class ControllerManager:
                 build=diagnostic_build_identity(),
                 logFormat=2)
             if self.journal.path is not None and not self.journal.disabled:
-                self.append(f"诊断自动保存到：{self.journal.directory}（普通日志约 256 MB，关键事件另存约 32 MB）", boss_mode)
+                self.append(ui_text("manager.diagnosticsFolder", directory=self.journal.directory), boss_mode)
             self.telemetry[boss_mode] = {}
             self.append(
-                f"正在为游戏内账户 {account_name} 准备{mode_spec(boss_mode)['label']}接管。"
+                ui_text("manager.preparingTakeover", accountName=account_name, bossMode=mode_spec(boss_mode)['label'])
             )
         self.worker_thread = threading.Thread(
             target=self._prepare_and_run,
@@ -319,14 +322,13 @@ class ControllerManager:
             require_expected_account(pid, account_name, user_id)
             check, check_payload = self._run_injector([str(pid), "--check-only"], 20)
             if check.returncode:
-                raise RuntimeError(check_payload.get("reason") or check.stderr.strip() or "代理检查失败")
+                raise RuntimeError(check_payload.get("reason") or check.stderr.strip() or ui_text("manager.agentCheckFailed"))
 
             if check_payload.get("agentLoaded"):
                 reload_reason = reload_block_reason(check_payload.get("agentStatus"))
                 if reload_reason:
                     raise RuntimeError(
-                        "旧版或状态不明的代理仍驻留在游戏进程中。请完全退出并重新启动 Raid 客户端；"
-                        "为避免再次闪退，工具已阻止在线卸载或重载。"
+                        ui_text("manager.staleAgent")
                     )
 
             if check_payload.get("agentLoaded") and (
@@ -339,14 +341,14 @@ class ControllerManager:
                 except (FileNotFoundError, ValueError, OSError):
                     pass
                 if previous_lifecycle.get("screen") == "result":
-                    raise RuntimeError("当前停留在战绩结算画面，不会在此时更新代理")
-                self.append("正在只更新所选游戏账户的代理版本…", boss_mode)
+                    raise RuntimeError(ui_text("manager.onResultScreen"))
+                self.append(ui_text("manager.updatingAgent"), boss_mode)
                 reload_result, reload_payload = self._run_injector([str(pid), "--reload"], 35)
                 if reload_result.returncode:
                     raise RuntimeError(
                         reload_payload.get("reason")
                         or reload_result.stderr.strip()
-                        or "所选账户代理更新失败"
+                        or ui_text("manager.agentUpdateFailed")
                     )
                 screen = previous_lifecycle.get("screen")
                 self._check_cancelled()
@@ -354,20 +356,20 @@ class ControllerManager:
                     context = (previous_lifecycle.get("battle") or {}).get("context")
                     if isinstance(context, int) and context > 0:
                         if not seed_battle_context(pid, AGENT, context).get("accepted"):
-                            raise RuntimeError("更新后恢复当前奇美拉战斗失败")
+                            raise RuntimeError(ui_text("manager.restoreBattleFailed"))
                 elif screen == "team_selection":
                     context = (previous_lifecycle.get("selection") or {}).get("context")
                     if isinstance(context, int) and context > 0:
                         if not seed_selection_context(pid, AGENT, context).get("accepted"):
-                            raise RuntimeError("更新后恢复奇美拉队伍界面失败")
+                            raise RuntimeError(ui_text("manager.restoreTeamScreenFailed"))
                 require_expected_account(pid, account_name, user_id)
                 check_payload = {"agentLoaded": True, "agentCompatible": True, "agentReady": True}
 
             if not check_payload.get("agentLoaded"):
-                self.append("代理尚未载入，正在载入所选账户…", boss_mode)
+                self.append(ui_text("manager.loadingAgent"), boss_mode)
                 load_result, load_payload = self._run_injector([str(pid)], 35)
                 if load_result.returncode:
-                    raise RuntimeError(load_payload.get("reason") or load_result.stderr.strip() or "代理载入失败")
+                    raise RuntimeError(load_payload.get("reason") or load_result.stderr.strip() or ui_text("manager.agentLoadFailed"))
                 require_expected_account(pid, account_name, user_id)
 
             require_expected_account(pid, account_name, user_id)
@@ -412,8 +414,8 @@ class ControllerManager:
                     env=utf8_subprocess_environment(),
                 )
                 self.process = process
-                self.status = f"正在运行 · {account_name}"
-            self.append("控制器已启动。", boss_mode)
+                self.status = ui_text("manager.running", accountName=account_name)
+            self.append(ui_text("manager.started"), boss_mode)
             assert process.stdout is not None
             for line in process.stdout:
                 self.append(decode_worker_output(line), boss_mode)
@@ -421,20 +423,20 @@ class ControllerManager:
             with self.lock:
                 self.status = controller_exit_label(code, self.stop_requested)
                 self.record_diagnostic("lifecycle", boss_mode, lifecycle={"event": "controller_exit", "exitCode": code, "stopRequested": self.stop_requested, "closing": self.closing})
-                self.append(self.status + "。" if code == 0 else f"控制器已退出，代码 {code}。", boss_mode)
+                self.append(ui_text("manager.statusLine", status=self.status) if code == 0 else ui_text("manager.exited", code=code), boss_mode)
         except LaunchCancelled:
             with self.lock:
-                self.status = "已关闭" if self.closing else "已暂停"
+                self.status = ui_text("manager.closed") if self.closing else ui_text("manager.paused")
         except Exception as error:
             with self.lock:
                 if self.closing or self.stop_requested:
                     self.error = None
-                    self.status = "已关闭" if self.closing else "已暂停"
+                    self.status = ui_text("manager.closed") if self.closing else ui_text("manager.paused")
                     self.record_diagnostic("lifecycle", boss_mode, lifecycle={"event": "preparation_cancelled", "interruptedErrorType": type(error).__name__})
                 else:
                     self.error = str(error)
-                    self.status = "启动失败"
-                    self.append(f"启动失败：{error}", boss_mode)
+                    self.status = ui_text("manager.startFailed")
+                    self.append(ui_text("manager.startFailedWith", error=error), boss_mode)
         finally:
             # Do not orphan a worker if decoding its output or another host
             # operation fails after Popen. Keep cancellation alive until exit.
@@ -468,25 +470,25 @@ class ControllerManager:
     def stop(self, pid: int | None) -> None:
         with self.lock:
             self.stop_requested = True
-            self.status = "正在暂停接管…"
+            self.status = ui_text("manager.pausing")
             process = self.process
             actual_pid = self.pid
             if self.pause_event is not None:
                 if not self.pause_event.signal():
-                    raise RuntimeError("暂停信号发送失败；请重试")
+                    raise RuntimeError(ui_text("manager.pauseFailedRetry"))
                 return
         if process is not None and process.poll() is None:
             target = actual_pid
             if not isinstance(target, int) or not signal_controller_pause(target):
                 with self.lock:
                     self.stop_requested = False
-                    self.status = "暂停信号发送失败"
-                raise RuntimeError("暂停信号发送失败；控制器仍保持运行")
-            self.append("已请求暂停；正在等待控制器清理接管会话。", self.boss_mode)
+                    self.status = ui_text("manager.pauseFailed")
+                raise RuntimeError(ui_text("manager.pauseFailedRunning"))
+            self.append(ui_text("manager.pauseRequested"), self.boss_mode)
             return
         with self.lock:
             if not self.preparing:
-                self.status = "已停止"
+                self.status = ui_text("manager.stopped")
                 self.stop_requested = False
 
     def request_shutdown(self) -> None:
@@ -494,7 +496,7 @@ class ControllerManager:
         with self.lock:
             self.closing = True
             self.stop_requested = True
-            self.status = "正在关闭…"
+            self.status = ui_text("manager.closingNow")
             if self.pause_event is not None:
                 self.pause_event.signal()
 
@@ -525,4 +527,4 @@ class ControllerManager:
             # Keep the extraction parent alive until they release its files.
             self.worker_thread.join(timeout=max(timeout, 40.0))
         with self.lock:
-            self.status = "已关闭"
+            self.status = ui_text("manager.closed")

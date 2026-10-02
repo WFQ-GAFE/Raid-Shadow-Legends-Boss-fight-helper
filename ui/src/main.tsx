@@ -4,13 +4,11 @@ import App from './App'
 import './styles.css'
 import './rulePanelScroll.css'
 import { UiErrorBoundary, reportUiError } from './UiErrorBoundary'
-import { installScrollChaining } from './scrollChaining'
 
 window.addEventListener('error', (event) => {
   if (event.message) reportUiError('javascript', event.error ?? event.message)
 })
 window.addEventListener('unhandledrejection', (event) => reportUiError('promise', event.reason))
-installScrollChaining()
 
 function MountedApp() {
   useLayoutEffect(() => {

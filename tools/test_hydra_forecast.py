@@ -22,6 +22,7 @@ from hydra_forecast import (
     strategy_forecast_issue,
 )
 from hydra_forecast_live import HydraForecastMonitor, window_difference
+from ui_text import render
 
 
 WORDS = [[11, 12, 13, 14], [21, 22, 23, 24], [31, 32, 33, 34]]
@@ -142,7 +143,7 @@ def test_mark_stream_deduplicates_and_requires_both_event_sources():
     try:
         mark_stream(report)
     except ForecastError as error:
-        assert str(error) == "mark_event_streams_disagree"
+        assert render(str(error), "zh-CN") == "mark_event_streams_disagree"
     else:
         raise AssertionError("a scanned mark missing from the result stream must be refused")
 
@@ -174,9 +175,9 @@ def test_window_difference_reports_rng_and_actor_divergence():
     window = {"turn": 2, "playerTurnCount": 1, "activeHeroId": 1, "activeHeroTypeId": 101,
               "words": WORDS[1]}
     assert window_difference(result, window) is None
-    assert "随机状态" in window_difference(result, {**window, "words": [1, 2, 3, 4]})
-    assert "行动英雄" in window_difference(result, {**window, "activeHeroId": 2})
-    assert "不在推演" in window_difference(result, {**window, "turn": 99})
+    assert "随机状态" in render(window_difference(result, {**window, "words": [1, 2, 3, 4]}), "zh-CN")
+    assert "行动英雄" in render(window_difference(result, {**window, "activeHeroId": 2}), "zh-CN")
+    assert "不在推演" in render(window_difference(result, {**window, "turn": 99}), "zh-CN")
 
 
 def test_monitor_regroups_only_after_live_windows_match():
@@ -187,9 +188,9 @@ def test_monitor_regroups_only_after_live_windows_match():
         cfg = config([{"markIndex": 2, "relation": "isNoneOf", "heroTypeIds": [101]}])
         trigger = drive(monitor, cfg, [live_state(0), live_state(1)])
         assert trigger is not None and trigger.mark_index == 2 and trigger.actual_hero_type_id == 101
-        assert any("逐项核对一致" in text for text in messages)
+        assert any("逐项核对一致" in text for text in (render(item, "zh-CN") for item in messages))
         telemetry = monitor.telemetry()
-        assert telemetry["verdict"] == "retry" and "执行免费重整" in telemetry["conclusion"]
+        assert telemetry["verdict"] == "retry" and "执行免费重整" in render(telemetry["conclusion"], "zh-CN")
         work = monitor.battle.job.work
         assert (work / "strategy.json").is_file()
         verdict = json.loads((work / "verdict.json").read_text(encoding="utf-8"))
@@ -205,10 +206,11 @@ def test_monitor_refuses_forecast_that_differs_from_the_live_battle():
         trigger = drive(monitor, cfg, [live_state(0), live_state(1, words=[9, 9, 9, 9])])
         assert trigger is None
         assert monitor.battle.status == "unavailable"
-        assert any("不一致" in text for text in messages)
+        assert any("不一致" in text for text in (render(item, "zh-CN") for item in messages))
         assert monitor.telemetry()["reason"] == "live_window_differs"
         advice = monitor.telemetry()["advice"]
-        assert advice["code"] == "live_window_differs" and "手动操作" in advice["action"] and advice["actionEn"]
+        assert advice["code"] == "live_window_differs" and "手动操作" in render(advice["action"], "zh-CN")
+        assert "by hand" in render(advice["action"], "en")
 
 
 def test_monitor_refuses_forecast_with_a_different_opening_mark():
@@ -218,7 +220,66 @@ def test_monitor_refuses_forecast_with_a_different_opening_mark():
         monitor = monitor_with(result, messages, Path(folder))
         cfg = config([{"markIndex": 2, "relation": "isNoneOf", "heroTypeIds": [101]}])
         assert drive(monitor, cfg, [live_state(0), live_state(1)]) is None
-        assert any("开局标记不一致" in text for text in messages)
+        assert any("开局标记不一致" in text for text in (render(item, "zh-CN") for item in messages))
+
+
+def stuck_forecast() -> dict[str, Any]:
+    """A forecast whose rules left hero 101 without an action on turn 2."""
+    result = forecast_result([(0, 0, 100)], status="unknown")
+    result["reason"] = "policy_stopped:policy_returned_no_skill_command"
+    snapshot = {"actors": [{"id": 0, "t": 100, "s": "a", "hp": 100.0, "fx": []}]}
+    result["decisions"][0].update(ruleIndex=1, rule="r", command={"skillTypeId": 1001, "targetId": 8},
+                                  hydraTurns=1, snapshot=snapshot)
+    result["decisions"][1].update(status="unknown", reason="policy_returned_no_skill_command", stuck={
+        "reason": "no_matching_rule", "turn": 2, "hydraTurns": 1, "activeHeroId": 1, "activeHeroTypeId": 101,
+        "skills": [{"typeId": 1011, "slot": 1, "ready": False}], "rules": [], "snapshot": snapshot})
+    del result["decisions"][2]
+    result.update(stopReason="policy_stopped", hydraDamage=500, commands=1, engineTurns=[
+        {"turnBefore": 1, "actorId": 0, "actorTypeId": 100, "playerAction": True, "skillTypeId": 1001,
+         "targetId": 8, "damageAfter": 500, "deaths": []}],
+        actors=[{"actorId": 0, "heroTypeId": 100, "player": True}, {"actorId": 1, "heroTypeId": 101, "player": True}])
+    return result
+
+
+def test_a_forecast_stopped_by_the_rules_names_the_hero_and_saves_a_report():
+    from hydra_forecast_live import recent_forecasts
+    from hydra_simulation_service import HydraSimulationService
+
+    with tempfile.TemporaryDirectory() as folder:
+        messages: list[str] = []
+        monitor = monitor_with(stuck_forecast(), messages, Path(folder))
+        cfg = config([{"markIndex": 2, "relation": "isNoneOf", "heroTypeIds": [101]}])
+        assert drive(monitor, cfg, [live_state(0), live_state(1)]) is None
+        telemetry = monitor.telemetry()
+        work = monitor.battle.job.work
+        assert telemetry["status"] == "unavailable" and telemetry["recordId"] == "battle-" + work.name
+        assert telemetry["stuck"] == {"reason": "no_matching_rule", "turn": 2, "hydraTurns": 1, "activeHeroTypeId": 101}
+        conclusion = render(telemetry["conclusion"], "zh-CN")
+        assert "第 2 回合卡住" in conclusion and "英雄1" in conclusion and "没有匹配且可执行的规则" in conclusion
+        assert "查看这场的模拟报告" in render(telemetry["advice"]["action"], "zh-CN")
+        # The report opens like a strategy simulation's, with the live conclusion.
+        service = HydraSimulationService(capture_roots={"capture": Path(folder) / "capture", "forecast": work.parent},
+                                         simulation_root=Path(folder) / "sims", runner=lambda *args, **kwargs: {})
+        summary = service.load(telemetry["recordId"])
+        assert summary["kind"] == "battle" and summary["capture"]["id"] == "forecast:" + work.name
+        assert summary["verdict"]["conclusion"] == telemetry["conclusion"]
+        run = summary["runs"][0]
+        assert run["status"] == "stuck" and run["stuck"]["activeHeroTypeId"] == 101
+        assert [item["activeHeroTypeId"] for item in summary["aggregate"]["stuckRuns"]] == [101]
+        detail = service.load_run(telemetry["recordId"], 1)
+        assert detail["stuck"]["reason"] == "no_matching_rule"
+        assert [row["skillTypeId"] for row in detail["timeline"]] == [1001] and detail["timeline"][0]["state"]
+        for bad in ("battle-", "battle-../capture", "battle-missing"):
+            try:
+                service.load(bad)
+            except FileNotFoundError:
+                continue
+            raise AssertionError(bad)
+        # The history lists it with the report; forecast.json leaves the snapshots to the report.
+        history = recent_forecasts(root=work.parent)
+        assert history[0]["recordId"] == telemetry["recordId"] and history[0]["stuck"]["activeHeroTypeId"] == 101
+        saved = json.loads((work / "forecast.json").read_text(encoding="utf-8"))
+        assert all("snapshot" not in decision for decision in saved["decisions"])
 
 
 def test_monitor_is_inert_when_disabled_or_attached_mid_battle():
@@ -252,7 +313,7 @@ def test_strategy_validation_accepts_only_boolean_forecast_flag():
     try:
         controller.validate_strategy_config(strategy, boss_mode="hydra")
     except ValueError as error:
-        assert "devourOrderForecast" in str(error)
+        assert "devourOrderForecast" in render(str(error), "zh-CN")
     else:
         raise AssertionError("non-boolean forecast flag must be rejected")
 
@@ -305,8 +366,8 @@ def test_never_devoured_condition_triggers_live_only_on_an_actual_swallow():
     assert trigger is not None and trigger.relation == "neverMarked" and trigger.swallowed
     assert trigger.mark_index == 3 and trigger.mark_limit == 3 and trigger.actual_hero_type_id == 102
     text = controller.hydra_devour_requirement_text(trigger.relation, "英雄2", trigger.mark_limit)
-    assert "前 3 个标记内不能被吞下" in text
-    assert "整场战斗中不能被吞下" in controller.hydra_devour_requirement_text("neverMarked", "英雄2")
+    assert "前 3 个标记内不能被吞噬" in render(text, "zh-CN")
+    assert "整场战斗中不能被吞噬" in render(controller.hydra_devour_requirement_text("neverMarked", "英雄2"), "zh-CN")
     # Marked, then dead before the swallow: that is a death, not a devour.
     runtime = {}
     for marked, turn, swallowed, dead in ((0, 1, (), ()), (1, 20, (0,), ()), (2, 40, (1,), ()), (None, 60, (), (2,))):
@@ -381,7 +442,7 @@ def test_never_marked_condition_validation_and_web_normalization():
     try:
         controller.validate_strategy_config(invalid, boss_mode="hydra")
     except ValueError as error:
-        assert "markLimit" in str(error)
+        assert "markLimit" in render(str(error), "zh-CN")
     else:
         raise AssertionError("markLimit outside 1..100 must be rejected")
 
@@ -413,7 +474,7 @@ def test_monitor_regroups_on_damage_without_devour_conditions():
         trigger = drive(monitor, cfg, [live_state(0), live_state(1)])
         assert trigger is not None and trigger.cause == "damage"
         assert trigger.predicted_damage == 5_000_000_000
-        assert any("预计整场伤害 5.00B" in text and "未达到" in text for text in messages)
+        assert any("预计整场伤害 5.00B" in text and "未达到" in text for text in (render(item, "zh-CN") for item in messages))
         telemetry = monitor.telemetry()
         assert telemetry["predictedDamage"] == 5_000_000_000
         assert telemetry["minimumDamage"] == 10_000_000_000
@@ -422,7 +483,7 @@ def test_monitor_regroups_on_damage_without_devour_conditions():
         result["hydraDamage"] = 12_000_000_000
         monitor = monitor_with(result, messages, Path(folder))
         assert drive(monitor, cfg, [live_state(0), live_state(1)]) is None
-        assert any("已达到" in text and "继续战斗" in text for text in messages)
+        assert any("已达到" in text and "继续战斗" in text for text in (render(item, "zh-CN") for item in messages))
 
 
 def test_monitor_regroups_only_on_violations_before_a_damage_threshold_is_close():
@@ -438,7 +499,7 @@ def test_monitor_regroups_only_on_violations_before_a_damage_threshold_is_close(
             if not regroups:
                 assert monitor.telemetry()["reason"] == "damage_threshold_too_close"
                 assert monitor.telemetry()["advice"]["code"] == "damage_threshold_too_close"
-                assert any("伤害阈值" in text for text in messages)
+                assert any("伤害阈值" in text for text in (render(item, "zh-CN") for item in messages))
             else:
                 assert "advice" not in monitor.telemetry()
     # A damage verdict is decided at the end of the battle: any close threshold defers to the live battle.

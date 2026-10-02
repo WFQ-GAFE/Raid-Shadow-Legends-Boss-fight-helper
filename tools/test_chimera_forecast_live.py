@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 
 from chimera_forecast_live import ChimeraForecastMonitor, evaluate_forecast, forecast_enabled
+from ui_text import render
 
 
 ONE = 1 << 32
@@ -96,17 +97,17 @@ def test_predicted_failure_asks_for_a_regroup_and_saves_a_report() -> None:
     assert watcher.telemetry()["verdict"] == "retry"
     assert summary["kind"] == "battle" and summary["verdict"]["reason"] == "retry"
     assert summary["runs"][0]["mandatory"][0]["completed"] is False
-    assert "执行免费重整" in messages[-1]
+    assert "执行免费重整" in render(messages[-1], "zh-CN")
 
 
 def test_goals_met_continue() -> None:
     retry, watcher, messages, _ = run(result())
-    assert retry is None and watcher.battle.reason == "continue" and "继续战斗" in messages[-1]
+    assert retry is None and watcher.battle.reason == "continue" and "继续战斗" in render(messages[-1], "zh-CN")
 
 
 def test_a_live_difference_disables_the_prediction() -> None:
     retry, watcher, messages, _ = run(result(completed=False), live_words=(9, 9, 9, 9))
-    assert retry is None and watcher.battle.reason == "live_turn_differs" and "随机状态不同" in messages[-1]
+    assert retry is None and watcher.battle.reason == "live_turn_differs" and "随机状态不同" in render(messages[-1], "zh-CN")
     retry, watcher, _, _ = run(result(completed=False), command_skill=999)
     assert retry is None and watcher.battle.reason == "live_turn_differs"
 
@@ -120,4 +121,4 @@ def test_mid_battle_takeover_and_missing_capture_are_skipped() -> None:
         assert watcher.battle.status == "not_opening"
         watcher.observe(CONFIG, state(1, generation=6), capture=Capture(root, generation=6, status="unavailable"),
                         capability_memory=None)
-        assert watcher.battle.status == "unavailable" and "无法进行" in messages[-1]
+        assert watcher.battle.status == "unavailable" and "无法进行" in render(messages[-1], "zh-CN")

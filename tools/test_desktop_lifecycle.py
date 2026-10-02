@@ -12,6 +12,7 @@ import controller_manager as managers
 import chimera_web as web
 import chimera_icons as icons
 import strategy_storage as storage
+from ui_text import render
 
 
 def test_agent_survives_extraction_cleanup_and_is_never_replaced():
@@ -107,7 +108,7 @@ def test_cleanup_failure_does_not_break_manager_reset():
         with patch.object(managers, 'remove_session_file', return_value=False):
             manager._prepare_and_run(1, 'offline', 1, 'chimera')
         assert not manager.preparing and manager.process is None and manager.config_path is None
-        assert manager.error is None and manager.status == '已关闭'
+        assert manager.error is None and render(manager.status, "zh-CN") == '已关闭'
         assert 'temporary_config_cleanup_deferred' in manager.critical_journal.path.read_text(encoding='utf-8')
 
 
@@ -119,8 +120,8 @@ def test_cancelled_initialization_error_does_not_report_failure():
             raise OSError('offline initialization interrupted')
         with patch.object(managers, 'require_expected_account', side_effect=fail):
             manager._prepare_and_run(1, 'offline', 1, 'chimera')
-        assert manager.error is None and manager.status == '已关闭'
-        assert not any('启动失败' in line for line in manager.snapshot()['logs'])
+        assert manager.error is None and render(manager.status, "zh-CN") == '已关闭'
+        assert not any('启动失败' in render(line, "zh-CN") for line in manager.snapshot()['logs'])
 
 
 def test_cancelled_helpers_are_reaped_without_killing_dispatched_load():

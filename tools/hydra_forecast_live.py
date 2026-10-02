@@ -29,8 +29,11 @@ from damage_units import damage_text
 from forecast_advice import advice as failure_note
 from hydra_forecast import evaluate_conditions, run_forecast
 from hydra_replay_source import ReplaySourceError, validate_replay_source
+from hydra_simulation import HydraSimulationSession, battle_report, forecast_run
 from raid_processes import is_supported_raid_executable, process_path
+from simulation_common import battle_snapshot, write_run
 from strategy_storage import atomic_write_bytes, atomic_write_json
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
@@ -49,6 +52,10 @@ WORK_ROOT = PROJECT_ROOT / "cache" / "hydra-forecast"
 RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "hydra-forecast"
 KEEP_WORK_DIRECTORIES = 12
 INPUT_WAIT_SECONDS = 20.0
+# A forecast's report is opened as a Hydra simulation report with this prefix
+# before its folder name (hydra_simulation_service; the Chimera battle reports use it too).
+REPORT_PREFIX = "battle-"
+STUCK_REASONS = {"no_matching_rule", "rule_command_not_legal", "no_progress", "engine_rejected_command"}
 
 
 class ForecastSetupError(RuntimeError):
@@ -72,20 +79,20 @@ def probe_source() -> Path:
     for candidate in PROBE_CANDIDATES:
         if candidate.is_file():
             return candidate
-    raise ForecastSetupError("未找到离线战斗引擎（raid_offline_probe.exe）")
+    raise ForecastSetupError(ui_text("hydraForecast.probeMissing"))
 
 
 def game_build_directory(pid: int) -> Path:
     path = process_path(pid)
     if not path or not is_supported_raid_executable(path):
-        raise ForecastSetupError("无法确认游戏安装目录")
+        raise ForecastSetupError(ui_text("hydraForecast.gameFolderUnknown"))
     return Path(path).resolve().parent
 
 
 def newest_static_data() -> Path:
     candidates = [item for item in STATIC_DATA_ROOT.glob("*/*") if item.is_file()]
     if not candidates:
-        raise ForecastSetupError("未找到游戏本地静态数据缓存")
+        raise ForecastSetupError(ui_text("hydraForecast.staticDataMissing"))
     return max(candidates, key=lambda item: item.stat().st_mtime_ns)
 
 
@@ -121,7 +128,7 @@ def ensure_runtime_bundle(probe: Path, build: Path, static_data: Path,
     }
     for source in files.values():
         if not source.is_file():
-            raise ForecastSetupError(f"缺少离线引擎文件：{source.name}")
+            raise ForecastSetupError(ui_text("hydraForecast.engineFileMissing", sourceName=source.name))
     hashes = {name: _file_sha256(source) for name, source in files.items()}
     key = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode("ascii")).hexdigest()[:24]
     target = root / key
@@ -143,7 +150,7 @@ def ensure_runtime_bundle(probe: Path, build: Path, static_data: Path,
         for name, source in files.items():
             shutil.copyfile(source, staging / name)
             if _file_sha256(staging / name) != hashes[name]:
-                raise ForecastSetupError(f"离线引擎文件复制校验失败：{name}")
+                raise ForecastSetupError(ui_text("hydraForecast.engineFileCopyInvalid", name=name))
         atomic_write_json(staging / "bundle.json", {
             "schema": 1, "files": hashes,
             "sources": {name: str(source) for name, source in files.items()},
@@ -203,7 +210,8 @@ def recent_forecasts(limit: int = 5, root: Path | None = None) -> list[dict[str,
             verdict = None
         if isinstance(verdict, dict):
             for key in ("status", "verdict", "reason", "conclusion", "finishedAt", "checkedWindows",
-                        "marks", "horizon", "turn", "elapsedSeconds", "predictedDamage", "minimumDamage", "advice"):
+                        "marks", "horizon", "turn", "elapsedSeconds", "predictedDamage", "minimumDamage", "advice",
+                        "stuck"):
                 if key in verdict:
                     summary[key] = verdict[key]
             # Records from before 1.1.1 get their explanation on reading.
@@ -213,8 +221,39 @@ def recent_forecasts(limit: int = 5, root: Path | None = None) -> list[dict[str,
             # Finished without a recorded conclusion (older build or the
             # controller stopped first); never show it as still running.
             summary["status"] = "unrecorded"
+        if (folder / "summary.json").is_file():
+            summary["recordId"] = REPORT_PREFIX + folder.name
         summaries.append(summary)
     return summaries
+
+
+def save_report(folder: Path, strategy: dict[str, Any], provenance: dict[str, Any],
+                forecast: dict[str, Any]) -> str | None:
+    """The forecast as a one-run simulation report in its own folder; its id, or None."""
+    record_id = REPORT_PREFIX + folder.name
+    try:
+        report = battle_report(record_id, strategy, provenance, f"forecast:{folder.name}", forecast)
+        if report is None:
+            return None
+        summary, run = report
+        write_run(folder, 1, run)
+        atomic_write_json(folder / "summary.json", summary)
+    except Exception:  # The forecast itself stands without its report.
+        return None
+    return record_id
+
+
+def stuck_detail(forecast: dict[str, Any]) -> dict[str, Any] | None:
+    """Where the rules left a hero without an action, when that ended the forecast."""
+    run = forecast_run(forecast) if forecast.get("status") != "complete" else None
+    stuck = run.get("stuck") if run else None
+    return {key: stuck.get(key) for key in ("reason", "turn", "hydraTurns", "activeHeroTypeId")} \
+        if isinstance(stuck, dict) else None
+
+
+def _keep_snapshot(state: dict[str, Any], record: dict[str, Any]) -> None:
+    # Health, effects and cooldowns before each action, for the report's log.
+    record["snapshot"] = battle_snapshot(state)
 
 
 def live_window(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -235,13 +274,13 @@ def window_difference(forecast: dict[str, Any], window: dict[str, Any]) -> str |
     entry = next((item for item in forecast.get("decisions", [])
                   if item.get("turn") == window["turn"]), None)
     if entry is None:
-        return f"第 {window['turn']} 回合不在推演的玩家回合中"
-    for key, label in (("playerTurnCount", "玩家行动次数"), ("activeHeroId", "行动英雄"),
-                       ("activeHeroTypeId", "行动英雄类型")):
+        return ui_text("hydraForecast.turnNotForecast", turn=window["turn"])
+    for key, message in (("playerTurnCount", "hydraForecast.turnActionCountDiffers"), ("activeHeroId", "hydraForecast.turnHeroDiffers"),
+                         ("activeHeroTypeId", "hydraForecast.turnHeroTypeDiffers")):
         if entry.get(key) != window[key]:
-            return f"第 {window['turn']} 回合{label}不同"
+            return ui_text(message, turn=window["turn"])
     if entry.get("rngBefore") != window["words"]:
-        return f"第 {window['turn']} 回合随机状态不同"
+        return ui_text("hydraForecast.turnRandomDiffers", turn=window["turn"])
     return None
 
 
@@ -252,6 +291,7 @@ class ForecastJob:
     result: dict[str, Any] | None = None
     error: str | None = None
     work: Path | None = None
+    record: str | None = None  # the report's id (save_report)
 
 
 @dataclass
@@ -269,6 +309,7 @@ class BattleForecast:
     conclusion: str | None = None
     finished_at: str | None = None
     advice: dict[str, str] | None = None
+    stuck: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -287,23 +328,18 @@ class ForecastRetry:
     swallowed: bool = False  # the violation is an actual swallow (1.1.1 "never devoured")
 
 
-REASON_LABELS = {
-    "isolated_engine_failed": "离线引擎异常退出",
-    "forecast_timeout": "推演超时",
-    "isolated_engine_not_policy_driven": "离线引擎版本不匹配",
-    "mark_event_streams_disagree": "标记事件记录不一致",
-    "policy_stopped": "策略在某个离线回合没有给出可执行动作",
-    "policy_command_rejected": "策略动作被原版引擎拒绝",
-    "decision_state_unavailable": "离线回合状态读取失败",
-    "enemy_ai_command_unavailable": "蛇头行动生成失败",
-    "probe_report_missing": "离线引擎没有返回结果",
-}
+# Reason codes with a readable name (hydraForecast.reason.<code>).
+REASON_LABELS = {"isolated_engine_failed", "forecast_timeout", "isolated_engine_not_policy_driven", "mark_event_streams_disagree",
+                 "policy_stopped", "policy_command_rejected", "decision_state_unavailable", "enemy_ai_command_unavailable",
+                 "probe_report_missing"}
 
 
 def reason_label(reason: str | None) -> str:
-    text = str(reason or "未知原因")
-    label = REASON_LABELS.get(text.split(":", 1)[0])
-    return f"{label}（{text}）" if label else text
+    if not reason:
+        return ui_text("hydraForecast.unknownReason")
+    text = str(reason)
+    head = text.split(":", 1)[0]
+    return ui_text("hydraForecast.reasonLabel", label=ui_text(f"hydraForecast.reason.{head}"), code=text) if head in REASON_LABELS else text
 
 
 def _names_by_type(state: dict[str, Any]) -> dict[int, str]:
@@ -349,8 +385,7 @@ class HydraForecastMonitor:
             self.battle = BattleForecast(key=key)
             opening = battle.get("playerTurnCount") in (0, 1) and tracker_armed
             if not opening:
-                self._conclude("not_opening", "六头蛇开局推演：本场不是从开局接管，跳过离线推演；"
-                               "仍按实际吞噬标记判定。", "not_opening")
+                self._conclude("not_opening", ui_text("hydraForecast.notOpening"), "not_opening")
                 return None
             marked = marked_target(state)
             self.battle.opening_marked_actor = marked.get("id") if isinstance(marked, dict) else None
@@ -371,8 +406,7 @@ class HydraForecastMonitor:
             difference = window_difference(current.result, window)
             if difference:
                 current.divergence_reported = True
-                self.emit(f"六头蛇开局推演：实战已偏离推演（{difference}）；"
-                          "此后仅按实际吞噬标记判定。")
+                self.emit(ui_text("hydraForecast.deviated", difference=difference))
         return None
 
     def _conclude(self, status: str, conclusion: str, reason: str | None = None,
@@ -383,8 +417,10 @@ class HydraForecastMonitor:
         current.status = status
         current.reason = reason
         current.conclusion = conclusion
+        record = current.job.record if current.job else None
         # Why it could not conclude and what to do (shown next to the conclusion).
-        current.advice = failure_note("hydra", reason, detail) if status in ("unavailable", "not_opening") else None
+        current.advice = (failure_note("hydra", reason, detail, report=record is not None)
+                          if status in ("unavailable", "not_opening") else None)
         current.finished_at = time.strftime("%H:%M:%S")
         self.emit(conclusion)
         work = current.job.work if current.job else None
@@ -397,11 +433,18 @@ class HydraForecastMonitor:
                     "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                     **(self.telemetry() or {}),
                 })
-            except OSError:
+                if record is not None:
+                    # The report shows the live conclusion above its findings.
+                    summary = json.loads((work / "summary.json").read_text(encoding="utf-8"))
+                    summary["verdict"] = {"status": status, "reason": reason, "conclusion": conclusion,
+                                          "verdict": (current.evaluation or {}).get("verdict"),
+                                          "finishedAt": current.finished_at}
+                    atomic_write_json(work / "summary.json", summary)
+            except (OSError, json.JSONDecodeError):
                 pass
 
     def _give_up(self, reason: str, code: str, detail: str | None = None) -> None:
-        self._conclude("unavailable", f"六头蛇开局推演无法进行：{reason}；本场仍按实际吞噬标记判定。", code, detail)
+        self._conclude("unavailable", ui_text("hydraForecast.cannotRun", reason=reason), code, detail)
 
     def _start(self, config: dict[str, Any], state: dict[str, Any], ipc: Any,
                capability_memory: Any) -> None:
@@ -410,15 +453,15 @@ class HydraForecastMonitor:
         source = ipc.replay_input()
         if not isinstance(source, dict) or source.get("battleGeneration") != state.get("battleGeneration"):
             if time.monotonic() - current.started_at > INPUT_WAIT_SECONDS:
-                self._give_up("代理未发布本局开局数据", "capture_timeout")
+                self._give_up(ui_text("hydraForecast.agentNoOpening"), "capture_timeout")
             return
         if source.get("status") != "captured":
             missing = str(source.get("reason") or source.get("status"))
-            self._give_up(f"代理未取得本局开局数据（{missing}）", "capture_unavailable", missing)
+            self._give_up(ui_text("hydraForecast.agentOpeningFailed", missing=missing), "capture_unavailable", missing)
             return
         battle = state.get("battle", {})
         if battle.get("playerTurnCount") not in (0, 1):
-            self._give_up("开局窗口已过", "opening_window_passed")
+            self._give_up(ui_text("hydraForecast.openingWindowPassed"), "opening_window_passed")
             return
         account = ipc.account()
         account_name = account.get("accountName") if isinstance(account, dict) else None
@@ -428,7 +471,7 @@ class HydraForecastMonitor:
         except ReplaySourceError as error:
             if str(error).startswith("opening_") and time.monotonic() - current.started_at <= INPUT_WAIT_SECONDS:
                 return  # The opening snapshot may still lack hero models.
-            self._give_up(f"开局数据校验失败（{error}）", "opening_validation_failed", str(error))
+            self._give_up(ui_text("hydraForecast.openingInvalid", error=error), "opening_validation_failed", str(error))
             return
         lifecycle = ipc.lifecycle() or {}
         section = lifecycle.get("battle") if isinstance(lifecycle, dict) else None
@@ -456,10 +499,16 @@ class HydraForecastMonitor:
                 self.converter(folder, bundle / "raid_offline_probe.exe")
                 result = self.runner(bundle / "raid_offline_probe.exe", folder / "packed", strategy,
                                      team_selection=team, capability_memory=memory,
-                                     cancel=job.cancel)
+                                     cancel=job.cancel, session_factory=HydraSimulationSession,
+                                     on_decision=_keep_snapshot)
                 result["bundle"] = bundle.name
+                # The snapshots and engine rows are in the report's run file.
                 compact = {key: value for key, value in result.items() if key != "engineTurns"}
+                compact["decisions"] = [{key: value for key, value in decision.items() if key != "snapshot"}
+                                        for decision in result.get("decisions") or [] if isinstance(decision, dict)]
                 atomic_write_json(folder / "forecast.json", compact)
+                job.record = save_report(folder, strategy, {**provenance, "teamHeroTypeIds": team["heroTypeIds"]},
+                                         result)
                 job.result = result
             except (ForecastSetupError, ConversionError) as error:
                 job.error = str(error)
@@ -471,8 +520,7 @@ class HydraForecastMonitor:
         job.thread = threading.Thread(target=work, daemon=True, name="hydra-forecast")
         current.job = job
         current.status = "running"
-        self.emit("六头蛇开局推演：已取得本局开局数据，正在后台离线模拟（最多 1000 回合）；"
-                  "战斗照常进行。")
+        self.emit(ui_text("hydraForecast.started"))
         job.thread.start()
 
     def _apply(self, config: dict[str, Any], state: dict[str, Any]) -> ForecastRetry | None:
@@ -480,30 +528,36 @@ class HydraForecastMonitor:
         current = self.battle
         job = current.job
         if job.error or not job.result:
-            reason = job.error or "没有结果"
-            self._conclude("unavailable", f"六头蛇开局推演无法判断：{reason}；本场不据此重整，"
-                           "仍按实际吞噬标记判定。", "setup_failed" if job.error else "no_result", job.error)
+            reason = job.error or ui_text("forecast.noResult")
+            self._conclude("unavailable", ui_text("hydraForecast.cannotJudge", reason=reason),
+                           "setup_failed" if job.error else "no_result", job.error)
             return None
         result = job.result
         if result.get("status") != "complete":
             reason = str(result.get("reason"))
-            self._conclude("unavailable", f"六头蛇开局推演无法判断：{reason_label(reason)}；"
-                           "本场不据此重整，仍按实际吞噬标记判定。", reason)
+            stuck = stuck_detail(result)
+            current.stuck = stuck
+            label = reason_label(reason)
+            if stuck:
+                type_id = stuck.get("activeHeroTypeId")
+                code = stuck.get("reason")
+                label = ui_text("hydraForecast.stuck", turn=stuck.get("turn"),
+                                hero=_names_by_type(state).get(type_id, f"英雄 {type_id}"),
+                                reason=ui_text(f"stuck.{code}") if code in STUCK_REASONS else str(code))
+            self._conclude("unavailable", ui_text("hydraForecast.cannotJudge", reason=label), reason)
             return None
         marks = result.get("marks", [])
         if (marks and marks[0].get("applyTurn") == 0
                 and current.opening_marked_actor != marks[0].get("actorId")):
-            self._conclude("unavailable", "六头蛇开局推演与实战开局标记不一致；本场不据此重整。",
-                           "opening_mark_differs")
+            self._conclude("unavailable", ui_text("hydraForecast.openingMarkDiffers"), "opening_mark_differs")
             return None
         if not current.windows:
-            self._conclude("unavailable", "六头蛇开局推演：没有可核对的实战回合；本场不据此重整。",
-                           "no_live_windows")
+            self._conclude("unavailable", ui_text("hydraForecast.noLiveTurns"), "no_live_windows")
             return None
         for turn in sorted(current.windows):
             difference = window_difference(result, current.windows[turn])
             if difference:
-                self._conclude("unavailable", f"六头蛇开局推演与实战不一致（{difference}）；本场不据此重整。",
+                self._conclude("unavailable", ui_text("hydraForecast.differs", difference=difference),
                                "live_window_differs", difference)
                 return None
         current.result = result
@@ -513,14 +567,13 @@ class HydraForecastMonitor:
         current.evaluation = evaluation
         names = _names_by_type(state)
         sequence = tuple(names.get(mark["heroTypeId"], f"英雄 {mark['heroTypeId']}") for mark in marks)
-        horizon = ("战斗结束" if result.get("horizon") == "battle_finished"
-                   else f"第 {result.get('turn')} 回合上限")
+        horizon = (ui_text("hydraForecast.battleEnd") if result.get("horizon") == "battle_finished"
+                   else ui_text("hydraForecast.turnLimit", turn=result.get("turn")))
         checked = len(current.windows)
-        order = " → ".join(f"{index}.{name}" for index, name in enumerate(sequence, 1)) or "无"
-        self.emit(f"六头蛇开局推演完成（{result.get('elapsedSeconds')} 秒，推演至{horizon}，"
-                  f"已与 {checked} 个实战回合逐项核对一致）：预计吞噬标记顺序 {order}。")
+        order = " → ".join(f"{index}.{name}" for index, name in enumerate(sequence, 1)) or ui_text("hydraForecast.noMarks")
+        self.emit(ui_text("hydraForecast.done", seconds=result.get("elapsedSeconds"), horizon=horizon, checked=checked, order=order))
         damage = evaluation.get("damage")
-        damage_note = (f"预计整场伤害 {damage_text(damage['predicted'])}（最低要求 {damage_text(damage['minimum'])}）"
+        damage_note = (ui_text("hydraForecast.damage", predicted=damage_text(damage["predicted"]), minimum=damage_text(damage["minimum"]))
                        if damage else None)
         ambiguous_turn = result.get("damageAmbiguousTurn")
         if evaluation["verdict"] == "retry":
@@ -530,23 +583,19 @@ class HydraForecastMonitor:
             # from that turn on: only a violation decided before it justifies a regroup.
             decided_turn = mark_violations[0]["applyTurn"] if mark_violations else result.get("turn")
             if isinstance(ambiguous_turn, int) and (not isinstance(decided_turn, int) or ambiguous_turn <= decided_turn):
-                self._conclude("unavailable", f"六头蛇开局推演：约第 {ambiguous_turn} 回合伤害接近规则中的伤害阈值，"
-                               "实战判断可能与推演不同；本场不据此重整，仍按实际吞噬标记判定。",
+                self._conclude("unavailable", ui_text("hydraForecast.damageThreshold", turn=ambiguous_turn),
                                "damage_threshold_too_close")
                 return None
             reasons = []
             if mark_violations:
                 violation = mark_violations[0]
                 name = names.get(violation["actualHeroTypeId"], f"英雄 {violation['actualHeroTypeId']}")
-                if violation.get("swallowed"):
-                    reasons.append(f"预计第 {violation['markIndex']} 个标记的“{name}”约第 {violation['applyTurn']} 回合"
-                                   f"被吞下，违反条件 {violation['conditionIndex'] + 1}")
-                else:
-                    reasons.append(f"预计第 {violation['markIndex']} 个标记（约第 {violation['applyTurn']} 回合）"
-                                   f"为“{name}”，违反条件 {violation['conditionIndex'] + 1}")
+                reasons.append(ui_text("hydraForecast.swallowViolation" if violation.get("swallowed") else "hydraForecast.markViolation",
+                                       mark=violation["markIndex"], name=name, turn=violation["applyTurn"],
+                                       condition=violation["conditionIndex"] + 1))
             if damage_violation:
-                reasons.append(f"{damage_note}，未达到")
-            self._conclude("applied", f"六头蛇开局推演结论：{'；'.join(reasons)}，执行免费重整。", "retry")
+                reasons.append(ui_text("hydraForecast.damageMissed", damage=damage_note))
+            self._conclude("applied", ui_text("hydraForecast.retry", reasons=ui_text("forecast.separator").join(reasons)), "retry")
             if not mark_violations:
                 return ForecastRetry(
                     condition_index=-1, mark_index=0, relation="damage", expected_hero_type_ids=(),
@@ -569,14 +618,12 @@ class HydraForecastMonitor:
                 minimum_damage=damage["minimum"] if damage else None,
             )
         unresolved = evaluation.get("unresolved") or []
-        suffix = (f"；{len(unresolved)} 个条件的标记次序超出推演范围"
-                  if unresolved else "")
         parts = []
         if conditions:
-            parts.append(f"吞噬顺序条件在推演范围内均满足{suffix}")
+            parts.append(ui_text("hydraForecast.conditionsMet", unresolved=len(unresolved)))
         if damage_note:
-            parts.append(f"{damage_note}，已达到")
-        self._conclude("applied", f"六头蛇开局推演结论：{'；'.join(parts)}，继续战斗。", "continue")
+            parts.append(ui_text("hydraForecast.damageReached", damage=damage_note))
+        self._conclude("applied", ui_text("hydraForecast.continue", parts=ui_text("forecast.separator").join(parts)), "continue")
         return None
 
     def telemetry(self) -> dict[str, Any] | None:
@@ -589,6 +636,10 @@ class HydraForecastMonitor:
                                    "battleSetupId": current.key[1]}
         if current.advice:
             payload["advice"] = current.advice
+        if current.job and current.job.record:
+            payload["recordId"] = current.job.record
+        if current.stuck:
+            payload["stuck"] = current.stuck
         if current.result:
             payload["marks"] = [{"markIndex": mark["markIndex"], "heroTypeId": mark["heroTypeId"],
                                  "applyTurn": mark["applyTurn"]}

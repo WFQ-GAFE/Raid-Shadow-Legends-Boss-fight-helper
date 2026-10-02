@@ -37,6 +37,7 @@ from chimera_catalog_cache import (
 )
 from inject_probe import queue_command, queue_lifecycle_command, set_takeover
 from named_mutex import NamedMutex
+from ui_text import ui_text
 
 
 ACTIVE_BOSS_MODE = "chimera"
@@ -211,15 +212,15 @@ MAX_CONDITION_TREE_NODES = 64
 
 def validate_effect_condition(condition: Any, *, path: str) -> None:
     if not isinstance(condition, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     if condition.get("target") not in {
         "boss", "bossPriority", "bossAny", "bossAll", "ally"
     }:
-        raise ValueError(f"{path}.target 不受支持")
+        raise ValueError(ui_text("ctl.targetUnsupported", path=path))
     if condition.get("presence") not in {"has", "missing"}:
-        raise ValueError(f"{path}.presence 不受支持")
+        raise ValueError(ui_text("ctl.presenceUnsupported", path=path))
     if not isinstance(condition.get("effect"), dict) or not condition["effect"]:
-        raise ValueError(f"{path}.effect 必须指定具体效果")
+        raise ValueError(ui_text("ctl.effectRequired", path=path))
     if condition.get("target") == "ally":
         hero_type_id = condition.get("heroTypeId")
         if (
@@ -227,36 +228,36 @@ def validate_effect_condition(condition: Any, *, path: str) -> None:
             or isinstance(hero_type_id, bool)
             or hero_type_id <= 0
         ):
-            raise ValueError(f"{path}.heroTypeId 必须是正整数")
+            raise ValueError(ui_text("ctl.heroTypeIdInvalid", path=path))
 
 
 def validate_effect_count_condition(condition: Any, *, path: str) -> None:
     if not isinstance(condition, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     if condition.get("target") not in {"boss", "bossPriority", "bossAny", "bossAll", "ally"}:
-        raise ValueError(f"{path}.target 不受支持")
+        raise ValueError(ui_text("ctl.targetUnsupported", path=path))
     if condition.get("polarity") not in {"all", "buff", "debuff"}:
-        raise ValueError(f"{path}.polarity 必须是 all、buff 或 debuff")
+        raise ValueError(ui_text("ctl.polarityInvalid", path=path))
     lower, upper = condition.get("countAtLeast"), condition.get("countAtMost")
     if lower is None and upper is None:
-        raise ValueError(f"{path} 至少填写一个效果数量范围")
+        raise ValueError(ui_text("ctl.countBoundRequired", path=path))
     for key in ("countAtLeast", "countAtMost"):
         if key in condition and (not isinstance(condition[key], int) or isinstance(condition[key], bool) or condition[key] < 0):
-            raise ValueError(f"{path} 效果数量必须是非负整数")
+            raise ValueError(ui_text("ctl.countNotNegative", path=path))
     if lower is not None and upper is not None and lower > upper:
-        raise ValueError(f"{path} 最少数量不能大于最多数量")
+        raise ValueError(ui_text("ctl.countRange", path=path))
     if condition.get("target") == "ally":
         hero_id = condition.get("heroTypeId")
         if not isinstance(hero_id, int) or isinstance(hero_id, bool) or hero_id <= 0:
-            raise ValueError(f"{path}.heroTypeId 必须是正整数")
+            raise ValueError(ui_text("ctl.heroTypeIdInvalid", path=path))
         position = condition.get("teamPosition")
         if position is not None and (not isinstance(position, int) or isinstance(position, bool) or not 1 <= position <= 6):
-            raise ValueError(f"{path}.teamPosition 必须是 1–6 的整数")
+            raise ValueError(ui_text("ctl.teamPositionInvalid", path=path))
 
 
 def validate_skill_cooldown_condition(condition: Any, *, path: str) -> None:
     if not isinstance(condition, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     for key in ("heroTypeId", "skillTypeId"):
         value = condition.get(key)
         if (
@@ -264,41 +265,41 @@ def validate_skill_cooldown_condition(condition: Any, *, path: str) -> None:
             or isinstance(value, bool)
             or value <= 0
         ):
-            raise ValueError(f"{path}.{key} 必须是正整数")
+            raise ValueError(ui_text("ctl.keyPositive", path=path, key=key))
     lower = condition.get("turnsAtLeast")
     upper = condition.get("turnsAtMost")
     if lower is None and upper is None:
-        raise ValueError(f"{path} 至少需要一个冷却回合范围")
+        raise ValueError(ui_text("ctl.cooldownBoundRequired", path=path))
     for key, value in (("turnsAtLeast", lower), ("turnsAtMost", upper)):
         if value is not None and (
             not isinstance(value, int)
             or isinstance(value, bool)
             or value < 0
         ):
-            raise ValueError(f"{path}.{key} 必须是非负整数")
+            raise ValueError(ui_text("ctl.keyNotNegative", path=path, key=key))
     if isinstance(lower, int) and isinstance(upper, int) and lower > upper:
-        raise ValueError(f"{path} 的最小冷却不能大于最大冷却")
+        raise ValueError(ui_text("ctl.cooldownRange", path=path))
 
 
 def validate_hero_state_condition(condition: Any, *, path: str) -> None:
     if not isinstance(condition, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     hero_type_id = condition.get("heroTypeId")
     if (
         not isinstance(hero_type_id, int)
         or isinstance(hero_type_id, bool)
         or hero_type_id <= 0
     ):
-        raise ValueError(f"{path}.heroTypeId 必须是正整数")
+        raise ValueError(ui_text("ctl.heroTypeIdInvalid", path=path))
     team_position = condition.get("teamPosition")
     if team_position is not None and (
         not isinstance(team_position, int)
         or isinstance(team_position, bool)
         or not 1 <= team_position <= 6
     ):
-        raise ValueError(f"{path}.teamPosition 必须是 1–6 的整数")
+        raise ValueError(ui_text("ctl.teamPositionInvalid", path=path))
     if condition.get("state") not in {"alive", "dead"}:
-        raise ValueError(f"{path}.state 只允许 alive 或 dead")
+        raise ValueError(ui_text("ctl.stateInvalid", path=path))
 
 
 def validate_condition_tree(
@@ -314,22 +315,22 @@ def validate_condition_tree(
     counter[0] += 1
     if counter[0] > MAX_CONDITION_TREE_NODES:
         raise ValueError(
-            f"{path} 最多包含 {MAX_CONDITION_TREE_NODES} 个条件或逻辑组"
+            ui_text("ctl.treeTooLarge", path=path, MAXCONDITIONTREENODES=MAX_CONDITION_TREE_NODES)
         )
     if depth > MAX_CONDITION_TREE_DEPTH:
-        raise ValueError(f"{path} 的嵌套层级过深")
+        raise ValueError(ui_text("ctl.treeTooDeep", path=path))
     if not isinstance(node, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     node_type = node.get("type")
     negate = node.get("negate")
     if negate is not None and not isinstance(negate, bool):
-        raise ValueError(f"{path}.negate 必须是布尔值")
+        raise ValueError(ui_text("ctl.negateInvalid", path=path))
     if node_type == "group":
         if node.get("operator") not in {"all", "any"}:
-            raise ValueError(f"{path}.operator 只允许 all 或 any")
+            raise ValueError(ui_text("ctl.operatorInvalid", path=path))
         children = node.get("children")
         if not isinstance(children, list) or not children:
-            raise ValueError(f"{path}.children 必须是非空数组")
+            raise ValueError(ui_text("ctl.childrenEmpty", path=path))
         for index, child in enumerate(children):
             validate_condition_tree(
                 child,
@@ -350,7 +351,7 @@ def validate_condition_tree(
     if node_type == "heroState":
         validate_hero_state_condition(node, path=path)
         return
-    raise ValueError(f"{path}.type 不受支持")
+    raise ValueError(ui_text("ctl.typeUnsupported", path=path))
 
 
 def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
@@ -360,13 +361,13 @@ def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
     ):
         mode = when.get(mode_key)
         if mode is not None and mode not in {"all", "any"}:
-            raise ValueError(f"{path}.{mode_key} 只允许 all 或 any")
+            raise ValueError(ui_text("ctl.modeKeyInvalid", path=path, modeKey=mode_key))
         if mode is not None and conditions_key not in when:
-            raise ValueError(f"{path}.{mode_key} 缺少对应的 {conditions_key}")
+            raise ValueError(ui_text("ctl.modeWithoutConditions", path=path, modeKey=mode_key, conditionsKey=conditions_key))
     effect_conditions = when.get("effectConditions")
     if effect_conditions is not None:
         if not isinstance(effect_conditions, list) or not effect_conditions:
-            raise ValueError(f"{path}.effectConditions 必须是非空数组")
+            raise ValueError(ui_text("ctl.effectConditionsEmpty", path=path))
         for index, condition in enumerate(effect_conditions):
             validate_effect_condition(
                 condition, path=f"{path}.effectConditions[{index}]"
@@ -374,7 +375,7 @@ def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
     cooldown_conditions = when.get("skillCooldownConditions")
     if cooldown_conditions is not None:
         if not isinstance(cooldown_conditions, list) or not cooldown_conditions:
-            raise ValueError(f"{path}.skillCooldownConditions 必须是非空数组")
+            raise ValueError(ui_text("ctl.cooldownConditionsEmpty", path=path))
         for index, condition in enumerate(cooldown_conditions):
             validate_skill_cooldown_condition(
                 condition, path=f"{path}.skillCooldownConditions[{index}]"
@@ -386,15 +387,15 @@ def validate_condition_values(when: dict[str, Any], *, path: str) -> None:
 
 def validate_default_skill_policy(policy: Any, *, path: str) -> None:
     if not isinstance(policy, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     priority_skills = policy.get("prioritySkills")
     if not isinstance(priority_skills, list):
-        raise ValueError(f"{path}.prioritySkills 必须是数组")
+        raise ValueError(ui_text("ctl.prioritySkillsNotArray", path=path))
     seen_skill_ids: set[int] = set()
     for index, entry in enumerate(priority_skills):
         entry_path = f"{path}.prioritySkills[{index}]"
         if not isinstance(entry, dict):
-            raise ValueError(f"{entry_path} 必须是对象")
+            raise ValueError(ui_text("ctl.entryNotObject", entryPath=entry_path))
         skill_type_id = entry.get("skillTypeId")
         if (
             not isinstance(skill_type_id, int)
@@ -402,44 +403,44 @@ def validate_default_skill_policy(policy: Any, *, path: str) -> None:
             or skill_type_id <= 0
             or skill_type_id in seen_skill_ids
         ):
-            raise ValueError(f"{entry_path}.skillTypeId 必须是互不重复的正整数")
+            raise ValueError(ui_text("ctl.entrySkillTypeId", entryPath=entry_path))
         seen_skill_ids.add(skill_type_id)
         if entry.get("skillSlot") is not None and (
             not isinstance(entry["skillSlot"], int)
             or isinstance(entry["skillSlot"], bool)
             or entry["skillSlot"] <= 0
         ):
-            raise ValueError(f"{entry_path}.skillSlot 必须是正整数")
+            raise ValueError(ui_text("ctl.entrySkillSlot", entryPath=entry_path))
         if entry.get("isTransform") is not None and not isinstance(
             entry["isTransform"], bool
         ):
-            raise ValueError(f"{entry_path}.isTransform 必须是布尔值")
+            raise ValueError(ui_text("ctl.entryIsTransform", entryPath=entry_path))
         if entry.get("formIndex") not in {None, 0, 1}:
-            raise ValueError(f"{entry_path}.formIndex 只允许 0 或 1")
+            raise ValueError(ui_text("ctl.entryFormIndex", entryPath=entry_path))
     first_turn_skill = policy.get("firstTurnSkill")
     if first_turn_skill is not None:
         first_turn_path = f"{path}.firstTurnSkill"
         if not isinstance(first_turn_skill, dict):
-            raise ValueError(f"{first_turn_path} 必须是对象")
+            raise ValueError(ui_text("ctl.firstTurnNotObject", firstTurnPath=first_turn_path))
         skill_type_id = first_turn_skill.get("skillTypeId")
         if (
             not isinstance(skill_type_id, int)
             or isinstance(skill_type_id, bool)
             or skill_type_id <= 0
         ):
-            raise ValueError(f"{first_turn_path}.skillTypeId 必须是正整数")
+            raise ValueError(ui_text("ctl.firstTurnSkillTypeId", firstTurnPath=first_turn_path))
         if first_turn_skill.get("skillSlot") is not None and (
             not isinstance(first_turn_skill["skillSlot"], int)
             or isinstance(first_turn_skill["skillSlot"], bool)
             or first_turn_skill["skillSlot"] <= 0
         ):
-            raise ValueError(f"{first_turn_path}.skillSlot 必须是正整数")
+            raise ValueError(ui_text("ctl.firstTurnSkillSlot", firstTurnPath=first_turn_path))
         if first_turn_skill.get("isTransform") is not None and not isinstance(
             first_turn_skill["isTransform"], bool
         ):
-            raise ValueError(f"{first_turn_path}.isTransform 必须是布尔值")
+            raise ValueError(ui_text("ctl.firstTurnIsTransform", firstTurnPath=first_turn_path))
         if first_turn_skill.get("formIndex") not in {None, 0, 1}:
-            raise ValueError(f"{first_turn_path}.formIndex 只允许 0 或 1")
+            raise ValueError(ui_text("ctl.firstTurnFormIndex", firstTurnPath=first_turn_path))
     blocked = policy.get("blockedSkillTypeIds", [])
     if (
         not isinstance(blocked, list)
@@ -452,18 +453,18 @@ def validate_default_skill_policy(policy: Any, *, path: str) -> None:
         or len(blocked) != len(set(blocked))
     ):
         raise ValueError(
-            f"{path}.blockedSkillTypeIds 必须是互不重复的正整数数组"
+            ui_text("ctl.blockedSkillsInvalid", path=path)
         )
 
 
 def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
     if not isinstance(node, dict):
-        raise ValueError(f"{path} 必须是对象")
+        raise ValueError(ui_text("ctl.pathNotObject", path=path))
     node_type = node.get("type", "rule")
     if node_type in {"priority", "selector"}:
         children = node.get("children")
         if not isinstance(children, list):
-            raise ValueError(f"{path}.children 必须是数组")
+            raise ValueError(ui_text("ctl.childrenNotArray", path=path))
         for index, child in enumerate(children):
             validate_strategy_node(child, path=f"{path}.children[{index}]")
         return
@@ -473,7 +474,7 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
             not isinstance(key, str) or key not in SUPPORTED_CONDITION_KEYS
             for key in when
         ):
-            raise ValueError(f"{path}.when 包含未知条件")
+            raise ValueError(ui_text("ctl.unknownCondition", path=path))
         validate_condition_values(when, path=f"{path}.when")
         validate_strategy_node(node.get("then"), path=f"{path}.then")
         if node.get("else") is not None:
@@ -489,20 +490,20 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
         "executeTrialRecipe",
         "defaultSkillPriority",
     }:
-        raise ValueError(f"{path}.type 不受支持：{node_type}")
+        raise ValueError(ui_text("ctl.nodeTypeUnsupported", path=path, nodeType=node_type))
     if node_type == "rule":
         when = node.get("when", {})
         if not isinstance(when, dict) or any(
             not isinstance(key, str) or key not in SUPPORTED_CONDITION_KEYS
             for key in when
         ):
-            raise ValueError(f"{path}.when 包含未知条件")
+            raise ValueError(ui_text("ctl.unknownCondition", path=path))
         validate_condition_values(when, path=f"{path}.when")
         action = node.get("action")
     else:
         action = node
     if not isinstance(action, dict):
-        raise ValueError(f"{path}.action 必须是对象")
+        raise ValueError(ui_text("ctl.actionNotObject", path=path))
     action_type = action.get("type")
     if action_type == "transform":
         for key in ("skillSlot", "skillTypeId"):
@@ -511,28 +512,28 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
                 or isinstance(action[key], bool)
                 or action[key] <= 0
             ):
-                raise ValueError(f"{path}.action.{key} 必须是正整数")
+                raise ValueError(ui_text("ctl.actionKeyPositive", path=path, key=key))
         if action.get("toFormIndex") not in {None, 0, 1}:
-            raise ValueError(f"{path}.action.toFormIndex 只允许 0 或 1")
+            raise ValueError(ui_text("ctl.toFormIndexInvalid", path=path))
         return
     if action_type == "defaultSkillPriority":
         validate_default_skill_policy(action, path=f"{path}.action")
         form_policies = action.get("formPolicies")
         if form_policies is not None:
             if not isinstance(form_policies, dict) or not form_policies:
-                raise ValueError(f"{path}.action.formPolicies 必须是非空对象")
+                raise ValueError(ui_text("ctl.formPoliciesEmpty", path=path))
             supported_forms = {"Ultimate", "Ram", "Lion", "Snake"}
             for form, policy in form_policies.items():
                 if form not in supported_forms:
                     raise ValueError(
-                        f"{path}.action.formPolicies 包含未知奇美拉形态：{form}"
+                        ui_text("ctl.formPoliciesUnknownForm", path=path, form=form)
                     )
                 validate_default_skill_policy(
                     policy, path=f"{path}.action.formPolicies.{form}"
                 )
         if action.get("reserveStrictRuleSkills", True) is not True:
             raise ValueError(
-                f"{path}.action.reserveStrictRuleSkills 当前必须为 true"
+                ui_text("ctl.reserveMustBeTrue", path=path)
             )
         return
     if action_type == "maintainEffects":
@@ -582,13 +583,13 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
                 raise ValueError(f"{path}.action.{key} must be true or false")
         return
     if action_type != "cast":
-        raise ValueError(f"{path}.action.type 不受支持")
+        raise ValueError(ui_text("ctl.actionTypeUnsupported", path=path))
     if action.get("formIndex") not in {None, 0, 1}:
-        raise ValueError(f"{path}.action.formIndex 只允许 0 或 1")
+        raise ValueError(ui_text("ctl.actionFormIndex", path=path))
     if "skillSlot" not in action and "skillTypeId" not in action:
-        raise ValueError(f"{path}.action 缺少技能")
+        raise ValueError(ui_text("ctl.actionNoSkill", path=path))
     if "target" not in action:
-        raise ValueError(f"{path}.action 缺少目标")
+        raise ValueError(ui_text("ctl.actionNoTarget", path=path))
     target = action.get("target")
     if isinstance(target, dict) and target.get("type") == "allyPosition":
         position = target.get("position")
@@ -598,7 +599,7 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
             or not 1 <= position <= 6
         ):
             raise ValueError(
-                f"{path}.action.target.position 必须是 1–6"
+                ui_text("ctl.targetPositionInvalid", path=path)
             )
     if isinstance(target, dict) and target.get("type") == "hydraHeadPriority":
         head_type_ids = target.get("headTypeIds", [])
@@ -613,12 +614,12 @@ def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
             or len(head_type_ids) != len(set(head_type_ids))
         ):
             raise ValueError(
-                f"{path}.action.target.headTypeIds 必须是互不重复的正整数数组"
+                ui_text("ctl.headTypeIdsInvalid", path=path)
             )
         if target.get("fallback", "lowestHp") not in {
             "lowestHp", "devouring", "exposedNeck", "none"
         }:
-            raise ValueError(f"{path}.action.target.fallback 不受支持")
+            raise ValueError(ui_text("ctl.fallbackUnsupported", path=path))
 
 
 @dataclass(frozen=True)
@@ -966,11 +967,11 @@ def hydra_devour_requirement_text(
     relation: str, hero_labels: str, mark_limit: int | None = None
 ) -> str:
     if relation == "isAnyOf":
-        return f"该位置必须是以下英雄之一：{hero_labels}"
+        return ui_text("ctl.devourMustBe", heroLabels=hero_labels)
     if relation == "neverMarked":
-        scope = f"前 {mark_limit} 个标记内" if mark_limit else "整场战斗中"
-        return f"以下英雄{scope}不能被吞下：{hero_labels}"
-    return f"该位置不能是以下英雄之一：{hero_labels}"
+        scope = ui_text("ctl.withinMarks", markLimit=mark_limit) if mark_limit else ui_text("ctl.wholeBattle")
+        return ui_text("ctl.devourNeverSwallowed", scope=scope, heroLabels=hero_labels)
+    return ui_text("ctl.devourMustNotBe", heroLabels=hero_labels)
 
 
 @dataclass(frozen=True)
@@ -1050,20 +1051,20 @@ class FreeRegroupCompleted(RuntimeError):
 
 def account_binding(account: dict[str, Any] | None, pid: int) -> AccountBinding:
     if not isinstance(account, dict):
-        raise ValueError("尚未读取到游戏内账户，拒绝仅按 PID 接管")
+        raise ValueError(ui_text("ctl.accountNotRead"))
     account_pid = account.get("pid")
     account_name = account.get("accountName")
     user_id = account.get("userId")
     if account_pid != pid:
-        raise ValueError("账户快照不属于所选 Raid 进程")
+        raise ValueError(ui_text("ctl.accountWrongProcess"))
     if not isinstance(account_name, str) or not account_name.strip():
-        raise ValueError("未读取到有效的游戏内用户名")
+        raise ValueError(ui_text("ctl.noUserName"))
     if (
         not isinstance(user_id, int)
         or isinstance(user_id, bool)
         or user_id <= 0
     ):
-        raise ValueError("未读取到有效的游戏玩家 ID")
+        raise ValueError(ui_text("ctl.noUserId"))
     return AccountBinding(pid=pid, account_name=account_name, user_id=user_id)
 
 
@@ -1071,12 +1072,10 @@ def require_account_binding(ipc: AgentIpc, expected: AccountBinding) -> None:
     try:
         current = account_binding(ipc.account(), expected.pid)
     except ValueError as error:
-        raise TakeoverInterrupted(f"账户身份无法确认，工具已停止接管：{error}") from error
+        raise TakeoverInterrupted(ui_text("ctl.accountUnconfirmed", error=error)) from error
     if current != expected:
         raise TakeoverInterrupted(
-            "检测到游戏内账户已变化，工具已停止接管："
-            f"原账户 {expected.account_name}（{expected.user_id}），"
-            f"当前账户 {current.account_name}（{current.user_id}）"
+            ui_text("ctl.accountSwitched", accountName=expected.account_name, userId=expected.user_id, accountName2=current.account_name, userId2=current.user_id)
         )
 
 
@@ -1085,29 +1084,29 @@ def require_takeover_active(ipc: AgentIpc, session_id: int) -> None:
         raise ControllerPaused()
     lifecycle = ipc.lifecycle()
     if not lifecycle:
-        raise RuntimeError("尚未收到代理接管状态")
+        raise RuntimeError(ui_text("ctl.noTakeoverState"))
     if lifecycle.get("sessionId") != session_id:
-        raise RuntimeError("代理接管会话已经变化")
+        raise RuntimeError(ui_text("ctl.takeoverSessionChanged"))
     state = lifecycle.get("takeoverState")
     if state == "interrupted":
-        reason = lifecycle.get("reason", "安全守卫触发")
-        source = lifecycle.get("inputSource", "代理安全守卫")
+        reason = lifecycle.get("reason", ui_text("ctl.guardTriggered"))
+        source = lifecycle.get("inputSource", ui_text("ctl.agentGuard"))
         if reason == "game_pause_clicked":
             raise GamePaused()
         raise TakeoverInterrupted(
-            f"代理已安全中断接管（原因：{reason}；来源：{source}）"
+            ui_text("ctl.agentStoppedSafely", reason=reason, source=source)
         )
     if state != "active":
-        raise RuntimeError(f"代理未处于接管状态：{state}")
+        raise RuntimeError(ui_text("ctl.agentNotTakingOver", state=state))
     if lifecycle.get("resultConfirmationAvailable") is False:
         emit_telemetry(lifecycle={"event": "result_confirmation_unavailable"})
-        raise RuntimeError("当前游戏的结算界面观察不可用，已暂停接管，未执行自动操作。")
+        raise RuntimeError(ui_text("ctl.resultWatchUnavailable"))
 
 
 def load_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
-        raise ValueError(f"JSON 根节点必须是对象：{path}")
+        raise ValueError(ui_text("ctl.jsonRootNotObject", path=path))
     return value
 
 
@@ -1117,11 +1116,11 @@ def validate_strategy_config(
     boss_mode = normalize_mode(boss_mode or config.get("bossMode", "chimera"))
     mode = config.get("mode", "observe")
     if mode not in {"observe", "execute"}:
-        raise ValueError("策略 mode 只能是 observe 或 execute")
+        raise ValueError(ui_text("ctl.strategyModeInvalid"))
 
     objectives = config.get("objectives", {})
     if not isinstance(objectives, dict):
-        raise ValueError("objectives 必须是对象")
+        raise ValueError(ui_text("ctl.objectivesNotObject"))
     if boss_mode == "chimera":
         raw_trial_ids = objectives.get(
             "mandatoryTrials", objectives.get("mandatoryTrialIds", [])
@@ -1129,7 +1128,7 @@ def validate_strategy_config(
         raw_trial_items = as_list(raw_trial_ids) if raw_trial_ids is not None else []
         trial_ids = configured_trial_ids(raw_trial_ids)
         if len(trial_ids) != len(raw_trial_items):
-            raise ValueError("必要试炼 ID 必须是互不重复的正整数")
+            raise ValueError(ui_text("ctl.trialIdsInvalid"))
 
     minimum_damage = objectives.get("minimumDamage", 0)
     if (
@@ -1138,11 +1137,11 @@ def validate_strategy_config(
         or not math.isfinite(float(minimum_damage))
         or minimum_damage < 0
     ):
-        raise ValueError("minimumDamage 必须是非负有限数值")
+        raise ValueError(ui_text("ctl.minimumDamageInvalid"))
     for key in ("maxRegroupRetries",):
         value = objectives.get(key, 10)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            raise ValueError(f"{key} 必须是非负整数")
+            raise ValueError(ui_text("ctl.keyNotNegativeTop", key=key))
     if boss_mode == "chimera":
         behavior = objectives.get(
             "onMandatoryTrialImpossible", "free_regroup_and_retry_manual"
@@ -1151,23 +1150,23 @@ def validate_strategy_config(
             "free_regroup_and_retry_manual",
             "free_regroup_and_stop",
         }:
-            raise ValueError("未知的必要试炼失败处理方式")
+            raise ValueError(ui_text("ctl.unknownTrialFailureBehavior"))
         if not isinstance(objectives.get("battleForecast", True), bool):
-            raise ValueError("battleForecast 必须是布尔值")
+            raise ValueError(ui_text("ctl.battleForecastInvalid"))
     else:
         devour_conditions = objectives.get("devourOrderRetryConditions", [])
         if not isinstance(devour_conditions, list):
-            raise ValueError("devourOrderRetryConditions 必须是数组")
+            raise ValueError(ui_text("ctl.devourConditionsNotArray"))
         if len(devour_conditions) > 20:
-            raise ValueError("六头蛇吞噬顺序重整条件最多允许 20 条")
+            raise ValueError(ui_text("ctl.devourConditionsTooMany"))
         for index, condition in enumerate(devour_conditions):
             path = f"devourOrderRetryConditions[{index}]"
             if not isinstance(condition, dict):
-                raise ValueError(f"{path} 必须是对象")
+                raise ValueError(ui_text("ctl.pathNotObject", path=path))
             relation = condition.get("relation", "isNoneOf")
             if relation not in HYDRA_DEVOUR_RELATIONS:
                 raise ValueError(
-                    f"{path}.relation 只允许 isAnyOf、isNoneOf 或 neverMarked"
+                    ui_text("ctl.relationInvalid", path=path)
                 )
             if relation == "neverMarked":
                 mark_limit = condition.get("markLimit")
@@ -1176,7 +1175,7 @@ def validate_strategy_config(
                     or isinstance(mark_limit, bool)
                     or not 1 <= mark_limit <= 100
                 ):
-                    raise ValueError(f"{path}.markLimit 必须是 1 到 100 的整数")
+                    raise ValueError(ui_text("ctl.markLimitInvalid", path=path))
             else:
                 mark_index = condition.get("markIndex")
                 if (
@@ -1184,7 +1183,7 @@ def validate_strategy_config(
                     or isinstance(mark_index, bool)
                     or not 1 <= mark_index <= 100
                 ):
-                    raise ValueError(f"{path}.markIndex 必须是 1 到 100 的整数")
+                    raise ValueError(ui_text("ctl.markIndexInvalid", path=path))
             raw_ids = condition.get("heroTypeIds", [])
             hero_type_ids = tuple(
                 dict.fromkeys(
@@ -1197,11 +1196,11 @@ def validate_strategy_config(
             ) if isinstance(raw_ids, list) else ()
             if not hero_type_ids or len(hero_type_ids) != len(raw_ids):
                 raise ValueError(
-                    f"{path}.heroTypeIds 必须是非空且互不重复的正整数数组"
+                    ui_text("ctl.heroTypeIdsInvalid", path=path)
                 )
         forecast = objectives.get("devourOrderForecast", False)
         if not isinstance(forecast, bool):
-            raise ValueError("devourOrderForecast 必须是布尔值")
+            raise ValueError(ui_text("ctl.devourForecastInvalid"))
         behavior = objectives.get(
             "onTeamDefeatedBeforeMinimumDamage",
             "free_regroup_and_retry_manual",
@@ -1210,34 +1209,34 @@ def validate_strategy_config(
             "free_regroup_and_retry_manual",
             "hold_for_user",
         }:
-            raise ValueError("未知的六头蛇未达伤害目标处理方式")
+            raise ValueError(ui_text("ctl.unknownDamageMissBehavior"))
     if objectives.get("onAllMetAtResult", "hold_for_user") != "hold_for_user":
-        raise ValueError("结算处理目前只允许 hold_for_user")
+        raise ValueError(ui_text("ctl.resultBehaviorInvalid"))
 
     safety = config.get("safety", {})
     if not isinstance(safety, dict):
-        raise ValueError("safety 必须是对象")
+        raise ValueError(ui_text("ctl.safetyNotObject"))
     fresh_ms = safety.get("requireFreshSnapshotMs", 500)
     if (
         not isinstance(fresh_ms, int)
         or isinstance(fresh_ms, bool)
         or not 50 <= fresh_ms <= 60_000
     ):
-        raise ValueError("requireFreshSnapshotMs 必须是 50–60000 的整数")
+        raise ValueError(ui_text("ctl.freshSnapshotInvalid"))
     max_per_turn = safety.get("maxCommandsPerTurn", 1)
     if max_per_turn != 1 or isinstance(max_per_turn, bool):
-        raise ValueError("当前安全协议只允许 maxCommandsPerTurn=1")
+        raise ValueError(ui_text("ctl.maxCommandsInvalid"))
     for key in ("onUnknownState", "onNoMatchingRule"):
         if safety.get(key, "pause") != "pause":
-            raise ValueError(f"{key} 目前只允许 pause")
+            raise ValueError(ui_text("ctl.onlyPause", key=key))
 
     tree = config.get("strategyTree")
     rules = config.get("rules")
     require_list_execution(config)
     if tree is not None and not isinstance(tree, dict):
-        raise ValueError("strategyTree 必须是对象")
+        raise ValueError(ui_text("ctl.treeNotObject"))
     if tree is None and not isinstance(rules, list):
-        raise ValueError("缺少有效的 strategyTree 或 rules")
+        raise ValueError(ui_text("ctl.noTreeOrRules"))
     if isinstance(tree, dict):
         validate_strategy_node(tree)
     if isinstance(rules, list):
@@ -1247,7 +1246,7 @@ def validate_strategy_config(
     team = config.get("team")
     if team is not None:
         if not isinstance(team, dict):
-            raise ValueError("team 必须是对象")
+            raise ValueError(ui_text("ctl.teamNotObject"))
         hero_ids = team.get("heroTypeIds", team.get("heroIds"))
         instance_ids = team.get("heroInstanceIds")
         expected_count = 5 if boss_mode == "chimera" else 6
@@ -1262,10 +1261,7 @@ def validate_strategy_config(
             )
             or len(set(hero_ids)) != len(hero_ids)
         ):
-            count_label = "五" if boss_mode == "chimera" else "六"
-            raise ValueError(
-                f"team.heroTypeIds 最多包含{count_label}个互不重复的正整数"
-            )
+            raise ValueError(ui_text("ctl.teamTooLarge", count=5 if boss_mode == "chimera" else 6))
         if instance_ids is not None and (
             not isinstance(instance_ids, list)
             or len(instance_ids) != len(hero_ids)
@@ -1278,7 +1274,7 @@ def validate_strategy_config(
             or len(set(instance_ids)) != len(instance_ids)
         ):
             raise ValueError(
-                "team.heroInstanceIds 必须与已保存英雄一一对应且互不重复"
+                ui_text("ctl.heroInstanceIdsInvalid")
             )
 
 
@@ -1495,8 +1491,7 @@ def archive_rotation_catalog_if_changed(
             os.replace(temporary, path)
             if reward_added:
                 print(
-                    "已归档新的奇美拉试炼奖励轮换："
-                    f"{reward_fingerprint}。",
+                    ui_text("ctl.rotationArchived", rewardFingerprint=reward_fingerprint),
                     flush=True,
                 )
         _ARCHIVED_ROTATION_OBSERVATIONS.add(memory_key)
@@ -1838,7 +1833,7 @@ def hydra_devouring_target_label(
             ) == 9024:
                 victim = hero.get("name")
                 if isinstance(victim, str) and victim:
-                    return f"正在吞噬·{victim}"
+                    return ui_text("ctl.devouringTarget", victim=victim)
     return fallback
 
 
@@ -2416,6 +2411,16 @@ def canonical_chimera_form(value: Any) -> Any:
     return value
 
 
+def champion_type_id(value: Any) -> Any:
+    """The champion behind a hero type id: battles and rosters report the base id
+    plus the ascension level (1-6), while a rule may hold only the base id (a
+    champion the catalog has not yet seen in a battle) or an id from before the
+    champion ascended."""
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value % 10 <= 6:
+        return value - value % 10
+    return value
+
+
 def next_chimera_form(state: dict[str, Any]) -> str | None:
     identity = state.get("rotationIdentity")
     metadata = identity.get("metadata") if isinstance(identity, dict) else None
@@ -2863,6 +2868,9 @@ def matches(when: dict[str, Any], state: dict[str, Any]) -> bool:
         if key in {"form", "nextForm"}:
             actual = canonical_chimera_form(actual)
             expected = [canonical_chimera_form(value) for value in expected]
+        elif key == "activeHeroTypeId":
+            actual = champion_type_id(actual)
+            expected = [champion_type_id(value) for value in expected]
         if key in when and actual not in expected:
             return False
 
@@ -3261,7 +3269,7 @@ def select_target(
             if target_id not in hero_ids and target_id not in known_boss_ids:
                 return (
                     target_id,
-                    f"六头蛇目标 {target_id}（蛇头快照未同步，已按技能合法目标选择）",
+                    ui_text("ctl.hydraTargetUnsynced", targetId=target_id),
                 )
         return None
 
@@ -3276,11 +3284,11 @@ def select_target(
                 dead_candidates,
                 key=lambda item: int(item.get("teamPosition", 99)),
             )
-            return target["id"], f"复活·{target.get('name', target['id'])}"
+            return target["id"], ui_text("ctl.reviveTarget", get=target.get('name', target['id']))
         if isinstance(chimera_id, int) and chimera_id in valid:
             return chimera_id, "奇美拉"
         if isinstance(active_hero_id, int) and active_hero_id in valid:
-            return active_hero_id, "自己"
+            return active_hero_id, ui_text("ctl.self")
         valid_bosses = [
             item
             for item in bosses
@@ -3295,7 +3303,7 @@ def select_target(
         if unresolved_devouring_ids:
             target_id = unresolved_devouring_ids[0]
             return target_id, hydra_devouring_target_label(
-                state, target_id, f"正在吞噬的蛇头 {target_id}"
+                state, target_id, ui_text("ctl.devouringHead", targetId=target_id)
             )
         if valid_bosses:
             target = next(
@@ -3328,7 +3336,7 @@ def select_target(
                 target_label = hydra_devouring_target_label(
                     state,
                     target["id"],
-                    f"正在吞噬·{target_label}",
+                    ui_text("ctl.devouringTargetLabel", targetLabel=target_label),
                 )
             return target["id"], target_label
         candidates = [
@@ -3406,7 +3414,7 @@ def select_target(
                 if unresolved_ids:
                     target_id = unresolved_ids[0]
                     return target_id, hydra_devouring_target_label(
-                        state, target_id, f"正在吞噬的蛇头 {target_id}"
+                        state, target_id, ui_text("ctl.devouringHead", targetId=target_id)
                     )
         elif selector_type == "exposedNeck":
             candidates = [
@@ -3449,7 +3457,7 @@ def select_target(
             target_label = hydra_devouring_target_label(
                 state,
                 target["id"],
-                f"正在吞噬·{target_label}",
+                ui_text("ctl.devouringTargetLabel", targetLabel=target_label),
             )
         return target["id"], target_label
     if selector_type == "self":
@@ -3458,7 +3466,7 @@ def select_target(
             None,
         )
         return (
-            (active_hero_id, "自己")
+            (active_hero_id, ui_text("ctl.self"))
             if isinstance(active_hero_id, int)
             and active_hero_id in valid
             and active is not None
@@ -3493,7 +3501,7 @@ def select_target(
             None,
         )
         return (
-            (hero["id"], f"{position}号位·{hero.get('name', hero['id'])}")
+            (hero["id"], ui_text("ctl.positionTarget", position=position, get=hero.get('name', hero['id'])))
             if hero
             else None
         )
@@ -3543,7 +3551,7 @@ def safety_reason(
             )
         )
         mode_checks = (
-            (hydra_identity_confirmed, "当前回合快照尚未确认是六头蛇战斗"),
+            (hydra_identity_confirmed, ui_text("ctl.notConfirmedHydra")),
         )
     else:
         chimera = state.get("chimera", {})
@@ -3557,17 +3565,17 @@ def safety_reason(
             )
         )
         mode_checks = (
-            (chimera_identity_confirmed, "当前回合快照尚未确认是奇美拉战斗"),
+            (chimera_identity_confirmed, ui_text("ctl.notConfirmedChimera")),
         )
     checks = (*mode_checks,
-        (battle.get("finished") is False, "战斗已结束"),
-        (battle.get("autoMode") is False, "游戏处于自动模式"),
-        (battle.get("waitingForManualCommand") is True, "当前不等待手动指令"),
+        (battle.get("finished") is False, ui_text("ctl.battleOver")),
+        (battle.get("autoMode") is False, ui_text("ctl.autoMode")),
+        (battle.get("waitingForManualCommand") is True, ui_text("ctl.notWaitingManual")),
         (
             isinstance(active_hero_id, int)
             and active_hero_id >= 0
             and active_entity is not None,
-            "行动英雄尚未与战斗实体同步",
+            ui_text("ctl.heroNotSynced"),
         ),
     )
     for passed, reason in checks:
@@ -3577,10 +3585,10 @@ def safety_reason(
         return None
     observed = state.get("observedAtTick")
     if not isinstance(observed, int):
-        return "快照没有时间戳"
+        return ui_text("ctl.noTimestamp")
     age = int(kernel32.GetTickCount64()) - observed
     if age < 0 or age > max_age_ms:
-        return f"快照已过期（{age} ms）"
+        return ui_text("ctl.snapshotStale", age=age)
     return None
 
 
@@ -3625,7 +3633,7 @@ def wait_for_lifecycle_screen(
         if isinstance(last, dict) and last.get("screen") == wanted:
             return last
         time.sleep(0.05)
-    raise RuntimeError(f"等待进入 {wanted} 超时；最后状态：{last}")
+    raise RuntimeError(ui_text("ctl.screenTimeout", wanted=wanted, last=last))
 
 
 def turn_key(state: dict[str, Any]) -> tuple[Any, ...]:
@@ -3821,7 +3829,7 @@ def require_confirmed_result(ipc: AgentIpc, lifecycle: dict | None = None) -> tu
             "result": pick(result, ("confirmed", "battleFinished", "battleGeneration", "openedAtTick", "source", "bossMode")),
             "ledger": pick(ledger, ("confirmed", "battleGeneration", "resultOpenedAtTick", "damage", "completedChallengeIds")),
             "context": decision_context(current)})
-        raise RuntimeError(f"结算状态未通过核对（{reason}）；已暂停，不执行自动重整。请确认游戏当前画面后再继续。")
+        raise RuntimeError(ui_text("ctl.resultNotConfirmed", reason=reason))
     return lifecycle, ledger
 
 
@@ -3863,15 +3871,14 @@ def start_first_battle_if_ready(
         return False
     selection = lifecycle.get("selection")
     if not isinstance(selection, dict):
-        raise RuntimeError("已看到 Boss 队伍界面，但尚未取得队伍状态")
+        raise RuntimeError(ui_text("ctl.teamScreenNoState"))
     selected_mode = selection.get("bossMode")
     mode = normalize_mode(boss_mode or selected_mode or ACTIVE_BOSS_MODE)
     label = "六头蛇" if mode == "hydra" else "奇美拉"
     team_size = 6 if mode == "hydra" else 5
     if selected_mode in {"chimera", "hydra"} and selected_mode != mode:
         raise RuntimeError(
-            f"当前是{'六头蛇' if selected_mode == 'hydra' else '奇美拉'}队伍界面，"
-            f"与准备接管的{label}模式不一致"
+            ui_text("ctl.wrongModeScreen", value='六头蛇' if selected_mode == 'hydra' else '奇美拉', label=label)
         )
     selected_count = len(
         {
@@ -3882,8 +3889,7 @@ def start_first_battle_if_ready(
     )
     if selection.get("filled") is not True and announce_wait:
         print(
-            f"当前{label}队伍已选择 {selected_count}/{team_size} 名英雄；"
-            "将按当前队伍自动开始战斗。",
+            ui_text("ctl.teamPartial", label=label, selectedCount=selected_count, teamSize=team_size),
             flush=True,
         )
 
@@ -3903,12 +3909,12 @@ def start_first_battle_if_ready(
     expected_hero_type_ids = complete_ids(desired_hero_type_ids)
     selection_is_full = selection.get("filled") is True
     if selection_is_full and expected_hero_ids and current_hero_ids != expected_hero_ids:
-        raise RuntimeError(f"当前{team_size}人队伍与策略组保存队伍不一致（具体英雄副本）")
+        raise RuntimeError(ui_text("ctl.teamDiffersCopies", teamSize=team_size))
     if selection_is_full and expected_hero_type_ids and current_hero_type_ids != expected_hero_type_ids:
-        raise RuntimeError(f"当前{team_size}人队伍与策略组保存队伍不一致（英雄身份或顺序）")
+        raise RuntimeError(ui_text("ctl.teamDiffersOrder", teamSize=team_size))
     context = selection.get("context")
     if not isinstance(context, int) or context <= 0:
-        raise RuntimeError("首场自动开始已取消：队伍界面实例已经变化")
+        raise RuntimeError(ui_text("ctl.firstStartCancelled"))
     acknowledgement: dict[str, Any] | None = None
     start_deadline = time.monotonic() + 6.0
     start_attempt = 0
@@ -3932,7 +3938,7 @@ def start_first_battle_if_ready(
             nonce=attempt_nonce,
         )
         if not result.get("queued"):
-            raise RuntimeError(f"代理拒绝首场自动开始请求：{result}")
+            raise RuntimeError(ui_text("ctl.firstStartRejected", result=result))
         acknowledgement = wait_for_command_ack(
             ipc,
             session_id=session_id,
@@ -3941,7 +3947,7 @@ def start_first_battle_if_ready(
         )
         if acknowledgement and acknowledgement.get("status") == "submitted":
             break
-        reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
+        reason = acknowledgement.get("reason") if acknowledgement else ui_text("ctl.ackTimeout")
         current = ipc.lifecycle() or {}
         current_selection = current.get("selection", {})
         same_selection = (
@@ -3957,29 +3963,29 @@ def start_first_battle_if_ready(
             start_attempt += 1
             if start_attempt == 1:
                 print(
-                    f"正在等待{label}准备界面完成队伍读取并关闭自动战斗……",
+                    ui_text("ctl.waitingTeamScreen", label=label),
                     flush=True,
                 )
             time.sleep(0.12)
             continue
         break
     if not acknowledgement or acknowledgement.get("status") != "submitted":
-        reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
+        reason = acknowledgement.get("reason") if acknowledgement else ui_text("ctl.ackTimeout")
         current = ipc.lifecycle() or {}
         current_selection = current.get("selection", {})
         if isinstance(current_selection, dict):
             if current_selection.get("autoBattle") is True:
-                reason = "自动战斗仍处于开启状态"
+                reason = ui_text("ctl.autoBattleOn")
             elif current_selection.get("quickBattle") is True:
-                reason = "快速战斗仍处于开启状态"
+                reason = ui_text("ctl.quickBattleOn")
             elif current_selection.get("filled") is not True:
-                reason = "未满队伍自动开战请求被游戏拒绝"
+                reason = ui_text("ctl.partialTeamRejected")
             elif current_selection.get("valid") is not True:
-                reason = "准备队伍仍在解析刚刚切换的英雄"
+                reason = ui_text("ctl.teamStillResolving")
         diagnostic = ipc.diagnostic()
-        detail = f"；代理诊断：{diagnostic}" if diagnostic else ""
-        raise RuntimeError(f"首场自动开始未通过安全检查：{reason}{detail}")
-    print(f"已用当前选定的 {selected_count} 名英雄开始首场{label}战斗。", flush=True)
+        detail = ui_text("ctl.agentDiagnostic", diagnostic=diagnostic) if diagnostic else ""
+        raise RuntimeError(ui_text("ctl.firstStartUnsafe", reason=reason, detail=detail))
+    print(ui_text("ctl.firstStarted", selectedCount=selected_count, label=label), flush=True)
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
         require_takeover_active(ipc, session_id)
@@ -3992,7 +3998,7 @@ def start_first_battle_if_ready(
             if detected_mode == mode:
                 return True
         time.sleep(0.05)
-    raise RuntimeError(f"开始请求已提交，但没有确认进入{label}战斗")
+    raise RuntimeError(ui_text("ctl.startNotConfirmed", label=label))
 
 
 def submit_free_regroup(
@@ -4012,7 +4018,7 @@ def submit_free_regroup(
         or not isinstance(context, int)
         or context <= 0
     ):
-        raise RuntimeError("当前战斗实例已变化，未执行免费重整")
+        raise RuntimeError(ui_text("ctl.battleChangedNoRegroup"))
     preparation_nonce = lifecycle_nonce(nonce, 1)
     preparation = queue_lifecycle_command(
         pid,
@@ -4023,7 +4029,7 @@ def submit_free_regroup(
         nonce=preparation_nonce,
     )
     if not preparation.get("queued"):
-        raise RuntimeError(f"代理拒绝准备免费重整：{preparation}")
+        raise RuntimeError(ui_text("ctl.regroupPrepRejected", preparation=preparation))
     preparation_ack = wait_for_command_ack(
         ipc,
         session_id=session_id,
@@ -4031,8 +4037,8 @@ def submit_free_regroup(
         timeout_seconds=5.0,
     )
     if not preparation_ack or preparation_ack.get("status") != "submitted":
-        reason = preparation_ack.get("reason") if preparation_ack else "回执超时"
-        raise RuntimeError(f"免费重整准备失败：{reason}")
+        reason = preparation_ack.get("reason") if preparation_ack else ui_text("ctl.ackTimeout")
+        raise RuntimeError(ui_text("ctl.regroupPrepFailed", reason=reason))
 
     deadline = time.monotonic() + 15.0
     attempt = 0
@@ -4052,7 +4058,7 @@ def submit_free_regroup(
             nonce=execute_nonce,
         )
         if not result.get("queued"):
-            raise RuntimeError(f"代理拒绝免费重整请求：{result}")
+            raise RuntimeError(ui_text("ctl.regroupRejected", result=result))
         acknowledgement = wait_for_command_ack(
             ipc,
             session_id=session_id,
@@ -4061,7 +4067,7 @@ def submit_free_regroup(
         )
         if acknowledgement and acknowledgement.get("status") == "submitted":
             return acknowledgement
-        reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
+        reason = acknowledgement.get("reason") if acknowledgement else ui_text("ctl.ackTimeout")
         # Some server responses finish the regroup between queueing action 2
         # and its main-thread guard. In that race the old battle context is
         # correctly rejected, but arrival at a verified team screen is the
@@ -4076,9 +4082,9 @@ def submit_free_regroup(
             "free_regroup_not_prepared",
             "free_regroup_guard_failed",
         }:
-            raise RuntimeError(f"免费重整没有通过安全检查：{reason}")
+            raise RuntimeError(ui_text("ctl.regroupUnsafe", reason=reason))
         time.sleep(0.1)
-    raise RuntimeError("Boss 战斗退出验证在 15 秒内没有完成，未执行免费重整")
+    raise RuntimeError(ui_text("ctl.regroupExitTimeout"))
 
 
 def refresh_team_selection(
@@ -4093,7 +4099,7 @@ def refresh_team_selection(
     selection = lifecycle.get("selection") or {}
     context = selection.get("context") if isinstance(selection, dict) else None
     if lifecycle.get("screen") != "team_selection" or not isinstance(context, int):
-        raise RuntimeError("当前不是可刷新的 Boss 队伍界面")
+        raise RuntimeError(ui_text("ctl.notRefreshable"))
     refresh_nonce = lifecycle_nonce(nonce, 300)
     queued = queue_lifecycle_command(
         pid,
@@ -4104,7 +4110,7 @@ def refresh_team_selection(
         nonce=refresh_nonce,
     )
     if not queued.get("queued"):
-        raise RuntimeError(f"代理拒绝刷新队伍状态：{queued}")
+        raise RuntimeError(ui_text("ctl.refreshRejected", queued=queued))
     acknowledgement = wait_for_command_ack(
         ipc,
         session_id=session_id,
@@ -4112,11 +4118,11 @@ def refresh_team_selection(
         timeout_seconds=5.0,
     )
     if not acknowledgement or acknowledgement.get("status") != "validated":
-        reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
-        raise RuntimeError(f"队伍状态刷新失败：{reason}")
+        reason = acknowledgement.get("reason") if acknowledgement else ui_text("ctl.ackTimeout")
+        raise RuntimeError(ui_text("ctl.refreshFailed", reason=reason))
     refreshed = ipc.lifecycle() or {}
     if refreshed.get("screen") != "team_selection":
-        raise RuntimeError("刷新后队伍界面实例已经变化")
+        raise RuntimeError(ui_text("ctl.refreshInstanceChanged"))
     return refreshed
 
 
@@ -4133,7 +4139,7 @@ def select_team_heroes(
     selection = lifecycle.get("selection") or {}
     context = selection.get("context") if isinstance(selection, dict) else None
     if lifecycle.get("screen") != "team_selection" or not isinstance(context, int):
-        raise RuntimeError("自动选人时已不在奇美拉队伍界面")
+        raise RuntimeError(ui_text("ctl.selectLeftScreen"))
     select_nonce = lifecycle_nonce(nonce, 350)
     queued = queue_lifecycle_command(
         pid,
@@ -4145,7 +4151,7 @@ def select_team_heroes(
         hero_ids=hero_ids,
     )
     if not queued.get("queued"):
-        raise RuntimeError(f"代理拒绝自动选择队伍：{queued}")
+        raise RuntimeError(ui_text("ctl.selectRejected", queued=queued))
     acknowledgement = wait_for_command_ack(
         ipc,
         session_id=session_id,
@@ -4156,8 +4162,8 @@ def select_team_heroes(
         "submitted",
         "validated",
     }:
-        reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
-        raise RuntimeError(f"自动选择队伍失败：{reason}")
+        reason = acknowledgement.get("reason") if acknowledgement else ui_text("ctl.ackTimeout")
+        raise RuntimeError(ui_text("ctl.selectFailed", reason=reason))
     refreshed = ipc.lifecycle() or {}
     current = (refreshed.get("selection") or {}).get("heroIds", [])
     if (
@@ -4165,7 +4171,7 @@ def select_team_heroes(
         or current != hero_ids
         or (refreshed.get("selection") or {}).get("filled") is not True
     ):
-        raise RuntimeError("自动选人后的五人队伍复核失败")
+        raise RuntimeError(ui_text("ctl.selectCheckFailed"))
     return refreshed
 
 
@@ -4206,7 +4212,7 @@ def free_regroup_and_retry_manual(
     configured_hero_type_ids = valid_team_ids(desired_hero_type_ids)
     expected_hero_ids = original_hero_ids or configured_hero_ids
     if not expected_hero_ids:
-        raise RuntimeError(f"没有可用于核对重整的{label}实战队伍")
+        raise RuntimeError(ui_text("ctl.noLiveTeamForRegroup", label=label))
     expected_hero_type_ids = (
         original_hero_type_ids
         if len(original_hero_type_ids) == len(expected_hero_ids)
@@ -4217,7 +4223,7 @@ def free_regroup_and_retry_manual(
         )
     )
     if not isinstance(old_context, int) or old_context <= 0:
-        raise RuntimeError("重整前没有可验证的战斗实例")
+        raise RuntimeError(ui_text("ctl.noBattleBeforeRegroup"))
     submit_free_regroup(
         ipc,
         pid=pid,
@@ -4270,11 +4276,11 @@ def free_regroup_and_retry_manual(
         or selection.get("bossMode") not in {None, mode}
         or selection.get("quickBattle") is True
     ):
-        raise RuntimeError(f"免费重整后的{label}队伍/快速战斗状态未通过核对")
+        raise RuntimeError(ui_text("ctl.regroupTeamCheckFailed", label=label))
     if regrouped_hero_ids != expected_hero_ids:
-        raise RuntimeError("免费重整后队伍发生变化，已停止在队伍界面")
+        raise RuntimeError(ui_text("ctl.regroupTeamChanged"))
     if expected_hero_type_ids and regrouped_hero_type_ids != expected_hero_type_ids:
-        raise RuntimeError("免费重整后英雄身份或顺序发生变化，已停止在队伍界面")
+        raise RuntimeError(ui_text("ctl.regroupOrderChanged"))
     started = start_first_battle_if_ready(
         ipc,
         pid=pid,
@@ -4286,16 +4292,16 @@ def free_regroup_and_retry_manual(
         boss_mode=mode,
     )
     if not started:
-        raise RuntimeError(f"免费重整后没有开始新的{label}战斗")
+        raise RuntimeError(ui_text("ctl.regroupNoNewBattle", label=label))
     new_battle = wait_for_lifecycle_screen(
         ipc, session_id, "battle", timeout_seconds=30.0
     )
     new_battle_state = new_battle.get("battle") or {}
     new_context = new_battle_state.get("context")
     if not isinstance(new_context, int) or new_context <= 0:
-        raise RuntimeError("重新开战后未取得新战斗实例")
+        raise RuntimeError(ui_text("ctl.restartNoInstance"))
     if new_battle_state.get("bossMode") not in {None, mode}:
-        raise RuntimeError(f"重新开战后进入的不是{label}战斗")
+        raise RuntimeError(ui_text("ctl.restartWrongBoss", label=label))
     restarted_hero_ids = [
         value
         for value in new_battle_state.get("heroIds", [])
@@ -4307,13 +4313,13 @@ def free_regroup_and_retry_manual(
         if isinstance(value, int) and not isinstance(value, bool) and value > 0
     ]
     if restarted_hero_ids and restarted_hero_ids != expected_hero_ids:
-        raise RuntimeError(f"重新开战后的{label}队伍与重整前不一致")
+        raise RuntimeError(ui_text("ctl.restartTeamDiffers", label=label))
     if (
         expected_hero_type_ids
         and restarted_hero_type_ids
         and restarted_hero_type_ids != expected_hero_type_ids
     ):
-        raise RuntimeError(f"重新开战后的{label}英雄身份或顺序与重整前不一致")
+        raise RuntimeError(ui_text("ctl.restartOrderDiffers", label=label))
 
     # ClientBattleViewContext is a reusable UI object.  The game can keep the
     # same address when a free regroup goes battle -> team selection -> battle,
@@ -4328,7 +4334,7 @@ def free_regroup_and_retry_manual(
         and isinstance(battle_sequence, int)
         and battle_sequence <= selection_sequence
     ):
-        raise RuntimeError("重新开战后读取到了重整前的旧战斗状态")
+        raise RuntimeError(ui_text("ctl.restartOldState"))
     selection_tick = regrouped_selection.get("observedAtTick")
     battle_tick = new_battle.get("observedAtTick")
     if (
@@ -4336,9 +4342,9 @@ def free_regroup_and_retry_manual(
         and isinstance(battle_tick, int)
         and battle_tick < selection_tick
     ):
-        raise RuntimeError("重新开战后的状态时间早于队伍重整")
+        raise RuntimeError(ui_text("ctl.restartStateTooOld"))
     print(
-        f"免费重整后已核对原{label}队伍，关闭自动战斗并以手动模式进入下一次尝试。",
+        ui_text("ctl.regroupDone", label=label),
         flush=True,
     )
 
@@ -4357,8 +4363,7 @@ def free_regroup_and_stop(
         session_id=session_id,
     )
     print(
-        "必要试炼已被游戏状态明确判定为不可完成；已触发免费重整并停止，"
-        "不会自动开始下一轮。",
+        ui_text("ctl.trialsImpossibleStop"),
         flush=True,
     )
 
@@ -4387,7 +4392,7 @@ def _restart_from_result(
         or not isinstance(context, int)
         or context <= 0
     ):
-        raise RuntimeError(f"{label}结算实例已经变化，未执行自动重整")
+        raise RuntimeError(ui_text("ctl.resultInstanceChanged", label=label))
 
     restart_nonce = lifecycle_nonce(nonce, 400)
     emit_telemetry(lifecycle={"event": "result_restart_requested", "bossMode": mode,
@@ -4403,7 +4408,7 @@ def _restart_from_result(
     if not queued.get("queued"):
         emit_telemetry(lifecycle={"event": "result_restart_queue_rejected", "bossMode": mode,
             "reason": queued.get("reason", "queue_rejected")})
-        raise RuntimeError(f"代理拒绝{label}自动重整请求：{queued}")
+        raise RuntimeError(ui_text("ctl.autoRegroupRejected", label=label, queued=queued))
     acknowledgement = wait_for_command_ack(
         ipc,
         session_id=session_id,
@@ -4414,8 +4419,8 @@ def _restart_from_result(
         "acknowledgement": pick(acknowledgement, ("status", "reason", "nonce"))
             if acknowledgement else {"status": "timeout"}})
     if not acknowledgement or acknowledgement.get("status") != "submitted":
-        reason = acknowledgement.get("reason") if acknowledgement else "回执超时"
-        raise RuntimeError(f"{label}自动重整没有通过安全检查：{reason}")
+        reason = acknowledgement.get("reason") if acknowledgement else ui_text("ctl.ackTimeout")
+        raise RuntimeError(ui_text("ctl.autoRegroupUnsafe", label=label, reason=reason))
 
     restart_started = time.monotonic()
     deadline = restart_started + 30.0
@@ -4492,7 +4497,7 @@ def _restart_from_result(
         elif screen == "battle":
             battle = current.get("battle") or {}
             if not isinstance(battle, dict) or battle.get("bossMode") != mode:
-                raise RuntimeError(f"自动重整后进入的不是{label}战斗，已停止接管")
+                raise RuntimeError(ui_text("ctl.autoRegroupWrongBoss", label=label))
             actual_instances = battle.get("heroIds")
             actual_types = battle.get("heroTypeIds")
             actual_team_is_full = (
@@ -4507,9 +4512,9 @@ def _restart_from_result(
                 and len(set(actual_types)) == team_size
             )
             if actual_team_is_full and desired_hero_ids and actual_instances != desired_hero_ids:
-                raise RuntimeError(f"自动重整后的{team_size}人队伍与策略组不一致（具体英雄副本）")
+                raise RuntimeError(ui_text("ctl.autoRegroupTeamCopies", teamSize=team_size))
             if actual_team_is_full and desired_hero_type_ids and actual_types != desired_hero_type_ids:
-                raise RuntimeError(f"自动重整后的{team_size}人队伍与策略组不一致（英雄身份或顺序）")
+                raise RuntimeError(ui_text("ctl.autoRegroupTeamOrder", teamSize=team_size))
             emit_telemetry(lifecycle={"event": "result_restart_completed", "bossMode": mode,
                 "via": "battle", "elapsedSeconds": round(time.monotonic() - restart_started, 3)})
             return True
@@ -4524,9 +4529,8 @@ def _restart_from_result(
     if current.get("screen") == "team_selection":
         return False
     if saw_selection:
-        raise RuntimeError(f"{label}自动重整后曾进入准备界面，但未能完成重新开战；"
-                           f"30 秒后最后识别状态：{current.get('screen', 'unknown')}。详情已写入重整诊断日志")
-    raise RuntimeError(f"{label}自动重整后 30 秒内没有进入准备界面或新战斗")
+        raise RuntimeError(ui_text("ctl.autoRegroupStuckPrep", label=label, get=current.get('screen', 'unknown')))
+    raise RuntimeError(ui_text("ctl.autoRegroupTimeout", label=label))
 
 
 def restart_hydra_from_result(
@@ -4611,10 +4615,7 @@ def result_screen_reached(
 
     if config is None:
         print(
-            "战斗已结束，已停留在结算画面；"
-            f"伤害 {damage_text(damage) if damage is not None else '未知'}，"
-            f"完成试炼 {ledger.get('completedChallengeCount', '未知')}。"
-            "工具不会保存结果或开始下一轮。",
+            ui_text("ctl.resultStay", damage=damage_text(damage) if damage is not None else ui_text("ctl.unknown"), get=ledger.get('completedChallengeCount', ui_text("ctl.unknown"))),
             flush=True,
         )
         return True
@@ -4651,9 +4652,7 @@ def result_screen_reached(
         trials_met = not missing_ids
         if damage_met and trials_met:
             print(
-                f"奇美拉全部目标已达成：伤害 {damage_text(damage)}/{damage_text(minimum_damage)}，"
-                f"必要试炼 {len(mandatory_ids)}/{len(mandatory_ids)}；"
-                "已停留在结算画面并暂停接管，不会自动保存结果。",
+                ui_text("ctl.chimeraGoalsMet", damage=damage_text(damage), damage2=damage_text(minimum_damage), mandatoryIdsCount=len(mandatory_ids)),
                 flush=True,
             )
             return True
@@ -4669,19 +4668,17 @@ def result_screen_reached(
         damage_label = (
             f"{damage_text(damage)}/{damage_text(minimum_damage)}"
             if damage is not None
-            else f"未知/{damage_text(minimum_damage)}"
+            else ui_text("ctl.unknownOf", damage=damage_text(minimum_damage))
         )
         missing_label = (
-            ", ".join(map(str, missing_ids)) if missing_ids else "无"
+            ", ".join(map(str, missing_ids)) if missing_ids else ui_text("ctl.none")
         )
         emit_telemetry(lifecycle={"event": "result_objectives_unmet", "damage": damage,
             "minimumDamage": minimum_damage, "missingTrialIds": list(missing_ids),
             "behavior": behavior, "execute": execute, "retriesUsed": runtime.get("regroupRetries", 0)})
         if behavior != "free_regroup_and_retry_manual" or not execute:
             print(
-                "奇美拉结算目标未全部达成："
-                f"伤害 {damage_label}，未完成试炼 {missing_label}；"
-                "当前设置不执行自动重整，已停留在结算画面。",
+                ui_text("ctl.chimeraGoalsMissedStay", damageLabel=damage_label, missingLabel=missing_label),
                 flush=True,
             )
             return True
@@ -4690,18 +4687,15 @@ def result_screen_reached(
         maximum = int(objectives.get("maxRegroupRetries", 10))
         if maximum > 0 and used >= maximum:
             print(
-                "奇美拉结算目标未全部达成，"
-                f"且已达到自动重整上限 {maximum}；已停留在结算画面。",
+                ui_text("ctl.chimeraRegroupLimit", maximum=maximum),
                 flush=True,
             )
             return True
         if pid is None or agent is None or session_id <= 0:
-            raise RuntimeError("奇美拉自动重整缺少已验证的控制会话")
+            raise RuntimeError(ui_text("ctl.chimeraNoSession"))
 
         print(
-            "奇美拉结算目标未全部达成："
-            f"伤害 {damage_label}，未完成试炼 {missing_label}；"
-            f"正在执行第 {used + 1} 次免费重整并重新开战。",
+            ui_text("ctl.chimeraRegrouping", damageLabel=damage_label, missingLabel=missing_label, value=used + 1),
             flush=True,
         )
         restarted = restart_chimera_from_result(
@@ -4717,26 +4711,23 @@ def result_screen_reached(
         emit_telemetry(retriesUsed=used + 1)
         runtime.pop("lastObjectiveReport", None)
         if restarted:
-            print("奇美拉已用当前队伍重新进入手动战斗。", flush=True)
+            print(ui_text("ctl.chimeraRestarted"), flush=True)
         else:
             print(
-                "奇美拉已进入准备界面；正在等待当前队伍状态稳定，"
-                "接管保持运行。",
+                ui_text("ctl.chimeraOnPrep"),
                 flush=True,
             )
         return False
 
     if damage is None:
         print(
-            "六头蛇战斗已结束，但结算伤害仍不可用；为避免错误重试，"
-            "已停留在结算画面并停止接管。",
+            ui_text("ctl.hydraNoResultDamage"),
             flush=True,
         )
         return True
     if damage >= minimum_damage:
         print(
-            f"六头蛇伤害目标已达成：{damage_text(damage)}/{damage_text(minimum_damage)}；"
-            "已停留在结算画面并暂停接管，不会自动保存结果。",
+            ui_text("ctl.hydraGoalMet", damage=damage_text(damage), damage2=damage_text(minimum_damage)),
             flush=True,
         )
         return True
@@ -4748,8 +4739,7 @@ def result_screen_reached(
     execute = execute_requested and config.get("mode") == "execute"
     if behavior != "free_regroup_and_retry_manual" or not execute:
         print(
-            f"六头蛇战斗结束时伤害未达目标：{damage_text(damage)}/{damage_text(minimum_damage)}；"
-            "当前设置不执行自动重整，已停留在结算画面。",
+            ui_text("ctl.hydraGoalMissedStay", damage=damage_text(damage), damage2=damage_text(minimum_damage)),
             flush=True,
         )
         return True
@@ -4758,17 +4748,15 @@ def result_screen_reached(
     maximum = int(objectives.get("maxRegroupRetries", 10))
     if maximum > 0 and used >= maximum:
         print(
-            f"六头蛇伤害未达目标（{damage_text(damage)}/{damage_text(minimum_damage)}），"
-            f"且已达到自动重整上限 {maximum}；已停留在结算画面。",
+            ui_text("ctl.hydraRegroupLimit", damage=damage_text(damage), damage2=damage_text(minimum_damage), maximum=maximum),
             flush=True,
         )
         return True
     if pid is None or agent is None or session_id <= 0:
-        raise RuntimeError("六头蛇自动重整缺少已验证的控制会话")
+        raise RuntimeError(ui_text("ctl.hydraNoSession"))
 
     print(
-        f"六头蛇伤害未达目标：{damage_text(damage)}/{damage_text(minimum_damage)}；"
-        f"正在执行第 {used + 1} 次免费重整并重新开战。",
+        ui_text("ctl.hydraRegrouping", damage=damage_text(damage), damage2=damage_text(minimum_damage), value=used + 1),
         flush=True,
     )
     runtime.pop("hydraDevourTracker", None)
@@ -4784,11 +4772,10 @@ def result_screen_reached(
     runtime["regroupRetries"] = used + 1
     emit_telemetry(retriesUsed=used + 1)
     if restarted:
-        print("六头蛇已用当前队伍重新进入手动战斗。", flush=True)
+        print(ui_text("ctl.hydraRestarted"), flush=True)
     else:
         print(
-            "六头蛇已进入准备界面；正在等待当前队伍状态稳定，"
-            "接管保持运行。",
+            ui_text("ctl.hydraOnPrep"),
             flush=True,
         )
     return False
@@ -6608,7 +6595,7 @@ def default_skill_entry_decision(
         return None
     target_label = target[1]
     if used_automatic_fallback:
-        target_label = f"{target_label}（优先目标不可用，已自动选择）"
+        target_label = ui_text("ctl.priorityTargetFallback", targetLabel=target_label)
     return Decision(
         rule=name,
         skill=skill,
@@ -6875,7 +6862,7 @@ def _evaluate_strategy_node(
 
 def require_list_execution(config: dict[str, Any]) -> None:
     if config.get("executionMode", "list") != "list":
-        raise ValueError("1.0.6 已移除流程图执行。请使用原列表策略；旧流程文件已保留，不会自动替换为其他动作。")
+        raise ValueError(ui_text("ctl.flowchartRemoved"))
 
 
 def evaluate(
@@ -7030,13 +7017,10 @@ def reserved_skill_fallback_decision(
     return None
 
 
-NO_DECISION_REASON_TEXT = {
-    "hero_form_mismatch": "要求英雄形态 {expected}，当前为 {actual}",
-    "chimera_form_mismatch": "奇美拉形态条件不满足（当前 {actual}）",
-    "conditions_not_met": "触发条件不满足",
-    "default_no_ready_skill": "条件满足，但优先列表中没有已就绪且目标合法的技能",
-    "trial_no_action": "条件满足，但当前没有可安全执行的试炼动作或基础技能",
-    "skill_unavailable": "条件满足，但指定技能未就绪或没有合法目标",
+# Why a rule did not act (ctl.noDecision.<code>, with expected / actual where the code has them).
+NO_DECISION_REASON_ARGUMENTS = {
+    "hero_form_mismatch": ("expected", "actual"), "chimera_form_mismatch": ("actual",), "conditions_not_met": (),
+    "default_no_ready_skill": (), "trial_no_action": (), "skill_unavailable": (),
 }
 
 
@@ -7078,7 +7062,7 @@ def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[di
                     else None
                 )
                 entry.update(code="chimera_form_mismatch", expected=when["form"],
-                             actual=current_form or "未知")
+                             actual=current_form or ui_text("ctl.unknown"))
             else:
                 entry["code"] = "conditions_not_met"
         elif action.get("type") == "defaultSkillPriority":
@@ -7087,8 +7071,8 @@ def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[di
             entry["code"] = "trial_no_action"
         else:
             entry["code"] = "skill_unavailable"
-        entry["reason"] = NO_DECISION_REASON_TEXT[entry["code"]].format(
-            expected=entry.get("expected"), actual=entry.get("actual"))
+        entry["reason"] = ui_text(f"ctl.noDecision.{entry['code']}",
+                                  **{name: entry.get(name) for name in NO_DECISION_REASON_ARGUMENTS[entry["code"]]})
         report.append(entry)
     return report
 
@@ -7096,13 +7080,12 @@ def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[di
 def no_decision_diagnostic(config: dict[str, Any], state: dict[str, Any]) -> str:
     """Summarise why the active hero's flat rules did not yield an action."""
     if not isinstance(config.get("rules"), list):
-        return "策略树没有产生可执行动作"
-    candidates = [f"“{entry['name']}”：{entry['reason']}" for entry in no_decision_report(config, state)]
+        return ui_text("ctl.noTreeAction")
+    candidates = [ui_text("ctl.ruleCheck", name=entry["name"], reason=entry["reason"]) for entry in no_decision_report(config, state)]
     if not candidates:
-        return "没有为当前英雄配置规则"
+        return ui_text("ctl.noRulesForHero")
     shown = candidates[:3]
-    suffix = f"；另有 {len(candidates) - len(shown)} 条" if len(candidates) > len(shown) else ""
-    return "已检查 " + "；".join(shown) + suffix
+    return ui_text("ctl.checked", rules=ui_text("forecast.separator").join(shown), more=len(candidates) - len(shown))
 
 
 def refresh_trial_planner_runtime(
@@ -7289,7 +7272,7 @@ def request_chimera_regroup_retry(
     used = int(runtime.get("regroupRetries", 0))
     maximum = int(objective_config.get("maxRegroupRetries", 10))
     if maximum > 0 and used >= maximum:
-        raise RuntimeError(f"已达到免费重整重试上限 {maximum}，停止接管")
+        raise RuntimeError(ui_text("ctl.regroupLimitStop", maximum=maximum))
     free_regroup_and_retry_manual(
         ipc,
         pid=int(state["pid"]),
@@ -7341,7 +7324,7 @@ def process_state(
         ignore_freshness=ignore_freshness,
     )
     if reason:
-        print(f"暂停：{reason}", flush=True)
+        print(ui_text("ctl.pausedFor", reason=reason), flush=True)
         return False
     if ACTIVE_BOSS_MODE == "chimera":
         observe_chimera_capture(state, ipc, config, capability_memory)
@@ -7351,7 +7334,7 @@ def process_state(
                                       "recordId": forecast_retry.record_id, "context": decision_context(state)})
             execute = execute_requested and config.get("mode") == "execute"
             if not execute:
-                print("观察模式：不会实际触发免费重整。", flush=True)
+                print(ui_text("ctl.observeMode"), flush=True)
             elif forecast_retry.behavior == "free_regroup_and_stop":
                 free_regroup_and_stop(
                     ipc,
@@ -7382,8 +7365,7 @@ def process_state(
         sequence = tracker.get("sequence", []) if isinstance(tracker, dict) else []
         if new_mark is not None:
             print(
-                f"六头蛇吞噬顺序：第 {len(sequence)} 个标记目标为"
-                f"“{new_mark.get('name', '未知英雄')}”。",
+                ui_text("ctl.devourMarkObserved", sequenceCount=len(sequence), get=new_mark.get('name', ui_text("ctl.unknownChampion"))),
                 flush=True,
             )
         objectives = config.get("objectives", {})
@@ -7399,8 +7381,7 @@ def process_state(
             and tracker.get("midBattleNoticeEmitted") is not True
         ):
             print(
-                "当前接管不是从本场六头蛇开局开始；无法确认此前吞噬顺序，"
-                "本场不会据此自动重整，下一场将自动启用。",
+                ui_text("ctl.devourNotFromOpening"),
                 flush=True,
             )
             tracker["midBattleNoticeEmitted"] = True
@@ -7419,13 +7400,11 @@ def process_state(
             requirement = hydra_devour_requirement_text(
                 devour_retry.relation, expected_labels, devour_retry.mark_limit
             )
-            what = (f"第 {devour_retry.mark_index} 个标记的“{devour_retry.actual_hero_name}”已被吞下"
+            what = (ui_text("ctl.devourSwallowed", markIndex=devour_retry.mark_index, actualHeroName=devour_retry.actual_hero_name)
                     if devour_retry.swallowed else
-                    f"第 {devour_retry.mark_index} 个标记目标为“{devour_retry.actual_hero_name}”")
+                    ui_text("ctl.devourMarkOn", markIndex=devour_retry.mark_index, actualHeroName=devour_retry.actual_hero_name))
             print(
-                f"六头蛇吞噬顺序重整条件 {devour_retry.condition_index + 1} 已触发："
-                f"{what}，但{requirement}；"
-                f"当前已观察顺序：{' → '.join(devour_retry.observed_sequence)}。",
+                ui_text("ctl.devourConditionTriggered", value=devour_retry.condition_index + 1, what=what, requirement=requirement, observedSequence=' → '.join(devour_retry.observed_sequence)),
                 flush=True,
             )
             execute = execute_requested and config.get("mode") == "execute"
@@ -7442,7 +7421,7 @@ def process_state(
                     boss_mode="hydra",
                 )
             else:
-                print("观察模式：不会实际触发免费重整。", flush=True)
+                print(ui_text("ctl.observeMode"), flush=True)
             return False
         if isinstance(tracker, dict):
             monitor = hydra_forecast_monitor()
@@ -7459,9 +7438,7 @@ def process_state(
                 emit_telemetry(devourForecast=forecast_telemetry)
             if forecast_retry is not None and forecast_retry.cause == "damage":
                 print(
-                    "六头蛇开局推演触发重整：预计整场伤害 "
-                    f"{damage_text(forecast_retry.predicted_damage)}，低于最低伤害 "
-                    f"{damage_text(forecast_retry.minimum_damage)}。",
+                    ui_text("ctl.forecastDamageRegroup", damage=damage_text(forecast_retry.predicted_damage), damage2=damage_text(forecast_retry.minimum_damage)),
                     flush=True,
                 )
             elif forecast_retry is not None:
@@ -7483,14 +7460,11 @@ def process_state(
                     forecast_retry.actual_hero_type_id,
                     f"英雄 {forecast_retry.actual_hero_type_id}",
                 )
-                what = (f"预计第 {forecast_retry.mark_index} 个标记的“{actual_label}”约第 "
-                        f"{forecast_retry.apply_turn} 回合被吞下"
+                what = (ui_text("ctl.forecastSwallow", markIndex=forecast_retry.mark_index, actualLabel=actual_label, applyTurn=forecast_retry.apply_turn)
                         if forecast_retry.swallowed else
-                        f"预计第 {forecast_retry.mark_index} 个标记（约第 "
-                        f"{forecast_retry.apply_turn} 回合）为“{actual_label}”")
+                        ui_text("ctl.forecastMark", markIndex=forecast_retry.mark_index, applyTurn=forecast_retry.apply_turn, actualLabel=actual_label))
                 print(
-                    f"六头蛇开局推演触发重整条件 {forecast_retry.condition_index + 1}：{what}，"
-                    f"但{requirement}。",
+                    ui_text("ctl.forecastConditionTriggered", value=forecast_retry.condition_index + 1, what=what, requirement=requirement),
                     flush=True,
                 )
             if forecast_retry is not None:
@@ -7508,7 +7482,7 @@ def process_state(
                         boss_mode="hydra",
                     )
                 else:
-                    print("观察模式：不会实际触发免费重整。", flush=True)
+                    print(ui_text("ctl.observeMode"), flush=True)
                 return False
     objective_report = evaluate_objectives(config, state)
     if runtime_state is not None and ACTIVE_BOSS_MODE == "chimera":
@@ -7524,11 +7498,7 @@ def process_state(
         or objective_report.minimum_damage > 0
     ):
         print(
-            "目标进度："
-            f"必要试炼 {len(objective_report.completed_trial_ids)}/"
-            f"{len(objective_report.mandatory_trial_ids)}，"
-            f"伤害 {damage_text(objective_report.current_damage)}/"
-            f"{damage_text(objective_report.minimum_damage)}",
+            ui_text("ctl.goalProgress", completedTrialIdsCount=len(objective_report.completed_trial_ids), mandatoryTrialIdsCount=len(objective_report.mandatory_trial_ids), damage=damage_text(objective_report.current_damage), damage2=damage_text(objective_report.minimum_damage)),
             flush=True,
         )
     if objective_report.mandatory_impossible:
@@ -7543,7 +7513,7 @@ def process_state(
             else "free_regroup_and_retry_manual"
         )
         print(
-            "必要试炼已不可完成："
+            ui_text("ctl.trialsImpossible")
             + ", ".join(map(str, objective_report.impossible_trial_ids)),
             flush=True,
         )
@@ -7568,9 +7538,9 @@ def process_state(
             )
             raise FreeRegroupCompleted()
         if not execute:
-            print("观察模式：不会实际触发免费重整。", flush=True)
+            print(ui_text("ctl.observeMode"), flush=True)
         else:
-            print(f"未知的必要试炼失败处理方式：{behavior}", flush=True)
+            print(ui_text("ctl.unknownTrialFailure", behavior=behavior), flush=True)
         return False
     if ACTIVE_BOSS_MODE == "chimera":
         refresh_trial_planner_runtime(runtime_state, state)
@@ -7592,15 +7562,13 @@ def process_state(
         or (
             f"英雄 {state['activeHeroTypeId']}"
             if isinstance(state.get("activeHeroTypeId"), int)
-            else "未知英雄"
+            else ui_text("ctl.unknownChampion")
         )
     )
     if decision is None:
         diagnostic = no_decision_diagnostic(config, state)
         print(
-            f"未行动：当前英雄“{active_hero_label}”没有匹配且可安全执行的规则"
-            "（条件不满足、技能未就绪或没有合法目标）；"
-            f"{diagnostic}；接管保持等待。",
+            ui_text("ctl.noAction", activeHeroLabel=active_hero_label, diagnostic=diagnostic),
             flush=True,
         )
         return False
@@ -7610,17 +7578,16 @@ def process_state(
     if is_unresolved_skill_name(skill.get("name")):
         skill_label = _INITIAL_SKILL_NAMES.get(skill.get("typeId"), skill_label)
     action_summary = (
-        f"准备执行：英雄“{active_hero_label}”命中规则“{decision.rule}”，"
-        f"使用“{skill_label}”，目标“{decision.target_label}”；"
+        ui_text("ctl.preparing", activeHeroLabel=active_hero_label, rule=decision.rule, skillLabel=skill_label, targetLabel=decision.target_label)
     )
     if decision.rule.endswith("首回合技能"):
         if ACTIVE_BOSS_MODE == "chimera":
             action_summary += (
-                f"英雄在 {state.get('_chimeraFormPhase', '当前')} 形态的第一次行动；"
+                ui_text("ctl.firstActionInForm", get=state.get('_chimeraFormPhase', '当前'))
             )
         else:
             action_summary += (
-                f"英雄个人首回合（游戏计数 {state.get('activeHeroTurnCount', '?')}）；"
+                ui_text("ctl.personalFirstTurn", get=state.get('activeHeroTurnCount', '?'))
             )
     if ACTIVE_BOSS_MODE == "hydra":
         hydra = state.get("hydra", {})
@@ -7633,17 +7600,13 @@ def process_state(
             boss.get("dead") is not True
             for boss in state_entities(state, "bosses")
         )
-        action_summary += f"六头蛇第 {hydra_turn} 回合，在场目标 {living_heads} 个"
+        action_summary += ui_text("ctl.hydraTurnState", hydraTurn=hydra_turn, livingHeads=living_heads)
     else:
         chimera = state.get("chimera", {})
         predicted_form = next_chimera_form(state)
         remaining_form_turns = turns_until_form_change(state)
         action_summary += (
-            f"奇美拉第 {chimera.get('turnCount', '?')} 回合，"
-            f"形态 {chimera.get('currentForm', 'Unknown')}，"
-            f"下一形态 {predicted_form or 'Unknown'}，"
-            f"距切换 "
-            f"{remaining_form_turns if remaining_form_turns is not None else '?'} 回合"
+            ui_text("ctl.chimeraTurnState", get=chimera.get('turnCount', '?'), get2=chimera.get('currentForm', 'Unknown'), predictedForm=predicted_form or 'Unknown', remainingFormTurns=remaining_form_turns if remaining_form_turns is not None else '?')
         )
     print(action_summary, flush=True)
     execute = execute_requested and config.get("mode") == "execute"
@@ -7673,23 +7636,23 @@ def process_state(
         nonce=nonce,
     )
     if not result.get("queued"):
-        raise RuntimeError(f"代理拒绝接收请求：{result}")
+        raise RuntimeError(ui_text("ctl.requestRejected", result=result))
     acknowledgement = wait_for_command_ack(
         ipc,
         session_id=session_id,
         nonce=nonce,
     )
     if acknowledgement is None:
-        raise RuntimeError(f"代理回执超时（请求 {nonce}）")
+        raise RuntimeError(ui_text("ctl.ackTimeoutNonce", nonce=nonce))
     emit_telemetry(command={"status": acknowledgement.get("status"), "reason": acknowledgement.get("reason")})
     expected_status = "submitted" if execute else "validated"
     if acknowledgement.get("status") != expected_status:
         if recoverable_command_rejection(acknowledgement):
             rejection_reason = str(acknowledgement.get("reason") or "")
             changed_label = (
-                "代理二次安全校验未通过"
+                ui_text("ctl.secondCheckFailed")
                 if rejection_reason == "guard_failed"
-                else "游戏状态已由手动操作或回合推进改变"
+                else ui_text("ctl.stateChangedByHand")
             )
             diagnostic_reader = getattr(ipc, "diagnostic", None)
             guard_detail = (
@@ -7698,20 +7661,17 @@ def process_state(
                 else None
             )
             detail_suffix = (
-                f"；校验详情：{guard_detail}"
+                ui_text("ctl.guardDetail", guardDetail=guard_detail)
                 if isinstance(guard_detail, str) and guard_detail
                 else ""
             )
             print(
-                f"未执行：英雄“{active_hero_label}”命中规则“{decision.rule}”，"
-                f"但{changed_label}（{rejection_reason or '状态已变化'}）；"
-                "旧请求已被安全拒绝，"
-                f"接管保持运行并等待下一回合{detail_suffix}。",
+                ui_text("ctl.notExecuted", activeHeroLabel=active_hero_label, rule=decision.rule, changedLabel=changed_label, rejectionReason=rejection_reason or ui_text("ctl.stateChanged"), detailSuffix=detail_suffix),
                 flush=True,
             )
             return False
         raise RuntimeError(
-            f"代理拒绝请求：{acknowledgement.get('reason') or acknowledgement.get('status')}"
+            ui_text("ctl.requestRefused", get=acknowledgement.get('reason') or acknowledgement.get('status'))
         )
     if ACTIVE_BOSS_MODE == "chimera":
         try:
@@ -7748,15 +7708,12 @@ def process_state(
             if lifecycle_after.get("screen") == "result":
                 require_confirmed_result(ipc, lifecycle_after)
                 print(
-                    f"执行成功：英雄“{active_hero_label}”已按规则“{decision.rule}”"
-                    f"施放“{skill_label}”，随后战斗进入结算画面。",
+                    ui_text("ctl.doneToResult", activeHeroLabel=active_hero_label, rule=decision.rule, skillLabel=skill_label),
                     flush=True,
                 )
                 return True
             print(
-                f"已提交：英雄“{active_hero_label}”已按规则“{decision.rule}”"
-                f"施放“{skill_label}”，但暂未观察到回合推进；"
-                "本回合不会重复操作，接管保持运行并继续等待新状态。",
+                ui_text("ctl.submittedNoAdvance", activeHeroLabel=active_hero_label, rule=decision.rule, skillLabel=skill_label),
                 flush=True,
             )
             return True
@@ -7788,15 +7745,14 @@ def process_state(
                     f"/{target_value:g}" if target_value is not None else ""
                 )
                 print(
-                    f"试炼 {decision.trial_id} 计数："
-                    f"{before_current:g}→{after_current:g}{target_label}"
-                    + ("（本技能已记为有效贡献者）" if progressed else ""),
+                    ui_text("ctl.trialCount", trialId=decision.trial_id, beforeCurrent=f"{before_current:g}", afterCurrent=f"{after_current:g}", targetLabel=target_label)
+                    + (ui_text("ctl.contributor") if progressed else ""),
                     flush=True,
                 )
         if capability_memory is not None:
             learned = capability_memory.observe_state(advanced)
             if learned:
-                print(f"已从本次动作学习 {learned} 条技能效果能力。", flush=True)
+                print(ui_text("ctl.learnedEffects", learned=learned), flush=True)
             skill_type_id = skill.get("typeId")
             if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
                 capability_memory.observe_action_damage(
@@ -7818,25 +7774,20 @@ def process_state(
                 if isinstance(next_hydra, dict)
                 else "?"
             )
-            progress_label = f"六头蛇回合 {previous_turn}→{next_turn}"
+            progress_label = ui_text("ctl.hydraTurnAdvance", previousTurn=previous_turn, nextTurn=next_turn)
         else:
             previous_chimera = state.get("chimera", {})
             next_chimera = advanced.get("chimera", {})
             progress_label = (
-                f"奇美拉回合 {previous_chimera.get('turnCount', '?')}→"
-                f"{next_chimera.get('turnCount', '?')}，"
-                f"形态 {previous_chimera.get('currentForm', 'Unknown')}→"
-                f"{next_chimera.get('currentForm', 'Unknown')}"
+                ui_text("ctl.chimeraTurnAdvance", get=previous_chimera.get('turnCount', '?'), get2=next_chimera.get('turnCount', '?'), get3=previous_chimera.get('currentForm', 'Unknown'), get4=next_chimera.get('currentForm', 'Unknown'))
             )
         print(
-            f"执行成功：英雄“{active_hero_label}”已按规则“{decision.rule}”"
-            f"施放“{skill_label}”，目标“{decision.target_label}”；{progress_label}。",
+            ui_text("ctl.done", activeHeroLabel=active_hero_label, rule=decision.rule, skillLabel=skill_label, targetLabel=decision.target_label, progressLabel=progress_label),
             flush=True,
         )
     else:
         print(
-            f"只读验证完成：英雄“{active_hero_label}”会命中规则“{decision.rule}”，"
-            f"使用“{skill_label}”，目标“{decision.target_label}”；未向游戏提交行动。",
+            ui_text("ctl.dryRun", activeHeroLabel=active_hero_label, rule=decision.rule, skillLabel=skill_label, targetLabel=decision.target_label),
             flush=True,
         )
     return True
@@ -7923,7 +7874,7 @@ def main() -> int:
         )
         validate_strategy_config(config, boss_mode=args.boss_mode)
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"策略配置无效，未接管游戏：{error}", flush=True)
+        print(ui_text("ctl.invalidConfig", error=error), flush=True)
         return 2
     agent = args.agent.resolve()
     requested_agent_parts = {part.lower() for part in agent.parts}
@@ -7946,7 +7897,7 @@ def main() -> int:
     try:
         mutex.acquire()
     except RuntimeError:
-        print(f"PID {args.pid} 已有一个控制器在运行。", flush=True)
+        print(ui_text("ctl.controllerRunning", pid=args.pid), flush=True)
         return 4
     session_id = 0
     takeover_armed = False
@@ -7962,13 +7913,12 @@ def main() -> int:
             emit_telemetry(lifecycle={"event": "agent_attached", "agent": pick(header,
                 ("buildId", "instanceId", "commandVersion", "sharedStateVersion", "compatible", "hooksReady", "ready"))})
             if not header.get("ready"):
-                print(f"代理版本不匹配或尚未就绪：{header}", flush=True)
+                print(ui_text("ctl.agentMismatch", header=header), flush=True)
                 return 5
             binding = account_binding(ipc.account(), args.pid)
             if args.account_name is not None and args.account_name != binding.account_name:
                 print(
-                    f"所选游戏内用户名已变化：预期 {args.account_name}，"
-                    f"当前 {binding.account_name}",
+                    ui_text("ctl.userNameChanged", accountName=args.account_name, accountName2=binding.account_name),
                     flush=True,
                 )
                 return 5
@@ -7977,8 +7927,7 @@ def main() -> int:
                 and args.account_user_id != binding.user_id
             ):
                 print(
-                    f"所选游戏玩家 ID 已变化：预期 {args.account_user_id}，"
-                    f"当前 {binding.user_id}",
+                    ui_text("ctl.userIdChanged", accountUserId=args.account_user_id, userId=binding.user_id),
                     flush=True,
                 )
                 return 5
@@ -7994,14 +7943,13 @@ def main() -> int:
                 boss_mode=args.boss_mode,
             )
             if not takeover.get("accepted"):
-                print(f"代理拒绝接管会话：{takeover}", flush=True)
+                print(ui_text("ctl.takeoverRejected", takeover=takeover), flush=True)
                 return 5
             takeover_armed = True
             require_takeover_active(ipc, session_id)
             require_account_binding(ipc, binding)
             print(
-                f"已绑定游戏内账户 {binding.account_name}（玩家 ID {binding.user_id}）；"
-                "账户变化会立即停止接管。",
+                ui_text("ctl.accountBound", accountName=binding.account_name, userId=binding.user_id),
                 flush=True,
             )
             runtime_state: dict[str, Any] = {"regroupRetries": 0}
@@ -8045,7 +7993,7 @@ def main() -> int:
             if args.once:
                 state = ipc.decision()
                 if not is_battle_decision_state(state):
-                    print("尚未收到每回合决策快照")
+                    print(ui_text("ctl.noDecisionSnapshot"))
                     return 2
                 require_account_binding(ipc, binding)
                 return 0 if process_state(
@@ -8062,8 +8010,7 @@ def main() -> int:
                 ) else 3
 
             print(
-                f"正在监听测试账户 PID {args.pid}；"
-                "点击游戏内暂停或主工具的“暂停接管”即可停止。",
+                ui_text("ctl.listening", pid=args.pid),
                 flush=True,
             )
             last_sequence: int | None = None
@@ -8079,8 +8026,7 @@ def main() -> int:
                 last_sequence = initial.get("sequence")
                 if auto_start_attempted:
                     print(
-                        f"已从{mode_spec(args.boss_mode)['label']}准备界面启动战斗；"
-                        "忽略进入战斗前的旧回合快照，等待首个新回合。",
+                        ui_text("ctl.startedFromPrep", bossMode=mode_spec(args.boss_mode)['label']),
                         flush=True,
                     )
                 else:
@@ -8167,23 +8113,23 @@ def main() -> int:
                             submitted += 1
                         nonce += 1
                         if args.max_commands > 0 and submitted >= args.max_commands:
-                            print("已达到本次测试的动作上限。", flush=True)
+                            print(ui_text("ctl.actionLimit"), flush=True)
                             return 0
                 time.sleep(0.05)
     except KeyboardInterrupt:
-        print("已停止。")
+        print(ui_text("ctl.stopped"))
         return 0
     except ControllerPaused:
         emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "user_paused"})
-        print("已按用户要求暂停接管；游戏保持在当前状态。", flush=True)
+        print(ui_text("ctl.pausedByUser"), flush=True)
         return 0
     except ParentProcessExited:
         emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "parent_exited"})
-        print("主工具已经关闭；控制器已解除接管并退出。", flush=True)
+        print(ui_text("ctl.toolClosed"), flush=True)
         return 0
     except GamePaused:
         emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "game_paused"})
-        print("检测到游戏内暂停按钮；工具已解除接管。", flush=True)
+        print(ui_text("ctl.pausedInGame"), flush=True)
         return 8
     except TakeoverInterrupted as error:
         emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "takeover_interrupted"})
@@ -8193,13 +8139,13 @@ def main() -> int:
         return 7
     except Exception as error:
         emit_telemetry(lifecycle={"event": "controller_stopped", "reason": "exception", "errorType": type(error).__name__})
-        print(f"控制器为安全起见已停止：{error}", flush=True)
+        print(ui_text("ctl.stoppedForSafety", error=error), flush=True)
         return 5
     finally:
         try:
             capability_memory.save_if_changed(capability_cache)
         except OSError as error:
-            print(f"技能能力缓存写入失败：{error}", flush=True)
+            print(ui_text("ctl.capabilityCacheFailed", error=error), flush=True)
         if takeover_armed and session_id:
             try:
                 set_takeover(
@@ -8209,7 +8155,7 @@ def main() -> int:
                     active=False,
                 )
             except Exception as error:
-                print(f"接管会话清理失败：{error}", flush=True)
+                print(ui_text("ctl.cleanupFailed", error=error), flush=True)
         _PAUSE_EVENT = None
         pause_event.close()
         mutex.close()

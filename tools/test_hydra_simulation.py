@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 
 from chimera_capture_live import HydraCaptureMonitor
-from hydra_simulation import HydraSimulationSession, aggregate, run_timeline, summarize_run
+from hydra_simulation import HydraSimulationSession, aggregate, battle_report, forecast_run, run_timeline, summarize_run
 from hydra_simulation_service import HydraSimulationService, list_captures
 from test_hydra_offline_policy import fixture
 
@@ -88,6 +88,33 @@ def test_aggregate_and_timeline() -> None:
     assert [row["damage"] for row in rows] == [500, 0, 200]
     assert rows[0]["state"]["actors"][0]["fx"] == [[150, 2, 1]] and "state" not in rows[2]
     assert rows[1]["marked"] == [1] and rows[1]["hydraTurns"] == 1 and rows[2]["hydraTurns"] == 2
+
+
+def test_a_live_forecast_becomes_a_report_run() -> None:
+    result, strategy = result_fixture()
+    engine = result["engine"]
+    forecast = {"status": "complete", "reason": None, "elapsedSeconds": 1.0, "marks": result["marks"],
+                "engineTurns": engine["turns"], **{key: value for key, value in engine.items() if key != "turns"},
+                "decisions": [{**decision, "command": {"skillTypeId": 1001, "targetId": 8}, "rngBefore": [1, 2, 3, 4]}
+                              for decision in result["decisions"]]}
+    run = forecast_run(forecast)
+    assert run["status"] == "complete" and run["engine"]["turns"] == engine["turns"]
+    assert run["decisions"][0]["skillTypeId"] == 1001 and "rngBefore" not in run["decisions"][0]
+    assert summarize_run(run, strategy)["damage"] == 700
+    assert [row["source"] for row in run_timeline(run)] == ["policy", "enemy", "policy"]
+    # The engine stopped on a hero without an action: a stuck run with its report.
+    stuck = {"reason": "no_matching_rule", "turn": 3, "activeHeroTypeId": 100}
+    stopped = {**forecast, "stopReason": "policy_stopped",
+               "decisions": forecast["decisions"] + [{"status": "unknown", "stuck": stuck}]}
+    run = forecast_run(stopped)
+    assert run["status"] == "stuck" and run["reason"] == "no_matching_rule" and run["stuck"] == stuck
+    report = battle_report("battle-x", strategy, {"stageId": 8039003, "teamHeroTypeIds": [100, 200]}, "forecast:x", stopped)
+    assert report is not None
+    summary, saved = report
+    assert summary["kind"] == "battle" and summary["capture"]["difficulty"] == 3
+    assert summary["aggregate"]["stuckRuns"][0]["activeHeroTypeId"] == 100 and saved["stuck"] == stuck
+    # No report without a battle the engine played.
+    assert forecast_run({"status": "unknown", "reason": "forecast_timeout"}) is None
 
 
 def _hydra_folder(root: Path, name: str, setup: str) -> None:

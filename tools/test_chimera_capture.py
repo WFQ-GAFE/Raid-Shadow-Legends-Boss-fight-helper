@@ -12,6 +12,7 @@ import time
 
 from capture_identity import capture_key, drop_repeats, unique_first
 from chimera_capture_live import ChimeraCaptureMonitor, INPUT_WAIT_SECONDS
+from ui_text import render
 from chimera_replay_source import validate_chimera_replay_source
 from hydra_replay_source import SETTINGS_SOURCE, SETUPS_SOURCE, ReplaySourceError
 
@@ -152,7 +153,7 @@ def test_monitor_saves_source_and_trace_from_opening() -> None:
             "trialCatalog": {"difficulties": [1, 2]}}
         assert json.loads((folders[0] / "strategy.json").read_text("utf-8"))["mode"] == "execute"
         assert "200001" in json.loads((folders[0] / "capability-memory.json").read_text("utf-8"))["skills"]
-        assert any("已保存" in message for message in messages)
+        assert any("已保存" in render(message, "zh-CN") for message in messages)
 
 
 def test_monitor_skips_mid_battle_takeover_and_reports_missing_source() -> None:
@@ -225,4 +226,4 @@ def test_monitor_keeps_one_opening_per_set_up() -> None:
             time.sleep(0.01)  # folder names carry the time in milliseconds
         folders = list(root.iterdir())
         assert len(folders) == 1 and monitor.folder == folders[0]
-        assert any("已删除 1 份队伍配置相同" in message for message in messages)
+        assert any("已删除 1 份队伍配置相同" in render(message, "zh-CN") for message in messages)

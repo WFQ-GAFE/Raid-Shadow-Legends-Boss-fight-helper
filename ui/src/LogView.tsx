@@ -1,6 +1,9 @@
 import { useLayoutEffect, useRef, useState } from 'react'
+import { backendText, tr, useI18n } from './i18n'
 
+// Log lines are backend text: message tokens, or Chinese from before 1.1.2.
 export function LogView({ logs }: { logs: string[] }) {
+  const { locale } = useI18n()
   const element = useRef<HTMLPreElement>(null)
   const following = useRef(true)
   const [visible, setVisible] = useState(logs)
@@ -22,5 +25,5 @@ export function LogView({ logs }: { logs: string[] }) {
     const view = event.currentTarget
     following.current = view.scrollHeight - view.clientHeight - view.scrollTop <= 4
     if (following.current) setVisible(logs)
-  }}>{visible.length ? visible.join('\n') : '尚无运行记录'}</pre>
+  }}>{visible.length ? visible.map((line) => backendText(line, locale)).join('\n') : tr('log.noRunLogYet')}</pre>
 }

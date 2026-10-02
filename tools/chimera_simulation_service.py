@@ -32,6 +32,7 @@ from capture_identity import unique_first
 from team_preview import TeamSnapshotStore
 from team_setups import prepare_team_input, team_report
 from strategy_storage import atomic_write_json
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
@@ -369,6 +370,28 @@ def recent_simulations(limit: int = 10, root: Path | None = None) -> list[dict[s
     return [row for row in rows if row is not None]
 
 
+def engine_bundle(pid: int | None) -> Path:
+    """The offline engine's private copy of the game files (see ensure_runtime_bundle)."""
+    build = None
+    if isinstance(pid, int):
+        try:
+            build = game_build_directory(pid)
+        except Exception:
+            build = None
+    if build is None:
+        # The game may be closed: reuse the installation the last engine
+        # bundle was copied from.
+        for recorded in sorted(RUNTIME_ROOT.glob("*/bundle.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            sources = (_read_json(recorded) or {}).get("sources", {})
+            source = Path(str(sources.get("GameAssembly.dll", "")))
+            if source.is_file():
+                build = source.parent
+                break
+    if build is None:
+        raise ForecastSetupError(ui_text("simService.gameNotFound"))
+    return ensure_runtime_bundle(probe_source(), build, newest_static_data())
+
+
 class SimulationService:
     """One simulation at a time, run in the background of the desktop app.
 
@@ -393,43 +416,27 @@ class SimulationService:
 
     @staticmethod
     def _bundle(pid: int | None) -> Path:
-        build = None
-        if isinstance(pid, int):
-            try:
-                build = game_build_directory(pid)
-            except Exception:
-                build = None
-        if build is None:
-            # The game may be closed: reuse the installation the last engine
-            # bundle was copied from.
-            for recorded in sorted(RUNTIME_ROOT.glob("*/bundle.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-                sources = (_read_json(recorded) or {}).get("sources", {})
-                source = Path(str(sources.get("GameAssembly.dll", "")))
-                if source.is_file():
-                    build = source.parent
-                    break
-        if build is None:
-            raise ForecastSetupError("找不到游戏安装目录；请先打开游戏")
-        return ensure_runtime_bundle(probe_source(), build, newest_static_data())
+        return engine_bundle(pid)
 
     def status(self) -> dict[str, Any] | None:
         with self.lock:
             return copy.deepcopy(self.job) if self.job else None
 
     def start(self, strategy: dict[str, Any], strategy_meta: dict[str, Any], capture_id: str, runs: int,
-              pid: int | None = None, team: dict[str, Any] | None = None) -> dict[str, Any]:
+              pid: int | None = None, team: dict[str, Any] | None = None,
+              capture_folder: Path | None = None) -> dict[str, Any]:
         """``team``: another team to put into the saved opening (team_setups), or None for its own."""
         if not isinstance(strategy, dict):
-            raise ValueError("缺少策略")
+            raise ValueError(ui_text("simService.missingStrategy"))
         controller.require_list_execution(strategy)
         runs = max(1, min(MAX_RUNS, int(runs)))
-        folder = self._capture_folder(str(capture_id))
+        folder = capture_folder if capture_folder is not None else self._capture_folder(str(capture_id))
         with self.lock:
             if self.job and self.job.get("status") == "running":
-                raise RuntimeError("已有模拟正在进行")
+                raise RuntimeError(ui_text("simService.alreadyRunning"))
             simulation_id = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
             self.job = {"id": simulation_id, "status": "running", "runs": runs, "finishedRuns": 0,
-                        "currentBossTurn": None, "phase": "preparing", "message": "准备离线引擎",
+                        "currentBossTurn": None, "phase": "preparing", "message": ui_text("simService.preparingEngine"),
                         "startedAt": time.strftime("%H:%M:%S")}
             self.cancel.clear()
         thread = threading.Thread(target=self._work, name=f"{self.boss_mode}-simulation", daemon=True,
@@ -446,7 +453,7 @@ class SimulationService:
     def _capture_folder(self, capture_id: str) -> Path:
         folder = (self.capture_root / capture_id).resolve()
         if folder.parent != self.capture_root.resolve() or not (folder / "capture-provenance.json").is_file():
-            raise ValueError("找不到这次战斗的开局数据")
+            raise ValueError(ui_text("simService.openingNotFound"))
         return folder
 
     def _capture_facts(self, provenance: dict[str, Any]) -> dict[str, Any]:
@@ -566,10 +573,10 @@ class SimulationService:
                 with self.lock:
                     if self.job:
                         self.job["finishedRuns"] += 1
-                        self.job["message"] = f"已完成 {self.job['finishedRuns']}/{runs} 场"
+                        self.job["message"] = ui_text("simService.runsDone", job=self.job['finishedRuns'], runs=runs)
                         self.job["phase"] = "running"
 
-            self._update(phase="running", message=f"正在模拟 0/{runs} 场")
+            self._update(phase="running", message=ui_text("simService.runsStarting", runs=runs))
             with ThreadPoolExecutor(max_workers=parallel_runs(runs)) as pool:
                 list(pool.map(one, range(runs)))
             done = [item for item in summaries if item is not None]
@@ -578,18 +585,18 @@ class SimulationService:
             summary["aggregate"] = self._aggregate(done, strategy)
             summary["status"] = "cancelled" if self.cancel.is_set() else "complete"
             self._update(status=summary["status"], phase=summary["status"],
-                         message="模拟完成" if summary["status"] == "complete" else "已停止")
+                         message=ui_text("simService.complete") if summary["status"] == "complete" else ui_text("simService.stopped"))
         except (ForecastSetupError, ConversionError, ValueError, OSError) as error:
             summary["status"] = "failed"
             summary["reason"] = str(error)
             note = failure_advice(self.boss_mode, error)
-            self._update(status="failed", phase="failed", reason=str(error), message=f"模拟无法进行：{error}",
+            self._update(status="failed", phase="failed", reason=str(error), message=ui_text("simService.cannotRun", error=error),
                          **({"advice": note} if note else {}))
         except Exception as error:  # Never let a simulation take down the app.
             summary["status"] = "failed"
             summary["reason"] = f"{type(error).__name__}: {error}"
             self._update(status="failed", phase="failed", reason=type(error).__name__,
-                         message=f"模拟失败：{type(error).__name__}", advice=failure_advice(self.boss_mode, error))
+                         message=ui_text("simService.failed", name=type(error).__name__), advice=failure_advice(self.boss_mode, error))
         finally:
             try:
                 if output.is_dir():
@@ -614,21 +621,21 @@ class SimulationService:
                 else self.simulation_root)
         folder = (root / str(simulation_id)).resolve()
         if folder.parent != root.resolve():
-            raise FileNotFoundError("模拟记录不存在")
+            raise FileNotFoundError(ui_text("simService.recordNotFound"))
         return folder
 
     def load(self, simulation_id: str) -> dict[str, Any]:
         folder = self._folder(simulation_id)
         summary = _read_json(folder / "summary.json")
         if not isinstance(summary, dict):
-            raise FileNotFoundError("模拟记录不存在")
+            raise FileNotFoundError(ui_text("simService.recordNotFound"))
         return summary
 
     def load_run(self, simulation_id: str, index: int) -> dict[str, Any]:
         folder = self._folder(simulation_id)
         result = read_run(folder, index)
         if not isinstance(result, dict):
-            raise FileNotFoundError("这一场的记录不存在")
+            raise FileNotFoundError(ui_text("simService.runNotFound"))
         engine = result.get("engine") or {}
         return {"index": int(index), "status": result.get("status"), "reason": result.get("reason"),
                 "seed": engine.get("seed"), "stuck": result.get("stuck"), **self._run_view(result)}

@@ -17,6 +17,7 @@ from controller_manager import ControllerManager
 from controller_pause import ControllerPauseEvent
 from hydra_state import hydra_head_is_devouring, hydra_devouring_head_ids
 from strategy_storage import StrategyStoreError, atomic_write_json, read_object, recover_strategy_store, storage_health, write_strategy_store
+from ui_text import render
 
 
 def test_cancel_before_spawn() -> None:
@@ -36,7 +37,7 @@ def test_cancel_before_spawn() -> None:
     ):
         manager._prepare_and_run(os.getpid(), "offline", 1, "hydra")
     launch.assert_not_called()
-    assert manager.status == "已暂停" and not manager.snapshot()["running"]
+    assert render(manager.status, "zh-CN") == "已暂停" and not manager.snapshot()["running"]
 
 
 def test_cancel_survives_child_initialization() -> None:
@@ -76,7 +77,7 @@ def test_cancel_during_process_handoff() -> None:
     ):
         manager._prepare_and_run(os.getpid(), "offline", 1, "hydra")
     assert observed == [True]
-    assert manager.status == "已暂停"
+    assert render(manager.status, "zh-CN") == "已暂停"
 
 
 def test_corrupt_store_is_preserved_and_recoverable() -> None:

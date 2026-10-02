@@ -1,32 +1,34 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import { Search, Users, X } from 'lucide-react'
-import type { UiLanguage } from './i18n'
+import { ArrowLeft, ArrowRight, Crown, Info, Search, Sparkles, Users, X } from 'lucide-react'
+import { backendText, translate, type Locale, type MessageKey, type UiLanguage, useI18n } from './i18n'
+import { championId, championTags, effectInfo, type EffectLike, type HeroData, type RosterHero } from './heroData'
+import { SCALING_KEYS, SPECIAL_KEYS, STAT_ORDER, auraApplies, auraText, labeler } from './heroLabels'
+import { HeroProfile } from './HeroProfile'
 
 // Choosing a strategy group's team from the account's champions without the
 // preparation screen (agent roster request: basic data only; gear is read when
-// the strategy is saved or simulated).
+// the strategy is saved or simulated). Champions are clicked or dragged into
+// the team; the team's order is the battle order and slot 1 is the leader.
 
-export type RosterHero = {
-  id: number
-  typeId: number
-  rarity: number    // 1 Common .. 6 Mythical
-  grade: number     // stars
-  level: number
-  empower: number
-  power?: number | null
-  vault: boolean    // Master Vault (主仓库)
-  reserve: boolean  // Reserve Vault (储备仓库)
-}
+export type { RosterHero } from './heroData'
 export type ChosenTeam = { heroTypeIds: number[]; heroInstanceIds: number[] }
 
 type Place = 'champions' | 'vault' | 'reserve'
-const RARITIES: [number, string, string][] = [
-  [6, '神话', 'Mythical'], [5, '传奇', 'Legendary'], [4, '史诗', 'Epic'],
-  [3, '稀有', 'Rare'], [2, '罕见', 'Uncommon'], [1, '普通', 'Common'],
+type Slots = (RosterHero | null)[]
+type DragSource = { kind: 'roster'; hero: RosterHero } | { kind: 'slot'; index: number }
+// HeroType.Rarity: 1 Common .. 6 Mythical.
+const RARITIES: [number, MessageKey][] = [
+  [6, 'hero.rarity.Mythical'], [5, 'hero.rarity.Legendary'], [4, 'hero.rarity.Epic'],
+  [3, 'hero.rarity.Rare'], [2, 'hero.rarity.Uncommon'], [1, 'hero.rarity.Common'],
 ]
-const PLACES: [Place, string, string][] = [['champions', '斗士库', 'Champions'], ['vault', '主仓库', 'Master Vault'], ['reserve', '储备仓库', 'Reserve Vault']]
+const PLACES: [Place, MessageKey][] = [['champions', 'picker.place.champions'], ['vault', 'picker.place.vault'], ['reserve', 'picker.place.reserve']]
+const ELEMENTS = ['Magic', 'Force', 'Spirit', 'Void']
+const ROLES = ['Attack', 'Defense', 'Health', 'Support']
 const placeOf = (hero: RosterHero): Place => (hero.reserve ? 'reserve' : hero.vault ? 'vault' : 'champions')
+// Cards are added a page at a time as the list scrolls, so a large roster opens
+// and filters without building hundreds of cards at once.
+const PAGE = 60
 
 function toggled<T>(values: Set<T>, value: T) {
   const next = new Set(values)
@@ -35,25 +37,160 @@ function toggled<T>(values: Set<T>, value: T) {
   return next
 }
 
-export function TeamPicker({ language, open, teamSize, initial, loadRoster, heroName, heroAvatar, onClose, onApply }: {
+function rarityName(locale: Locale, rarity: number) {
+  const entry = RARITIES.find(([value]) => value === rarity)
+  return entry ? translate(locale, entry[1]) : ''
+}
+
+function PickerAvatar({ hero, heroAvatar }: { hero: RosterHero; heroAvatar: (typeId: number) => ReactNode }) {
+  return <span className={`picker-avatar rarity-${hero.rarity}`}>{heroAvatar(hero.typeId)}</span>
+}
+
+function EffectGlyph({ icon, ready }: { icon?: string; ready: boolean }) {
+  const [failed, setFailed] = useState(false)
+  return icon && ready && !failed
+    ? <img className="effect-glyph" src={`/api/asset/effect/${encodeURIComponent(icon)}`} alt="" loading="lazy" onError={() => setFailed(true)} />
+    : <Sparkles size={12} />
+}
+
+type SearchOption = { key: string; label: string; kind: string; icon?: string; iconReady?: boolean; glyph?: boolean }
+
+// Type to find a buff, debuff, effect, damage basis or aura; picking one adds it
+// to the conditions. Arrow keys move, Enter picks, Escape closes the list.
+function EffectSearch({ options, chosen, placeholder, empty, onPick }: {
+  options: SearchOption[]
+  chosen: string[]
+  placeholder: string
+  empty: string
+  onPick: (key: string) => void
+}) {
+  const [text, setText] = useState('')
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
+  const box = useRef<HTMLDivElement | null>(null)
+  // A click anywhere else closes the list (focus may not move, e.g. onto a card).
+  useEffect(() => {
+    if (!open) return
+    const close = (event: PointerEvent) => { if (!box.current?.contains(event.target as Node)) setOpen(false) }
+    document.addEventListener('pointerdown', close, true)
+    return () => document.removeEventListener('pointerdown', close, true)
+  }, [open])
+  const matches = useMemo(() => {
+    const needle = text.trim().toLowerCase()
+    return options.filter((option) => !chosen.includes(option.key)
+      && (!needle || option.label.toLowerCase().includes(needle) || option.kind.toLowerCase().includes(needle))).slice(0, 60)
+  }, [options, chosen, text])
+  const pick = (key: string) => {
+    onPick(key)
+    setText('')
+    setActive(0)
+  }
+  return (
+    <div className="effect-search" ref={box} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false) }}>
+      <label className="search-box"><Sparkles size={15} />
+        <input value={text} placeholder={placeholder} role="combobox" aria-expanded={open} aria-autocomplete="list"
+          onFocus={() => setOpen(true)} onChange={(event) => { setText(event.target.value); setOpen(true); setActive(0) }}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowDown') { event.preventDefault(); setOpen(true); setActive((index) => Math.min(index + 1, matches.length - 1)) }
+            else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((index) => Math.max(index - 1, 0)) }
+            else if (event.key === 'Enter' && open && matches[active]) { event.preventDefault(); pick(matches[active].key) }
+            else if (event.key === 'Escape') setOpen(false)
+          }} /></label>
+      {open && <div className="effect-search-menu" role="listbox">
+        {matches.length ? matches.map((option, index) => (
+          <button type="button" role="option" aria-selected={index === active} key={option.key} className={index === active ? 'active' : ''}
+            onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => pick(option.key)}>
+            {option.glyph ? <EffectGlyph icon={option.icon} ready={Boolean(option.iconReady)} /> : <span className="effect-glyph-space" />}
+            <span>{option.label}</span><small>{option.kind}</small>
+          </button>)) : <p>{empty}</p>}
+      </div>}
+    </div>
+  )
+}
+
+// Only cards whose own state changed render again when a champion is chosen.
+const RosterCard = memo(function RosterCard({ language, hero, name, element, slot, blocked, heroAvatar, onClick, onOpen, onDragStart, onDragEnd }: {
+  language: UiLanguage
+  hero: RosterHero
+  name: string
+  element?: string
+  slot?: number
+  blocked: boolean
+  heroAvatar: (typeId: number) => ReactNode
+  onClick: (hero: RosterHero, event: MouseEvent) => void
+  onOpen: (hero: RosterHero, fromDoubleClick: boolean) => void
+  onDragStart: (event: DragEvent, source: DragSource) => void
+  onDragEnd: () => void
+}) {
+  const { t } = useI18n()
+  const place = placeOf(hero)
+  return (
+    <div className={`picker-card${slot ? ' active' : ''}${blocked ? ' blocked' : ''}`} draggable
+      onDragStart={(event) => onDragStart(event, { kind: 'roster', hero })} onDragEnd={onDragEnd}>
+      <button type="button" className={`head-type-option ${slot ? 'active' : ''}`} onClick={(event) => onClick(hero, event)}
+        onDoubleClick={() => onOpen(hero, true)}
+        title={slot ? t('picker.clickToRemoveDoubleClick')
+          : t('picker.clickToAddOrDrag')}>
+        <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
+        <span><strong>{element && <i className={`element-dot element-${element}`} />}{name}</strong>
+          <small>{`${hero.grade}★ · ${rarityName(language, hero.rarity)} · ${t('picker.lv', { level: hero.level })}${hero.empower ? ` · +${hero.empower}` : ''}`}</small>
+          <small>{hero.power ? t('picker.power', { power: Math.round(hero.power) }) : ''}
+            {place !== 'champions' && <b className="team-picker-place"> · {t(place === 'vault' ? 'picker.place.vault' : 'picker.place.reserve')}</b>}</small></span>
+        {slot && <em>{slot}</em>}
+      </button>
+      <button type="button" className="picker-card-info" aria-label={t('picker.profile', { name })} title={t('picker.profile2')}
+        onClick={() => onOpen(hero, false)}><Info size={14} /></button>
+    </div>
+  )
+})
+
+export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRoster, loadHeroData, effects, heroName, heroAvatar, onClose, onApply }: {
   language: UiLanguage
   open: boolean
   teamSize: number
+  bossMode: 'chimera' | 'hydra'
   initial: ChosenTeam
   loadRoster: () => Promise<RosterHero[]>
+  loadHeroData: () => Promise<HeroData | null>
+  effects: EffectLike[]
   heroName: (typeId: number) => string
   heroAvatar: (typeId: number) => ReactNode
   onClose: () => void
   onApply: (team: ChosenTeam) => void
 }) {
-  const t = (zh: string, en: string) => (language === 'en' ? en : zh)
+  // English variant of data that comes in two languages (Portuguese uses it too for now).
+  const en = language !== 'zh-CN'
+  const { t } = useI18n()
   const [roster, setRoster] = useState<RosterHero[] | null>(null)
   const [error, setError] = useState('')
-  const [chosen, setChosen] = useState<RosterHero[]>([])
+  const [slots, setSlots] = useState<Slots>(() => Array(teamSize).fill(null))
   const [query, setQuery] = useState('')
   const [grades, setGrades] = useState<Set<number>>(new Set([6, 5]))
   const [rarities, setRarities] = useState<Set<number>>(new Set())
   const [places, setPlaces] = useState<Set<Place>>(new Set(['champions']))
+  const [elements, setElements] = useState<Set<string>>(new Set())
+  const [roles, setRoles] = useState<Set<string>>(new Set())
+  const [factions, setFactions] = useState<Set<string>>(new Set())
+  // Skill conditions, all of which a champion must meet: "scaling:DEF",
+  // "aura:Speed", "aoe", "special:Heal", "buff:<group>", "debuff:<group>".
+  const [conditions, setConditions] = useState<string[]>([])
+  const [heroData, setHeroData] = useState<HeroData | null>(null)
+  const [dataState, setDataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
+  const [profile, setProfile] = useState<RosterHero | null>(null)
+  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  const [dragging, setDragging] = useState<DragSource['kind'] | null>(null)
+  const [hint, setHint] = useState('')
+  const [limit, setLimit] = useState(PAGE)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const moreRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<DragSource | null>(null)
+  const slotsRef = useRef(slots)
+  slotsRef.current = slots
+  const clickSnapshot = useRef<{ heroId: number; slots: Slots } | null>(null)
+  // Typing stays responsive; the list follows once the input has updated.
+  const search = useDeferredValue(query)
+  const labels = useMemo(() => labeler(language, heroData), [language, heroData])
+  const effectMap = useMemo(() => new Map(effects.map((effect) => [effect.token, effect])), [effects])
 
   useEffect(() => {
     if (!open) return
@@ -61,99 +198,389 @@ export function TeamPicker({ language, open, teamSize, initial, loadRoster, hero
     setRoster(null)
     setError('')
     setQuery('')
+    setProfile(null)
+    setHint('')
+    setSlots(Array(teamSize).fill(null))
     loadRoster().then((heroes) => {
       if (cancelled) return
       setRoster(heroes)
       const byId = new Map(heroes.map((hero) => [hero.id, hero]))
-      setChosen(initial.heroInstanceIds.map((id) => byId.get(id)).filter((hero): hero is RosterHero => Boolean(hero)))
+      const chosen = initial.heroInstanceIds.map((id) => byId.get(id) ?? null).slice(0, teamSize)
+      setSlots([...chosen, ...Array(Math.max(0, teamSize - chosen.length)).fill(null)])
     }).catch((reason) => {
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason))
     })
+    loadHeroData().then((data) => {
+      if (cancelled) return
+      setHeroData(data)
+      setDataState(data ? 'ready' : 'unavailable')
+    }).catch(() => { if (!cancelled) setDataState('unavailable') })
     return () => { cancelled = true }
     // The roster is read afresh each time the dialog opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
-  const shown = useMemo(() => {
-    const text = query.trim().toLowerCase()
-    return (roster ?? []).filter((hero) =>
-      (grades.size === 0 || grades.has(hero.grade)) && (rarities.size === 0 || rarities.has(hero.rarity))
-      && places.has(placeOf(hero)) && (!text || heroName(hero.typeId).toLowerCase().includes(text)))
-  }, [roster, query, grades, rarities, places, heroName])
+  useEffect(() => {
+    if (!hint) return
+    const timer = setTimeout(() => setHint(''), 3500)
+    return () => clearTimeout(timer)
+  }, [hint])
 
-  const slotOf = new Map(chosen.map((hero, index) => [hero.id, index + 1]))
-  const chosenTypes = new Set(chosen.map((hero) => hero.typeId))
-  function toggle(hero: RosterHero) {
-    setChosen((current) => current.some((item) => item.id === hero.id)
-      ? current.filter((item) => item.id !== hero.id)
-      : current.length >= teamSize || current.some((item) => item.typeId === hero.typeId) ? current : [...current, hero])
+  // Each champion's name and affinity are looked up once per roster.
+  const names = useMemo(() => new Map((roster ?? []).map((hero) => [hero.typeId, heroName(hero.typeId)])), [roster, heroName])
+  const nameOf = (typeId: number) => names.get(typeId) ?? heroName(typeId)
+  const elementOf = useMemo(() => new Map((roster ?? []).map((hero) =>
+    [hero.typeId, heroData?.heroes[String(championId(hero.typeId))]?.forms[0]?.element])), [roster, heroData])
+
+  // Buff and debuff search options: one per effect, strengths together.
+  const effectOptions = useMemo(() => {
+    if (!heroData) return null
+    const groups = { buff: new Map<string, { key: string; label: string; icon?: string; iconReady: boolean; ids: number[] }>(),
+      debuff: new Map<string, { key: string; label: string; icon?: string; iconReady: boolean; ids: number[] }>() }
+    for (const skill of Object.values(heroData.skills)) {
+      for (const kind of ['buff', 'debuff'] as const) {
+        for (const [typeId] of (kind === 'buff' ? skill.buffs : skill.debuffs) ?? []) {
+          const info = effectInfo(effectMap, heroData, typeId, language)
+          const group = groups[kind].get(info.group)
+          if (group) { if (!group.ids.includes(typeId)) group.ids.push(typeId) }
+          else groups[kind].set(info.group, { key: info.group, label: info.groupLabel, icon: info.icon, iconReady: info.iconReady, ids: [typeId] })
+        }
+      }
+    }
+    const sorted = (map: typeof groups.buff) => [...map.values()].sort((left, right) => left.label.localeCompare(right.label, language))
+    const special = new Set(Object.values(heroData.skills).flatMap((skill) => skill.special ?? []))
+    const factions = [...new Set(Object.values(heroData.heroes).map((hero) => hero.faction))].filter(Boolean).sort()
+    return { buff: sorted(groups.buff), debuff: sorted(groups.debuff),
+      special: SPECIAL_KEYS.filter((name) => special.has(name)), factions }
+  }, [heroData, effectMap, en])
+
+  const conditionLabel = useCallback((condition: string) => {
+    const [kind, value] = [condition.slice(0, condition.indexOf(':') < 0 ? condition.length : condition.indexOf(':')), condition.slice(condition.indexOf(':') + 1)]
+    if (condition === 'aoe') return t('picker.hitsAllEnemies')
+    if (kind === 'scaling') return t('picker.damageBasedOn', { value: labels.scaling(value) })
+    if (kind === 'aura') return t('picker.aura', { value: labels.stat(value) })
+    if (kind === 'special') return labels.special(value)
+    const group = effectOptions?.[kind as 'buff' | 'debuff']?.find((item) => item.key === value)
+    return group ? `${kind === 'buff' ? t('picker.buff') : t('picker.debuff')}：${group.label}` : value
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [labels, effectOptions, en])
+
+  const searchOptions = useMemo<SearchOption[]>(() => {
+    if (!effectOptions) return []
+    return [
+      ...effectOptions.buff.map((option) => ({ key: `buff:${option.key}`, label: option.label, kind: t('picker.buff'), icon: option.icon, iconReady: option.iconReady, glyph: true })),
+      ...effectOptions.debuff.map((option) => ({ key: `debuff:${option.key}`, label: option.label, kind: t('picker.debuff'), icon: option.icon, iconReady: option.iconReady, glyph: true })),
+      ...effectOptions.special.map((name) => ({ key: `special:${name}`, label: labels.special(name), kind: t('picker.effect') })),
+      { key: 'aoe', label: t('picker.hitsAllEnemies'), kind: t('chimeraSim.damage') },
+      ...SCALING_KEYS.map((value) => ({ key: `scaling:${value}`, label: t('picker.damageBasedOn', { value: labels.scaling(value) }), kind: t('chimeraSim.damage') })),
+      ...STAT_ORDER.slice(0, 7).map((value) => ({ key: `aura:${value}`, label: t('picker.aura', { value: labels.stat(value) }), kind: t('picker.leaderAura') })),
+    ]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectOptions, labels, en])
+
+  const tests = useMemo(() => conditions.map((condition) => {
+    const kind = condition.split(':')[0]
+    if (kind === 'buff' || kind === 'debuff') {
+      const ids = effectOptions?.[kind].find((item) => item.key === condition.slice(kind.length + 1))?.ids ?? []
+      return (tags: Set<string>) => ids.some((id) => tags.has(`${kind}:${id}`))
+    }
+    return (tags: Set<string>) => tags.has(condition)
+  }), [conditions, effectOptions])
+
+  const shown = useMemo(() => {
+    const text = search.trim().toLowerCase()
+    const usesData = heroData && (elements.size || roles.size || factions.size || tests.length)
+    return (roster ?? []).filter((hero) => {
+      if ((grades.size && !grades.has(hero.grade)) || (rarities.size && !rarities.has(hero.rarity)) || !places.has(placeOf(hero))) return false
+      if (text && !(names.get(hero.typeId) ?? '').toLowerCase().includes(text)) return false
+      if (!usesData) return true
+      const tags = championTags(heroData!, hero.typeId)
+      if (elements.size && ![...elements].some((value) => tags.has(`element:${value}`))) return false
+      if (roles.size && ![...roles].some((value) => tags.has(`role:${value}`))) return false
+      if (factions.size && ![...factions].some((value) => tags.has(`faction:${value}`))) return false
+      return tests.every((test) => test(tags))
+    })
+  }, [roster, search, grades, rarities, places, names, heroData, elements, roles, factions, tests])
+
+  // New filters start again from the top of the list.
+  useEffect(() => {
+    setLimit(PAGE)
+    if (listRef.current) listRef.current.scrollTop = 0
+  }, [roster, search, grades, rarities, places, elements, roles, factions, tests])
+
+  // Next page when the end of the list comes near. The observer is made again
+  // after each page, so a window tall enough to show the end keeps filling.
+  useEffect(() => {
+    const sentinel = moreRef.current
+    if (!sentinel || limit >= shown.length) return
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setLimit((current) => current + PAGE)
+    }, { root: listRef.current, rootMargin: '0px 0px 480px 0px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [limit, shown.length, roster])
+
+  const slotOf = new Map(slots.flatMap((hero, index) => (hero ? [[hero.id, index + 1] as const] : [])))
+  const chosenChampions = new Set(slots.flatMap((hero) => (hero ? [championId(hero.typeId)] : [])))
+  const chosenCount = slotOf.size
+  const full = chosenCount >= teamSize
+
+  // Puts a champion in a slot (replacing whoever is there). A champion already
+  // in the team moves there; the same champion twice is refused.
+  const place = useCallback((index: number, hero: RosterHero) => {
+    const current = slotsRef.current
+    const next = [...current]
+    const existing = next.findIndex((item) => item?.id === hero.id)
+    if (existing >= 0) {
+      [next[existing], next[index]] = [next[index], next[existing]]
+    } else {
+      if (next.some((item, at) => at !== index && item && championId(item.typeId) === championId(hero.typeId))) {
+        setHint(t('picker.thisChampionIsAlreadyIn'))
+        return
+      }
+      next[index] = hero
+    }
+    setSlots(next)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [en])
+
+  const toggle = useCallback((hero: RosterHero) => {
+    const current = slotsRef.current
+    const at = current.findIndex((item) => item?.id === hero.id)
+    if (at >= 0) {
+      setSlots(current.map((item, index) => (index === at ? null : item)))
+      return
+    }
+    const empty = current.findIndex((item) => !item)
+    if (empty < 0) {
+      setHint(t('picker.theTeamIsFullDrag'))
+      return
+    }
+    place(empty, hero)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [place, en])
+
+  // A double click opens the profile and is not a pick: its first click is undone.
+  const clickCard = useCallback((hero: RosterHero, event: MouseEvent) => {
+    if (event.detail > 1) return
+    clickSnapshot.current = { heroId: hero.id, slots: slotsRef.current }
+    toggle(hero)
+  }, [toggle])
+  const openProfile = useCallback((hero: RosterHero, fromDoubleClick: boolean) => {
+    const snapshot = clickSnapshot.current
+    if (fromDoubleClick && snapshot?.heroId === hero.id) setSlots(snapshot.slots)
+    clickSnapshot.current = null
+    setProfile(hero)
+  }, [])
+
+  // The drag shows once it has really begun: a listener after this one may
+  // still cancel it, and a cancelled drag never sends dragend.
+  const startDrag = useCallback((event: DragEvent, source: DragSource) => {
+    dragRef.current = source
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', source.kind === 'roster' ? `champion:${source.hero.id}` : `slot:${source.index}`)
+    const native = event.nativeEvent
+    setTimeout(() => {
+      if (dragRef.current !== source) return
+      if (native.defaultPrevented) dragRef.current = null
+      else setDragging(source.kind)
+    })
+  }, [])
+  const endDrag = useCallback(() => {
+    dragRef.current = null
+    setDragging(null)
+    setDropIndex(null)
+  }, [])
+  const overSlot = (event: DragEvent, index: number) => {
+    if (!dragRef.current) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    if (dropIndex !== index) setDropIndex(index)
   }
-  const avatar = (hero: RosterHero) => <span className={`picker-avatar rarity-${hero.rarity}`}>{heroAvatar(hero.typeId)}</span>
-  const rarityName = (rarity: number) => {
-    const entry = RARITIES.find(([value]) => value === rarity)
-    return entry ? t(entry[1], entry[2]) : ''
+  const dropOnSlot = (event: DragEvent, index: number) => {
+    event.preventDefault()
+    const source = dragRef.current
+    endDrag()
+    if (!source) return
+    if (source.kind === 'roster') place(index, source.hero)
+    else if (source.index !== index) {
+      const next = [...slotsRef.current]
+      ;[next[source.index], next[index]] = [next[index], next[source.index]]
+      setSlots(next)
+    }
   }
+  const move = (index: number, step: number) => {
+    const target = index + step
+    if (target < 0 || target >= teamSize) return
+    const next = [...slots]
+    ;[next[index], next[target]] = [next[target], next[index]]
+    setSlots(next)
+  }
+
+  const leader = slots[0]
+  const leaderAuras = leader && heroData ? heroData.heroes[String(championId(leader.typeId))]?.aura ?? [] : []
+  const visible = shown.length > limit ? shown.slice(0, limit) : shown
+  const team = slots.filter((hero): hero is RosterHero => Boolean(hero))
+  const needsData = dataState !== 'ready'
+  const dataNote = dataState === 'loading' ? t('picker.readingChampionData')
+    : t('picker.championDataUnavailableOpenThe')
+  const toggleCondition = (condition: string) => setConditions((current) =>
+    current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition])
+  const chip = (active: boolean, label: ReactNode, onClick: () => void, key: string, extra = '') =>
+    <button type="button" key={key} className={`chip ${extra} ${active ? 'active' : ''}`} onClick={onClick}>{label}</button>
 
   return (
     <Dialog.Root open={open} onOpenChange={(value) => { if (!value) onClose() }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content team-picker-dialog" data-i18n-skip>
+        <Dialog.Content className="dialog-content team-picker-dialog" data-i18n-skip
+          onEscapeKeyDown={(event) => { if ((event.target as HTMLElement | null)?.closest?.('.effect-search')) event.preventDefault() }}>
           <div className="dialog-heading">
-            <span><Dialog.Title><Users size={17} /> {t('选择策略组队伍', "Choose the strategy's team")}</Dialog.Title>
-              <Dialog.Description>{t(`从当前账号的英雄里选 ${teamSize} 名，点击已选的英雄可以移出；保存策略组时读取他们的装备。`, `Pick ${teamSize} of this account's champions; click a chosen one to remove it. Their gear is read when the strategy is saved.`)}</Dialog.Description></span>
-            <Dialog.Close className="icon-button" aria-label={t('关闭', 'Close')}><X size={19} /></Dialog.Close>
+            <span><Dialog.Title><Users size={17} /> {t('picker.chooseTheStrategySTeam')}</Dialog.Title>
+              <Dialog.Description>{t('picker.clickOrDragChampionsInto', { teamSize })}</Dialog.Description></span>
+            <Dialog.Close className="icon-button" aria-label={t('picker.close')}><X size={19} /></Dialog.Close>
           </div>
-          <div className={`team-row team-${teamSize} team-picker-slots`}>
-            {Array.from({ length: teamSize }, (_, index) => {
-              const hero = chosen[index]
-              return hero
-                ? <button type="button" key={hero.id} className="team-member" title={t('点击移出队伍', 'Click to remove')} onClick={() => toggle(hero)}>
-                    {avatar(hero)}<small>{heroName(hero.typeId)}</small></button>
-                : <div key={`empty-${index}`} className="team-member empty"><span className="team-picker-empty">{index + 1}</span><small>{t('空位', 'Empty')}</small></div>
-            })}
+
+          <div className="picker-team">
+            <div className={`picker-slots picker-slots-${teamSize}`}>
+              {slots.map((hero, index) => (
+                <div key={hero ? `hero-${hero.id}` : `empty-${index}`}
+                  className={`picker-slot${hero ? '' : ' empty'}${index === 0 ? ' leader' : ''}${dropIndex === index ? ' drop-target' : ''}${dragging ? ' dragging' : ''}`}
+                  draggable={Boolean(hero)} onDragStart={(event) => startDrag(event, { kind: 'slot', index })} onDragEnd={endDrag}
+                  onDragOver={(event) => overSlot(event, index)} onDragLeave={() => setDropIndex((current) => (current === index ? null : current))}
+                  onDrop={(event) => dropOnSlot(event, index)} onDoubleClick={() => hero && setProfile(hero)}
+                  title={hero ? t('picker.dragToReorderDoubleClick') : t('picker.dropAChampionHere')}>
+                  <span className="picker-slot-index">{index + 1}</span>
+                  {index === 0 && <span className="picker-slot-leader"><Crown size={11} />{t('picker.leader')}</span>}
+                  {hero ? <>
+                    <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
+                    <small>{nameOf(hero.typeId)}</small>
+                    <span className="picker-slot-actions">
+                      <button type="button" title={t('picker.moveLeft')} aria-label={t('picker.moveLeft')} disabled={index === 0} onClick={() => move(index, -1)}><ArrowLeft size={13} /></button>
+                      <button type="button" title={t('picker.remove')} aria-label={t('picker.remove')} onClick={() => toggle(hero)}><X size={13} /></button>
+                      <button type="button" title={t('picker.moveRight')} aria-label={t('picker.moveRight')} disabled={index === teamSize - 1} onClick={() => move(index, 1)}><ArrowRight size={13} /></button>
+                    </span>
+                  </> : <span className="picker-slot-empty">{t('picker.dropHere')}</span>}
+                </div>
+              ))}
+            </div>
+            <p className={`picker-aura${leaderAuras.some((aura) => !auraApplies(aura, bossMode)) ? ' inactive' : ''}`}>
+              <Crown size={13} />
+              {!leader ? t('picker.slotIsTheLeaderIts')
+                : needsData ? dataNote
+                  : leaderAuras.length ? leaderAuras.map((aura) => `${auraText(aura, labels, language)}${auraApplies(aura, bossMode) ? ''
+                    : t('picker.noEffectAgainstThe', { boss: bossMode })}`).join(t('picker.text'))
+                    : t('picker.hasNoLeaderAura', { typeId: nameOf(leader.typeId) })}
+            </p>
           </div>
-          <div className="team-picker-filters">
-            <label className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('搜索英雄名字', 'Search by name')} /></label>
-            <div className="team-picker-filter"><span>{t('星级', 'Stars')}</span><div className="chip-group">
-              <button type="button" className={`chip ${grades.size === 0 ? 'active' : ''}`} onClick={() => setGrades(new Set())}>{t('全部', 'All')}</button>
-              {[6, 5, 4, 3, 2, 1].map((grade) => <button type="button" key={grade} className={`chip ${grades.has(grade) ? 'active' : ''}`} onClick={() => setGrades((current) => toggled(current, grade))}>{grade}★</button>)}
-            </div></div>
-            <div className="team-picker-filter"><span>{t('稀有度', 'Rarity')}</span><div className="chip-group">
-              <button type="button" className={`chip ${rarities.size === 0 ? 'active' : ''}`} onClick={() => setRarities(new Set())}>{t('全部', 'All')}</button>
-              {RARITIES.map(([rarity, zh, en]) => <button type="button" key={rarity} className={`chip rarity-chip rarity-${rarity} ${rarities.has(rarity) ? 'active' : ''}`} onClick={() => setRarities((current) => toggled(current, rarity))}>{t(zh, en)}</button>)}
-            </div></div>
-            <div className="team-picker-filter"><span>{t('位置', 'Location')}</span><div className="chip-group">
-              {PLACES.map(([place, zh, en]) => <button type="button" key={place} className={`chip ${places.has(place) ? 'active' : ''}`} onClick={() => setPlaces((current) => toggled(current, place))}>{t(zh, en)}</button>)}
-            </div></div>
-          </div>
-          <div className="team-picker-list">
-            {error ? <p className="team-picker-note error">{error}</p>
-              : roster === null ? <p className="team-picker-note">{t('正在读取账号的英雄…', "Reading the account's champions…")}</p>
-                : shown.length === 0 ? <p className="team-picker-note">{t('没有符合筛选条件的英雄', 'No champions match the filters')}</p>
-                  : shown.map((hero) => {
-                    const slot = slotOf.get(hero.id)
-                    const blocked = !slot && (chosen.length >= teamSize || chosenTypes.has(hero.typeId))
-                    const place = placeOf(hero)
-                    return <button type="button" key={hero.id} className={`head-type-option ${slot ? 'active' : ''}`} disabled={blocked} onClick={() => toggle(hero)}>
-                      {avatar(hero)}
-                      <span><strong>{heroName(hero.typeId)}</strong>
-                        <small>{`${hero.grade}★ · ${rarityName(hero.rarity)} · ${t(`${hero.level} 级`, `Lv ${hero.level}`)}${hero.empower ? ` · +${hero.empower}` : ''}`}</small>
-                        <small>{hero.power ? t(`战力 ${Math.round(hero.power).toLocaleString()}`, `Power ${Math.round(hero.power).toLocaleString()}`) : ''}
-                          {place !== 'champions' && <b className="team-picker-place"> · {t(place === 'vault' ? '主仓库' : '储备仓库', place === 'vault' ? 'Master Vault' : 'Reserve Vault')}</b>}</small></span>
-                      {slot && <em>{slot}</em>}
-                    </button>
-                  })}
-          </div>
-          <div className="dialog-footer">
-            <span>{roster ? t(`显示 ${shown.length} / ${roster.length} 名英雄 · 已选 ${chosen.length}/${teamSize}`, `Showing ${shown.length} / ${roster.length} champions · chosen ${chosen.length}/${teamSize}`) : ''}</span>
-            <div>
-              <button type="button" className="button ghost" onClick={onClose}>{t('取消', 'Cancel')}</button>
-              <button type="button" className="button primary" disabled={chosen.length === 0}
-                onClick={() => onApply({ heroTypeIds: chosen.map((hero) => hero.typeId), heroInstanceIds: chosen.map((hero) => hero.id) })}>
-                {t('设为策略组队伍', "Set as the strategy's team")}</button>
+
+          <div className="picker-body">
+            <aside className="picker-sidebar">
+              <section><h4>{t('picker.stars')}</h4><div className="chip-group">
+                {chip(grades.size === 0, t('sim.all'), () => setGrades(new Set()), 'all')}
+                {[6, 5, 4, 3, 2, 1].map((grade) => chip(grades.has(grade), `${grade}★`, () => setGrades((current) => toggled(current, grade)), String(grade)))}
+              </div></section>
+              <section><h4>{t('picker.rarity')}</h4><div className="chip-group">
+                {chip(rarities.size === 0, t('sim.all'), () => setRarities(new Set()), 'all')}
+                {RARITIES.map(([rarity, key]) => chip(rarities.has(rarity), t(key), () => setRarities((current) => toggled(current, rarity)), String(rarity), `rarity-chip rarity-${rarity}`))}
+              </div></section>
+              <section><h4>{t('picker.location')}</h4><div className="chip-group">
+                {PLACES.map(([value, key]) => chip(places.has(value), t(key), () => setPlaces((current) => toggled(current, value)), value))}
+              </div></section>
+              {needsData ? <p className="team-picker-note">{dataNote}</p> : <>
+                <section><h4>{t('picker.affinity')}</h4><div className="chip-group">
+                  {ELEMENTS.map((value) => chip(elements.has(value), <><i className={`element-dot element-${value}`} />{labels.element(value)}</>, () => setElements((current) => toggled(current, value)), value))}
+                </div></section>
+                <section><h4>{t('picker.role')}</h4><div className="chip-group">
+                  {ROLES.map((value) => chip(roles.has(value), labels.role(value), () => setRoles((current) => toggled(current, value)), value))}
+                </div></section>
+                <details className="picker-details">
+                  <summary>{t('picker.faction')}{factions.size > 0 && <em>{factions.size}</em>}</summary>
+                  <div className="chip-group">
+                    {(effectOptions?.factions ?? []).map((value) => chip(factions.has(value), labels.faction(value), () => setFactions((current) => toggled(current, value)), value))}
+                  </div>
+                </details>
+                <section><h4>{t('picker.damageBasedOn2')}</h4><div className="chip-group">
+                  {chip(conditions.includes('aoe'), t('picker.allEnemies'), () => toggleCondition('aoe'), 'aoe')}
+                  {SCALING_KEYS.map((value) => chip(conditions.includes(`scaling:${value}`), labels.scaling(value), () => toggleCondition(`scaling:${value}`), value))}
+                </div></section>
+                <section><h4>{t('picker.leaderAura')}</h4><div className="chip-group">
+                  {STAT_ORDER.slice(0, 7).map((value) => chip(conditions.includes(`aura:${value}`), labels.stat(value), () => toggleCondition(`aura:${value}`), value))}
+                </div></section>
+                {([['buff', t('picker.buffs')], ['debuff', t('picker.debuffs')]] as const).map(([kind, title]) => {
+                  const selected = conditions.filter((condition) => condition.startsWith(`${kind}:`)).length
+                  return <details className="picker-details" key={kind}>
+                    <summary>{title}{selected > 0 && <em>{selected}</em>}</summary>
+                    <div className="chip-group">
+                      {(effectOptions?.[kind] ?? []).map((option) => chip(conditions.includes(`${kind}:${option.key}`), <><EffectGlyph icon={option.icon} ready={option.iconReady} />{option.label}</>,
+                        () => toggleCondition(`${kind}:${option.key}`), option.key, 'effect-chip'))}
+                    </div>
+                  </details>
+                })}
+                <details className="picker-details">
+                  <summary>{t('picker.otherEffects')}{conditions.some((condition) => condition.startsWith('special:')) && <em>{conditions.filter((condition) => condition.startsWith('special:')).length}</em>}</summary>
+                  <div className="chip-group">
+                    {(effectOptions?.special ?? []).map((name) => chip(conditions.includes(`special:${name}`), labels.special(name), () => toggleCondition(`special:${name}`), name))}
+                  </div>
+                </details>
+              </>}
+            </aside>
+
+            <div className="picker-main">
+              <div className="picker-searches">
+                <label className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('picker.searchByName')} /></label>
+                <EffectSearch options={searchOptions} chosen={conditions} onPick={(key) => setConditions((current) => [...current, key])}
+                  placeholder={needsData ? dataNote : t('picker.searchSkillEffectsBuffsDebuffs')}
+                  empty={t('picker.noSuchEffect')} />
+              </div>
+              {(conditions.length > 0 || elements.size > 0 || roles.size > 0 || factions.size > 0) && <div className="picker-conditions">
+                <span>{t('picker.mustHaveAllOf')}</span>
+                {conditions.map((condition) => <button type="button" key={condition} className="chip active" onClick={() => toggleCondition(condition)}>{conditionLabel(condition)}<X size={12} /></button>)}
+                {[...elements].map((value) => <button type="button" key={value} className="chip active" onClick={() => setElements((current) => toggled(current, value))}>{labels.element(value)}<X size={12} /></button>)}
+                {[...roles].map((value) => <button type="button" key={value} className="chip active" onClick={() => setRoles((current) => toggled(current, value))}>{labels.role(value)}<X size={12} /></button>)}
+                {[...factions].map((value) => <button type="button" key={value} className="chip active" onClick={() => setFactions((current) => toggled(current, value))}>{labels.faction(value)}<X size={12} /></button>)}
+                <button type="button" className="button ghost picker-clear" onClick={() => { setConditions([]); setElements(new Set()); setRoles(new Set()); setFactions(new Set()) }}>{t('picker.clear')}</button>
+              </div>}
+              <div className={`team-picker-list${dragging === 'slot' ? ' remove-target' : ''}`} ref={listRef}
+                onDragOver={(event) => { if (dragRef.current?.kind === 'slot') { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
+                onDrop={(event) => {
+                  const source = dragRef.current
+                  if (source?.kind !== 'slot') return
+                  event.preventDefault()
+                  endDrag()
+                  setSlots((current) => current.map((item, index) => (index === source.index ? null : item)))
+                }}>
+                {error ? <p className="team-picker-note error">{backendText(error, language)}</p>
+                  : roster === null ? <p className="team-picker-note">{t('picker.readingTheAccountSChampions')}</p>
+                    : shown.length === 0 ? <p className="team-picker-note">{t('picker.noChampionsMatchTheFilters')}</p>
+                      : <>
+                        {visible.map((hero) => {
+                          const slot = slotOf.get(hero.id)
+                          return <RosterCard key={hero.id} language={language} hero={hero} name={nameOf(hero.typeId)} element={elementOf.get(hero.typeId)} slot={slot}
+                            blocked={!slot && (full || chosenChampions.has(championId(hero.typeId)))} heroAvatar={heroAvatar}
+                            onClick={clickCard} onOpen={openProfile} onDragStart={startDrag} onDragEnd={endDrag} />
+                        })}
+                        {visible.length < shown.length && <div ref={moreRef} className="team-picker-more">
+                          {t('picker.scrollDownForMore', { visibleCount: visible.length, shownCount: shown.length })}</div>}
+                      </>}
+              </div>
             </div>
           </div>
+
+          <div className="dialog-footer">
+            <span className={hint ? 'picker-hint' : ''}>{hint || (roster ? t('picker.showingChampionsChosen', { shownCount: shown.length, rosterCount: roster.length, chosenCount, teamSize }) : '')}</span>
+            <div>
+              <button type="button" className="button ghost" onClick={onClose}>{t('picker.cancel')}</button>
+              <button type="button" className="button primary" disabled={team.length === 0}
+                onClick={() => onApply({ heroTypeIds: team.map((hero) => hero.typeId), heroInstanceIds: team.map((hero) => hero.id) })}>
+                {t('picker.setAsTheStrategyS')}</button>
+            </div>
+          </div>
+          <HeroProfile language={language} data={heroData} dataState={dataState} effects={effectMap} typeId={profile?.typeId ?? null}
+            roster={profile} name={profile ? nameOf(profile.typeId) : ''} bossMode={bossMode}
+            inTeam={profile ? slotOf.has(profile.id) : false}
+            canAdd={profile ? !full && !chosenChampions.has(championId(profile.typeId)) : false}
+            heroAvatar={heroAvatar} onToggle={profile ? () => toggle(profile) : undefined} onClose={() => setProfile(null)} />
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

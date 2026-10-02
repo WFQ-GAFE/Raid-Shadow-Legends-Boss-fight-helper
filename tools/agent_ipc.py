@@ -5,6 +5,7 @@ import json
 import time
 from ctypes import wintypes
 from typing import Any
+from ui_text import ui_text
 
 
 SHARED_STATE_MAGIC = 0x52434950
@@ -155,8 +156,7 @@ class AgentIpc:
         if layout[:3] != (SHARED_STATE_MAGIC, SHARED_STATE_VERSION, ctypes.sizeof(AgentSharedState)):
             kernel32.CloseHandle(mapping)
             raise AgentLayoutMismatch(
-                f"游戏进程中是其他版本的代理（构建 {layout[3]}，共享状态版本 {layout[1]}）；"
-                "请完全退出并重新启动这个 Raid 客户端"
+                ui_text("agent.otherAgentVersion", layout=layout[3], layout2=layout[1])
             )
         view = kernel32.MapViewOfFile(
             mapping, FILE_MAP_READ, 0, 0, ctypes.sizeof(AgentSharedState)
@@ -248,7 +248,7 @@ class AgentIpc:
             return None
         value = json.loads(text)
         if isinstance(value, dict) and value.get("type") == "ipc_error":
-            raise ValueError(f"代理状态容量不足（{slot_name}）：{value.get('requiredBytes')} / {value.get('capacity')} 字节，已停止使用此快照")
+            raise ValueError(ui_text("agent.stateSlotFull", slotName=slot_name, get=value.get('requiredBytes'), get2=value.get('capacity')))
         return value if isinstance(value, dict) else None
 
     def slot_usage(self) -> dict[str, Any]:

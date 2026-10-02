@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -9,12 +10,14 @@ import tempfile
 import zlib
 
 from team_preview import decode_preview, display_preview, portable_snapshot
+from ui_text import render
 from team_setups import (
     StrategyTeamStore, TeamSetupError, building_bonus, check_against_captures, decode_account_bonuses,
     decode_roster, differences,
     exported_team, hero_battle_inputs, hero_slot_setup, latest_check, prepare_team_input, preview_team, relic_setup,
-    remember_check, same_team, simulation_package, simulation_team, team_battle_setup, team_report, team_sources,
-    unpack_simulation, with_account_bonuses,
+    ordered_team_matches, remember_check, same_team, simulation_package, simulation_team, team_battle_setup,
+    team_report, team_sources, unpack_simulation, validate_simulation_snapshot, validate_simulation_team,
+    with_account_bonuses,
 )
 
 
@@ -128,34 +131,39 @@ def test_team_is_swapped_into_the_opening_with_matching_provenance() -> None:
             try:
                 prepare_team_input(capture, heroes, "chimera", root / "bad", area=None, rule="building")
             except TeamSetupError as error:
-                assert message in str(error)
+                assert message in render(str(error), "zh-CN")
             else:
                 raise AssertionError("invalid team accepted")
 
 
 def test_preview_team_store_and_sources() -> None:
     battle = hero(21, 8001)
+    type_ids = list(range(8001, 8006))
+    battles = [hero(21 + index, type_id) for index, type_id in enumerate(type_ids)]
     preview = {"status": "captured", "bossMode": "chimera", "capturedAt": "2026-09-27 10:00:00",
                "observatory": {"7": AREA},
-               "heroes": [{"heroId": 21, "typeId": 8001, "power": 5000, "battle": battle}]}
+               "heroes": [{"heroId": 21 + index, "typeId": type_id, "power": 5000, "battle": battles[index]}
+                          for index, type_id in enumerate(type_ids)]}
     team = preview_team(preview, "chimera")
-    assert team is not None and team["heroTypeIds"] == [8001] and team["heroes"] == [battle]
+    assert team is not None and team["heroTypeIds"] == type_ids and team["heroes"] == battles
     assert preview_team(preview, "hydra") is None
     assert preview_team({**preview, "heroes": [{"heroId": 21, "typeId": 8001}]}, "chimera") is None
     assert same_team([8001, 8002], [8002, 8001, 0]) and not same_team([], []) and not same_team([8001], [8002])
-    display = {"schema": 2, "bossMode": "chimera", "heroes": [{"typeId": 8001, "equipped": 9}], "names": {},
+    display = {"schema": 2, "bossMode": "chimera",
+               "heroes": [{"typeId": type_id, "equipped": 9} for type_id in type_ids], "names": {},
                "icons": {}, "capturedAt": "2026-09-27 10:00:00"}
     with tempfile.TemporaryDirectory() as temporary:
         store = StrategyTeamStore(Path(temporary))
         assert store.load("chimera", "strategy-1") is None
         store.save("chimera", "strategy-1", team, display=display)
         saved = store.load("chimera", "strategy-1")
-        assert saved["heroTypeIds"] == [8001] and saved["savedAt"] and saved["strategyId"] == "strategy-1"
+        assert saved["heroTypeIds"] == type_ids and saved["savedAt"] and saved["strategyId"] == "strategy-1"
         assert saved["display"] == display
         # Only the heroes' own data is stored: no academy, building or area bonuses.
         assert "observatory" not in saved and set(saved["heroes"][0]["parts"]) == {
             "artifacts", "sets", "blessing", "relics"}
-        live = {"heroes": {8001: {"academy": ACADEMY, "building": BUILDING, "capitol": {"p": {"h": 1}}}},
+        live = {"heroes": {type_id: {"academy": ACADEMY, "building": BUILDING, "capitol": {"p": {"h": 1}}}
+                           for type_id in type_ids},
                 "observatory": {"7": AREA}}
         requested = []
 
@@ -167,43 +175,43 @@ def test_preview_team_store_and_sources() -> None:
         shared = exported_team(saved)
         assert shared["heroes"] == display["heroes"] and shared["savedAt"] == saved["savedAt"]
         exported = zlib.decompress(base64.b64decode(shared["simulation"]["data"])).decode("utf-8")
-        assert '"heroId"' not in exported and json.loads(exported)["heroTypeIds"] == [8001]
-        sources = team_sources("chimera", [8001, 0], bound=True, saved=saved, reference=shared, check=check)
-        assert sources["current"] == {"heroTypeIds": [8001], "bound": True}
-        assert sources["strategy"]["matches"] and sources["author"] == {"heroTypeIds": [8001],
+        assert '"heroId"' not in exported and json.loads(exported)["heroTypeIds"] == type_ids
+        sources = team_sources("chimera", type_ids, bound=True, saved=saved, reference=shared, check=check)
+        assert sources["current"] == {"heroTypeIds": type_ids, "bound": True}
+        assert sources["strategy"]["matches"] and sources["author"] == {"heroTypeIds": type_ids,
                                                                         "savedAt": saved["savedAt"]}
         assert sources["check"] == {"checkedAt": None, "compared": 1, "matched": 1, "orderMatched": None,
                                     "rule": "building", "area": "7"}
         assert "artifacts" not in json.dumps(sources)
         assert team_sources("chimera", [8001], bound=False, saved=None, reference=display, check=None)["author"] is None
         # The snapshot taken at save: bonuses by hero type from the current account.
-        chosen = simulation_team("strategy", "chimera", [8001], saved=saved, check={"rule": "building", "area": "7"},
+        chosen = simulation_team("strategy", "chimera", type_ids, saved=saved, check={"rule": "building", "area": "7"},
                                  bonuses=bonuses)
-        assert requested == [[8001]]
+        assert requested == [type_ids]
         assert chosen["source"] == "strategy" and chosen["rule"] == "building" and chosen["area"] == AREA
         assert chosen["heroes"][0]["parts"] == battle["parts"] and chosen["savedAt"] == saved["savedAt"]
         # The author's team (imported): stand-in hero ids, the importer's bonuses.
-        author = simulation_team("author", "chimera", [8001], reference=shared, check=check, bonuses=bonuses)
+        author = simulation_team("author", "chimera", type_ids, reference=shared, check=check, bonuses=bonuses)
         assert author["source"] == "author" and author["heroes"][0]["model"]["heroId"] == 1
         assert author["heroes"][0]["parts"] == battle["parts"] and author["savedAt"] == saved["savedAt"]
         # The team as it is now, read from the game.
-        now = simulation_team("current", "chimera", [8001], check=None, current=lambda: team)
+        now = simulation_team("current", "chimera", type_ids, check=None, current=lambda: team)
         assert now["rule"] == "building+area" and now["area"] == AREA  # Chimera area (7) by default
         assert simulation_team("battle", "chimera", [], saved=None) is None
         for source, strategy_team, arguments, message in (
                 ("strategy", [], {"saved": saved, "bonuses": bonuses}, "还没有设定队伍"),
-                ("strategy", [8001], {"bonuses": bonuses}, "还没有保存时的队伍"),
+                ("strategy", type_ids, {"bonuses": bonuses}, "还没有保存时的队伍"),
                 ("strategy", [8002], {"saved": saved, "bonuses": bonuses}, "队伍已更改"),
-                ("strategy", [8001], {"saved": saved}, "打开游戏"),
+                ("strategy", type_ids, {"saved": saved}, "打开游戏"),
                 ("author", [8001], {"reference": display, "bonuses": bonuses}, "没有作者队伍"),
-                ("author", [8001], {"reference": shared}, "打开游戏"),
-                ("current", [8001], {}, "打开游戏"),
+                ("author", type_ids, {"reference": shared}, "打开游戏"),
+                ("current", type_ids, {}, "打开游戏"),
                 ("current", [8002], {"current": lambda: team}, "不一致"),
                 ("preparation", [8001], {"saved": saved}, "无效")):
             try:
                 simulation_team(source, "chimera", strategy_team, **arguments)
             except TeamSetupError as error:
-                assert message in str(error), (source, str(error))
+                assert message in render(str(error), "zh-CN"), (source, str(error))
             else:
                 raise AssertionError((source, message))
         store.delete("chimera", "strategy-1")
@@ -221,6 +229,179 @@ def test_exported_battle_data_is_validated() -> None:
                    simulation_package({"heroes": []}),
                    simulation_package({"heroes": [{"model": {"typeId": 8001}, "parts": {}}]})):
         assert unpack_simulation(broken) is None, broken
+
+
+def test_ordered_team_validation_preserves_every_slot_and_the_leader() -> None:
+    assert same_team([8001, 8002], [8002, 8001, 0])
+    assert ordered_team_matches([8001, 8002], [8001, 8002])
+    assert ordered_team_matches([8001, 8001], [8001, 8001])
+    for left, right in (([8001, 8002], [8002, 8001]), ([8001, 0], [8001]),
+                        ([8001, True], [8001, 1]), (["8001"], [8001]),
+                        (None, [8001]), ([], []), ((8001,), [8001])):
+        assert not ordered_team_matches(left, right), (left, right)
+    type_ids = list(range(8001, 8006))
+    team = {"heroTypeIds": type_ids, "heroIds": list(range(21, 26)),
+            "heroes": [hero(21 + index, type_id) for index, type_id in enumerate(type_ids)]}
+    assert validate_simulation_team(team, "chimera", type_ids)
+    assert not validate_simulation_team(team, "hydra", type_ids)
+    assert not validate_simulation_team(team, "chimera", list(reversed(type_ids)))
+    assert not validate_simulation_team({**team, "heroTypeIds": list(reversed(type_ids))})
+    assert not validate_simulation_team({**team, "heroIds": list(reversed(team["heroIds"]))})
+    assert not validate_simulation_team({**team, "heroes": list(reversed(team["heroes"]))})
+    assert validate_simulation_team({"heroes": [hero(21, 8001)]})
+    assert not validate_simulation_team({"heroes": [hero(21, 8001)]}, "chimera")
+
+
+def test_simulation_validation_rejects_missing_inputs_but_allows_empty_equipment() -> None:
+    bare = hero(21, 8001, artifacts=[], sets=[], blessing=None, relics=None)
+    assert validate_simulation_team({"heroes": [bare]})
+    assert unpack_simulation(simulation_package({"heroes": [bare]})) is not None
+    for section, key, value in (("model", "typeId", True), ("model", "heroId", "21"),
+                                ("model", "grade", 0), ("model", "level", 0),
+                                ("model", "level", "60"), ("model", "level", 61),
+                                ("model", "skills", []), ("model", "skills", [{"i": 80011}]),
+                                ("model", "skills", [{"i": True, "l": 1}]),
+                                ("model", "skills", [{"i": 80011, "l": -1}]),
+                                ("model", "masteries", [True]), ("parts", "artifacts", None),
+                                ("parts", "artifacts", [{}]), ("parts", "sets", None),
+                                ("parts", "sets", [{"i": "4"}]),
+                                ("parts", "blessing", {"i": "7"}), ("parts", "relics", [{}])):
+        broken = copy.deepcopy(bare)
+        broken[section][key] = value
+        assert not validate_simulation_team({"heroes": [broken]}), (section, key, value)
+        # An export intentionally removes account-specific hero ids.
+        if key != "heroId":
+            assert unpack_simulation(simulation_package({"heroes": [broken]})) is None, (section, key, value)
+    for key in ("artifacts", "sets", "blessing", "relics"):
+        broken = copy.deepcopy(bare)
+        broken["parts"].pop(key)
+        assert not validate_simulation_team({"heroes": [broken]}), key
+    assert not validate_simulation_team({"heroes": [bare], "powers": [float("nan")]})
+    assert not validate_simulation_team({"heroes": [bare], "powers": [10 ** 1000]})
+    assert not validate_simulation_team({"heroes": [bare], "powers": [True]})
+    assert not validate_simulation_team({"heroes": [bare], "powers": [1, 2]})
+
+
+def test_relic_validation_requires_the_socketed_stones_and_skills() -> None:
+    partial = {"l": 0, "p": {"h": 0}, "f": {"h": ONE}}
+    battle = {"relic": {"i": 375, "t": 85, "a": 5, "l": 15, "e": 1, "c": 1,
+                        "k": [{"k": 2, "s": 419}, {"k": 1}]},
+              "skillLevel": 5, "skills": [3000084], "fraction": 4, "factionSkills": [],
+              "stones": [{"id": 419, "typeId": 64, "skills": [4000063]}]}
+    equipped = hero(21, 8001, relics=[partial], relicBattle=battle)
+    assert validate_simulation_team({"heroes": [equipped]})
+    assert unpack_simulation(simulation_package({"heroes": [equipped]})) is not None
+    for key, value in (("skillLevel", None), ("skills", None), ("fraction", None),
+                       ("factionSkills", None), ("stones", []),
+                       ("stones", [{"id": 419, "typeId": 64}])):
+        broken = copy.deepcopy(equipped)
+        broken["parts"]["relicBattle"][key] = value
+        assert not validate_simulation_team({"heroes": [broken]}), key
+        assert unpack_simulation(simulation_package({"heroes": [broken]})) is None, key
+    broken = copy.deepcopy(equipped)
+    broken["parts"].pop("relicBattle")
+    assert not validate_simulation_team({"heroes": [broken]})
+    complete = hero(21, 8001)
+    assert validate_simulation_team({"heroes": [complete]})
+    for key in ("r", "s", "n"):
+        broken = copy.deepcopy(complete)
+        broken["parts"]["relics"][0].pop(key)
+        assert not validate_simulation_team({"heroes": [broken]}), key
+    socketed = copy.deepcopy(complete)
+    socketed["parts"]["relics"][0]["n"]["k"] = [{"k": 1, "s": 419}]
+    assert not validate_simulation_team({"heroes": [socketed]})
+
+
+def test_real_serialized_set_defaults_and_duplicate_stone_skills_are_valid() -> None:
+    # Shape taken from the existing six-hero captures: no-effect set bonuses
+    # serialize as {}, while active set skills/stat bonuses have nested fields.
+    # All identities below are standalone fixture values, not account ids.
+    artifacts = [{"k": 7, "s": 59, "n": 5, "r": 6, "q": 3, "al": 2,
+                  "ab": {"k": 2, "p": {"a": 1, "v": 94489280512}, "s": 0, "l": 0},
+                  "p": {"h": 0, "a": 429496728, "d": 558345746, "i": 0},
+                  "f": {"h": 3908420239360, "a": 240518168576, "d": 966367641600, "i": 0},
+                  "cb": {"dp": 0, "dv": 0, "db": 0, "dd": 0, "tp": 0, "tv": 0, "tb": 0, "td": 0}}]
+    sets = [{}, {"l": {"i": 100048}, "b": [{"k": 2, "b": 429496729, "a": 0}]},
+            {"l": {"i": 100041}, "t": {"k": 4, "b": 515396075, "a": 0}}, {},
+            {"l": {"i": 100031}}]
+    partial = {"l": 0, "p": {"h": 0}, "f": {"h": 7 * ONE}}
+    battle = {"relic": {"i": 49, "t": 24, "a": 5, "l": 15, "e": 1, "c": 1,
+                        "k": [{"k": 2, "s": 101}, {"k": 2, "s": 102}]},
+              "skillLevel": 5, "skills": [3000023], "fraction": 1, "factionSkills": [],
+              "stones": [{"id": 101, "typeId": 3, "skills": [4000002]},
+                         {"id": 102, "typeId": 3, "skills": [4000002]}]}
+    type_ids = list(range(8001, 8007))
+    heroes = [hero(21 + index, type_id, artifacts=artifacts, sets=sets,
+                   relics=[partial], relicBattle=battle) for index, type_id in enumerate(type_ids)]
+    display = {"bossMode": "hydra", "heroes": [{"typeId": type_id} for type_id in type_ids]}
+    team = {"bossMode": "hydra", "heroTypeIds": type_ids, "heroes": heroes, "display": display}
+    assert validate_simulation_team(team, "hydra", type_ids)
+    snapshot = exported_team(team, "hydra", type_ids)
+    assert snapshot is not None and validate_simulation_snapshot(snapshot, "hydra", type_ids)
+    assert unpack_simulation(snapshot["simulation"], "hydra", type_ids) is not None
+    # The completed server setup preserves both stone effects; identical skill
+    # ids here must not be mistaken for a malformed hero skill list.
+    complete = relic_setup(partial, battle)
+    assert complete["s"] == [{"i": 4000002, "l": 0}, {"i": 4000002, "l": 0}]
+    completed_team = copy.deepcopy(team)
+    for entry in completed_team["heroes"]:
+        entry["parts"]["relics"] = [complete]
+        entry["parts"].pop("relicBattle")
+    assert validate_simulation_team(completed_team, "hydra", type_ids)
+    assert exported_team(completed_team, "hydra", type_ids) is not None
+
+
+def test_snapshot_and_team_sources_require_matching_valid_simulation_slots() -> None:
+    type_ids = list(range(8001, 8006))
+    saved = {"bossMode": "chimera", "heroTypeIds": type_ids,
+             "heroes": [hero(21 + index, type_id) for index, type_id in enumerate(type_ids)],
+             "display": {"bossMode": "chimera", "heroes": [{"typeId": type_id} for type_id in type_ids]}}
+    shared = exported_team(saved, "chimera", type_ids)
+    assert shared is not None and validate_simulation_snapshot(shared, "chimera", type_ids)
+    nested = {"bossMode": "chimera", "display": saved["display"], "simulation": shared["simulation"]}
+    assert validate_simulation_snapshot(nested, "chimera", type_ids)
+    assert not validate_simulation_snapshot(shared, "hydra", type_ids)
+    for changed in ({**shared, "heroes": list(reversed(shared["heroes"]))},
+                    {**shared, "simulation": {**shared["simulation"], "data": "!!"}},
+                    {**shared, "heroes": [{"typeId": "8001"}] + shared["heroes"][1:]},
+                    {**shared, "heroTypeIds": list(reversed(type_ids))}):
+        assert not validate_simulation_snapshot(changed, "chimera", type_ids)
+        sources = team_sources("chimera", type_ids, bound=False, saved=saved, reference=changed, check=None)
+        assert sources["author"] is None
+    assert exported_team({**saved, "display": {"heroes": list(reversed(saved["display"]["heroes"]))}}) is None
+    assert exported_team({**saved, "heroTypeIds": list(reversed(type_ids))}) is None
+    sources = team_sources("chimera", list(reversed(type_ids)), bound=True,
+                           saved=saved, reference=shared, check=None)
+    assert not sources["strategy"]["matches"] and sources["author"] is None
+    calls = []
+    for source, arguments in (("author", {"reference": shared}), ("strategy", {"saved": saved}),
+                              ("current", {"current": lambda: saved})):
+        try:
+            simulation_team(source, "chimera", list(reversed(type_ids)),
+                            bonuses=lambda ids: calls.append(ids), **arguments)
+        except TeamSetupError:
+            pass
+        else:
+            raise AssertionError(f"{source} accepted the wrong leader and slot order")
+    assert calls == []  # Bad imported/saved inputs are rejected before live bonus reads.
+
+
+def test_package_validation_checks_declared_ids_and_complete_compression() -> None:
+    package = simulation_package({"heroes": [hero(21, 8001)]})
+    body = json.loads(zlib.decompress(base64.b64decode(package["data"])))
+
+    def encoded(value):
+        return {**package, "data": base64.b64encode(zlib.compress(json.dumps(value).encode("utf-8"))).decode("ascii")}
+
+    assert unpack_simulation(package) is not None
+    assert unpack_simulation(package, "chimera") is None
+    assert unpack_simulation(package, strategy_team=[8002]) is None
+    assert unpack_simulation({**package, "schema": True}) is None
+    assert unpack_simulation(encoded({**body, "heroTypeIds": [8002]})) is None
+    assert unpack_simulation(encoded({key: value for key, value in body.items() if key != "heroTypeIds"})) is None
+    compressed = base64.b64decode(package["data"])
+    for data in (compressed[:-1], compressed + b"trailing", compressed + zlib.compress(b"{}")):
+        assert unpack_simulation({**package, "data": base64.b64encode(data).decode("ascii")}) is None
 
 
 def test_preview_keeps_battle_parts_out_of_the_interface_and_exports() -> None:
@@ -262,7 +443,7 @@ def test_relic_setup_is_completed_like_the_server() -> None:
     try:
         hero_slot_setup(partial_only, slot=1, owner_id=77, area=None, rule="building")
     except TeamSetupError as error:
-        assert "圣物数据不完整" in str(error)
+        assert "圣物数据不完整" in render(str(error), "zh-CN")
     else:
         raise AssertionError("an incomplete relic was accepted")
     partial_only["parts"]["relicBattle"] = battle
@@ -288,7 +469,7 @@ def test_account_bonuses_answer() -> None:
         try:
             decode_account_bonuses(answer, type_ids)
         except TeamSetupError as error:
-            assert message in str(error), str(error)
+            assert message in render(str(error), "zh-CN"), render(str(error), "zh-CN")
         else:
             raise AssertionError(message)
 
@@ -323,7 +504,7 @@ def test_roster_lists_the_account_champions_strongest_first() -> None:
         try:
             decode_roster(answer)
         except TeamSetupError as error:
-            assert message in str(error), str(error)
+            assert message in render(str(error), "zh-CN"), render(str(error), "zh-CN")
         else:
             raise AssertionError(message)
 

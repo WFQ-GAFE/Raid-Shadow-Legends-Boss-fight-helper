@@ -25,6 +25,7 @@ from chimera_controller import (
     submit_free_regroup,
 )
 from chimera_runtime import lifecycle_team_ids
+from ui_text import render
 
 
 SESSION = 99112233
@@ -453,7 +454,7 @@ def test_retry_rejects_changed_team_before_start() -> None:
                 nonce=9,
             )
         except RuntimeError as error:
-            assert "队伍发生变化" in str(error)
+            assert "队伍发生变化" in render(str(error), "zh-CN")
         else:
             raise AssertionError("changed team was not rejected")
     start.assert_not_called()
@@ -700,7 +701,7 @@ def test_retry_budget_stops_before_mutation() -> None:
                 runtime_state=runtime,
             )
         except RuntimeError as error:
-            assert "重试上限" in str(error)
+            assert "重试上限" in render(str(error), "zh-CN")
         else:
             raise AssertionError("retry budget was not enforced")
     regroup.assert_not_called()

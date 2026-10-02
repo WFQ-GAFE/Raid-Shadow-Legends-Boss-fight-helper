@@ -32,6 +32,14 @@ hand from a terminal it attaches to that terminal for its output.
   finishes or the game turn limit (1–1000, default 1000), and returns the
   HungerCounter mark events, the final Hydra damage and a per-command trace.
 
+- `hero-data <directory> [all | id,id,...]` loads only `static-data.msgpack` and
+  writes the playable champions' definitions (base types and their ascension
+  variants), their skills (each once) and the localized champion and skill
+  names and descriptions into the report, field by field through IL2CPP
+  reflection under the game's own names (`static_dump.hpp`). The directory is
+  not read; the app passes the bundle folder. `tools/hero_data.py` reduces the
+  report to the team picker's search tags and champion profiles.
+
 In `forecast`, the launcher duplicates its own stdin/stdout as the only
 inheritable handles and lends them to the worker
 (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`); no named pipe, file or process is
@@ -54,6 +62,7 @@ code, timing, the worker's report and any native fault after the worker exits.
 - `policy_channel.hpp` — the line protocol over the inherited pipe ends.
 - `battle_commands.hpp`, `enemy_ai_command.hpp` — original command construction.
 - `json_to_pack_probe.hpp`, `static_data_probe.hpp` — original serializer and static data.
+- `hero_data.hpp`, `static_dump.hpp` — champion data export and the reflective JSON writer.
 - `managed_runtime.hpp` — IL2CPP calls with per-command GC-root release.
 - `crash_observation.hpp` — fault report of this isolated process only.
 

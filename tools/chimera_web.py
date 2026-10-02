@@ -8,6 +8,7 @@ random token that is generated for each launch and never written to disk.
 from __future__ import annotations
 
 import argparse
+import copy
 import ctypes
 import json
 import logging
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from desktop_lifecycle import WindowStartup
+from ui_text import LOCALES, match_locale, render, system_locale, ui_text
 
 
 def desktop_log(message: str) -> None:
@@ -111,12 +113,17 @@ from hydra_forecast_live import recent_forecasts as recent_hydra_forecasts
 from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService,
                                         list_captures as list_chimera_captures,
                                         recent_simulations as recent_chimera_simulations)
+from hero_data import HeroDataService
 from hydra_simulation_service import (HydraSimulationService,
                                       recent_simulations as recent_hydra_simulations)
 from team_setups import (STRATEGY_TEAM_ROOT, TEAM_SIZE, StrategyTeamStore, TeamSetupError,  # noqa: E402
+                         ACCOUNT_PARTS, ordered_team_matches, validate_simulation_snapshot,
                          check_against_captures,
                          decode_account_bonuses, decode_roster, exported_team, latest_check, preview_team,
-                         remember_check, same_team, simulation_team, team_sources)
+                         remember_check, same_team, simulation_team, team_sources, unpack_simulation)
+from strategy_simulation_package import (capture_row, materialize_opening, package_status,  # noqa: E402
+                                         pack_opening, sanitize_package, select_opening,
+                                         valid_account_bonuses)
 from inject_probe import (REQUEST_BONUSES_BY_TYPE, REQUEST_HYDRA, REQUEST_ROSTER,  # noqa: E402
                           REQUEST_SKILL_TYPES, REQUEST_TEAM_DATA, request_account_bonuses)
 from boss_skills import BossSkillCatalog, enemy_skill_ids, listed_skills  # noqa: E402
@@ -207,6 +214,8 @@ APP_ICON = next(
 HERO_CATALOG = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
 BOSS_SKILLS = PROJECT_ROOT / "cache" / "boss-skills.json"
 UI_PREFERENCES = PROJECT_ROOT / "config" / "raid-boss-ui-preferences.user.json"
+# The interface languages: one catalog file each (ui/src/i18n/messages).
+UI_LANGUAGES = LOCALES
 def snapshot_requested(body: dict[str, Any]) -> bool:
     """An explicit save: snapshot the strategy group's team (capturePreparedTeam: interfaces before 1.1.1)."""
     return body.get("snapshotTeam") is True or body.get("capturePreparedTeam") is True
@@ -234,8 +243,9 @@ EXPECTED_RULE_KEYS = {
 
 def hero_catalog_identity(hero_id: int, hero: dict[str, Any]) -> int:
     source = str(hero.get("avatar") or hero.get("avatarUrl") or "")
-    tail = source.rsplit("/", 1)[-1].split("-", 1)[0]
-    return int(tail) if tail.isdigit() else hero_id
+    # The avatar's leading digits: "8250", "8250-…", and a few with a suffix ("1770_temp").
+    match = re.match(r"\d+", source.rsplit("/", 1)[-1])
+    return int(match.group(0)) if match else hero_id
 
 
 def canonicalize_hero_catalog(
@@ -281,6 +291,17 @@ def is_transform_skill(hero: dict[str, Any], skill: dict[str, Any]) -> bool:
     return slot >= 4 and any(marker in text for marker in markers)
 
 
+# The Chimera's forms in the live status (catalog names).
+CHIMERA_FORM_NAMES = {"Ultimate": "chimera.formName.0", "Ram": "chimera.formName.1", "Lion": "chimera.formName.2", "Snake": "chimera.formName.3"}
+
+
+def dialog_locale() -> str:
+    """The language of Windows dialogs shown outside the window: the window's saved language, else Windows'."""
+    saved = read_json(UI_PREFERENCES, {})
+    language = saved.get("language") if isinstance(saved, dict) else None
+    return match_locale(language) if language in UI_LANGUAGES else system_locale()
+
+
 def read_json(path: Path, default: Any) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -295,8 +316,8 @@ def process_display(item: dict[str, Any]) -> str:
         name = account.get("accountName")
         user_id = account.get("userId")
         if isinstance(name, str) and name:
-            return f"{name}（玩家 ID {user_id}）" if isinstance(user_id, int) else name
-    return f"未识别账户（进程 {pid}）"
+            return ui_text("web.accountLabel", name=name, userId=user_id) if isinstance(user_id, int) else name
+    return ui_text("web.unknownAccount", pid=pid)
 
 
 def default_strategy(boss_mode: str = "chimera") -> dict[str, Any]:
@@ -311,13 +332,13 @@ def normalized_strategy(
     boss_mode = normalize_mode(boss_mode)
     spec = mode_spec(boss_mode)
     if not isinstance(value, dict):
-        raise ValueError("策略必须是一个对象")
+        raise ValueError(ui_text("web.strategyNotObject"))
     rules = value.get("rules")
     if not isinstance(rules, list):
-        raise ValueError("策略规则必须是一个数组")
+        raise ValueError(ui_text("web.rulesNotArray"))
     for index, rule in enumerate(rules):
         if not isinstance(rule, dict):
-            raise ValueError(f"第 {index + 1} 条策略规则格式无效")
+            raise ValueError(ui_text("web.ruleInvalid", value=index + 1))
         unexpected = set(rule) - EXPECTED_RULE_KEYS
         if unexpected:
             # Do not discard controller-supported extension keys; this catches
@@ -352,7 +373,7 @@ def normalized_strategy(
     for key in ("minimumDamage", "maxRegroupRetries"):
         raw = objectives.get(key, 0)
         if not isinstance(raw, (int, float)) or isinstance(raw, bool) or raw < 0:
-            raise ValueError(f"{key} 必须是非负数")
+            raise ValueError(ui_text("web.notNegative", key=key))
         objectives[key] = int(raw)
     if spec["hasTrials"]:
         trial_ids = objectives.get("mandatoryTrialIds", [])
@@ -360,7 +381,7 @@ def normalized_strategy(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0
             for value in trial_ids
         ):
-            raise ValueError("必做试炼设置无效")
+            raise ValueError(ui_text("web.requiredTrialsInvalid"))
         objectives["mandatoryTrialIds"] = list(dict.fromkeys(trial_ids))
         # On unless the player turned it off: strategies saved before 1.0.6
         # have no such key.
@@ -368,7 +389,7 @@ def normalized_strategy(
     else:
         devour_conditions = objectives.get("devourOrderRetryConditions", [])
         if not isinstance(devour_conditions, list):
-            raise ValueError("六头蛇吞噬顺序重整条件设置无效")
+            raise ValueError(ui_text("web.devourConditionsInvalid"))
         normalized_devour_conditions: list[dict[str, Any]] = []
         for condition in devour_conditions[:20]:
             if not isinstance(condition, dict):
@@ -451,11 +472,15 @@ class ChimeraService:
         self.controller = ControllerManager()
         self.simulations = SimulationService()
         self.hydra_simulations = HydraSimulationService()
+        # Champion search tags and profiles from the game's static data.
+        self.hero_data = HeroDataService()
         self.team_snapshots = TeamSnapshotStore()
         # Strategy groups of each game account (config/accounts/<userId>); the account
         # of the current request is kept per thread (see use_strategy_account).
         self.account_stores = AccountStores()
         self._store_context = threading.local()
+        self.package_log = desktop_lifecycle_log
+        self.package_refreshes: dict[tuple[str | None, str, str], float] = {}
         self.team_previews: dict[int, dict[str, Any]] = {}
         self.catalog_epoch = 0
         self.catalog_session = secrets.token_hex(8)
@@ -637,14 +662,15 @@ class ChimeraService:
         key = self.strategy_account().key
         return StrategyTeamStore(STRATEGY_TEAM_ROOT / key) if key else StrategyTeamStore()
 
-    def ui_preferences(self) -> dict[str, str]:
+    def ui_preferences(self) -> dict[str, str | None]:
+        """The saved language, or None so the window follows the system language."""
         value = read_json(UI_PREFERENCES, {})
         language = value.get("language") if isinstance(value, dict) else None
-        return {"language": language if language in {"en", "zh-CN"} else "en"}
+        return {"language": language if language in UI_LANGUAGES else None}
 
     def save_ui_preferences(self, value: Any) -> dict[str, str]:
-        if not isinstance(value, dict) or value.get("language") not in {"en", "zh-CN"}:
-            raise ValueError("不支持的界面语言")
+        if not isinstance(value, dict) or value.get("language") not in UI_LANGUAGES:
+            raise ValueError("Unsupported interface language")
         preferences = {"language": str(value["language"])}
         with self.lock:
             atomic_write_json(UI_PREFERENCES, preferences)
@@ -657,9 +683,9 @@ class ChimeraService:
     def strategy_profile_name(value: Any) -> str:
         name = str(value or "").strip()
         if not name:
-            raise ValueError("请输入策略组名称")
+            raise ValueError(ui_text("web.nameRequired"))
         if len(name) > 60:
-            raise ValueError("策略组名称不能超过 60 个字符")
+            raise ValueError(ui_text("web.nameTooLong"))
         return name
 
     def strategy_bundle(
@@ -674,12 +700,14 @@ class ChimeraService:
             "activeStrategyId": selected_id,
             "strategyProfiles": strategy_profiles_for_mode(current_store, boss_mode),
             "strategyAccount": self.strategy_account().public(),
+            "simulationPackage": package_status(strategy_for_mode(current_store, boss_mode, selected_id), boss_mode),
         }
 
     def save_strategy(
         self, value: Any, boss_mode: str = "chimera",
         strategy_id: str | None = None,
         expected_revision: str | None = None,
+        pid: int | None = None,
     ) -> dict[str, Any]:
         boss_mode = normalize_mode(boss_mode)
         with self.lock:
@@ -687,18 +715,126 @@ class ChimeraService:
             selected_id = str(strategy_id or active_strategy_id(store, boss_mode))
             previous = strategy_for_mode(store, boss_mode, selected_id)
             if expected_revision is not None and expected_revision != revision(previous):
-                raise ValueError("策略已在其他窗口更新；草稿已保留，请创建副本或重新加载后再保存")
+                raise ValueError(ui_text("web.savedElsewhere"))
             config = normalized_strategy(value, previous, boss_mode)
+            observed_revision = revision(previous)
+        config = self._package_strategy(config, boss_mode, pid, previous, selected_id)
+        with self.lock:
+            store = self.strategy_store()
+            current_config = strategy_for_mode(store, boss_mode, selected_id)
+            if revision(current_config) != observed_revision:
+                raise ValueError(ui_text("web.savedElsewhere"))
+            current_team = current_config.get("team") or {}
+            chosen_team = config.get("team") or {}
+            if ordered_team_matches(current_team.get("heroTypeIds"), chosen_team.get("heroTypeIds")) \
+                    and current_team.get("heroInstanceIds") == chosen_team.get("heroInstanceIds"):
+                latest_package = sanitize_package(current_config.get("simulationPackage"), boss_mode,
+                                                  chosen_team.get("heroTypeIds")) or {}
+                for key in ("team", "opening", "accountBonuses"):
+                    if key not in config["simulationPackage"] and key in latest_package:
+                        config["simulationPackage"][key] = copy.deepcopy(latest_package[key])
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=selected_id
             )
             write_strategy_store(self.store_path(), updated)
             return self.strategy_bundle(boss_mode, updated)
 
+    def _package_strategy(self, config: dict[str, Any], boss_mode: str, pid: int | None,
+                          previous: dict[str, Any], strategy_id: str) -> dict[str, Any]:
+        """Every save captures a complete portable input when the data is available.
+
+        A failed read never masquerades as a refreshed team. Existing matching
+        snapshots remain usable; a changed team cannot reuse another team's data.
+        """
+        config = copy.deepcopy(config)
+        team = config.get("team") if isinstance(config.get("team"), dict) else {}
+        ids = team.get("heroTypeIds") or []
+        hero_ids = team_hero_ids(team)
+        previous_team = previous.get("team") if isinstance(previous.get("team"), dict) else {}
+        same_instances = team.get("heroInstanceIds") == previous_team.get("heroInstanceIds")
+        previous_package = previous.get("simulationPackage") if same_instances else None
+        package = sanitize_package(previous_package, boss_mode, ids)
+        if package is None and (same_instances or not hero_ids):
+            package = sanitize_package(config.get("simulationPackage"), boss_mode, ids)
+        package = package \
+            or {"schema": 1, "bossMode": boss_mode}
+        # Hero selection is part of the strategy; never guess copies or gear
+        # from its rule names. A portable author team does not need local IDs.
+        if "team" not in package and not hero_ids:
+            reference = sanitize_reference_team(config.get("referenceTeam"))
+            if validate_simulation_snapshot(reference, boss_mode=boss_mode, strategy_team=ids or None):
+                package["team"] = reference
+                if not ids:
+                    ids = [hero["typeId"] for hero in reference["heroes"]]
+                    config["team"] = team = {"heroTypeIds": ids}
+        issue = None
+        if hero_ids and isinstance(pid, int) and not isinstance(pid, bool):
+            try:
+                preview = self.team_data(pid, hero_ids, boss_mode, timeout=3.0)
+                by_id = {hero.get("heroId"): hero for hero in preview.get("heroes") or []}
+                if any(hero_id not in by_id for hero_id in hero_ids):
+                    raise TeamSetupError(ui_text("web.partOfTeamNotOnAccount"))
+                preview["heroes"] = [by_id[hero_id] for hero_id in hero_ids]
+                prepared = preview_team(preview, boss_mode)
+                if prepared is None or not ordered_team_matches(prepared.get("heroTypeIds"), ids):
+                    raise TeamSetupError(ui_text("package.invalidData"))
+                # Save this snapshot atomically with the rules, so a failed or
+                # concurrent save cannot replace another revision's team.
+                display = portable_snapshot(display_preview(preview))
+                saved = {**prepared, "display": display, "savedAt": time.strftime("%Y-%m-%d %H:%M:%S")}
+                snapshot = exported_team(saved, boss_mode=boss_mode, strategy_team=ids)
+                if snapshot is None:
+                    raise TeamSetupError(ui_text("package.invalidData"))
+                bonuses = {"heroes": {str(hero["model"]["typeId"]): {
+                    name: copy.deepcopy(hero["parts"].get(name)) for name in ACCOUNT_PARTS}
+                    for hero in prepared["heroes"]}, "observatory": copy.deepcopy(prepared.get("observatory") or {})}
+                if not valid_account_bonuses(bonuses, ids, boss_mode):
+                    raise TeamSetupError(ui_text("package.noAccountBonuses"))
+                package["team"] = snapshot
+                package["accountBonuses"] = bonuses
+            except (TeamSetupError, OSError, ValueError) as error:
+                issue = str(error)
+                self._package_log(f"strategy_package_team_read_failed boss={boss_mode} strategy={strategy_id}: {error}")
+        elif "team" not in package and ids:
+            saved = self.strategy_team_store().load(boss_mode, strategy_id)
+            if saved and same_instances:
+                snapshot = exported_team(saved, boss_mode=boss_mode, strategy_team=ids)
+                if snapshot:
+                    package["team"] = snapshot
+        if "team" in package and "accountBonuses" not in package and isinstance(pid, int) and not isinstance(pid, bool):
+            try:
+                bonuses = self.account_bonuses(pid, ids)
+                if valid_account_bonuses(bonuses, ids, boss_mode):
+                    package["accountBonuses"] = bonuses
+            except (TeamSetupError, OSError, ValueError) as error:
+                issue = str(error)
+                self._package_log(f"strategy_package_bonuses_read_failed boss={boss_mode} strategy={strategy_id}: {error}")
+        if "opening" not in package:
+            service = getattr(self, "hydra_simulations" if boss_mode == "hydra" else "simulations", None)
+            roots = list(service.capture_roots.values()) if boss_mode == "hydra" and service else \
+                [service.capture_root] if service else []
+            capture = select_opening(roots, boss_mode, ids)
+            if capture:
+                package["opening"] = pack_opening(capture, boss_mode)
+        package["savedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if issue:
+            package["lastReadIssue"] = issue
+        status = package_status({**config, "simulationPackage": package}, boss_mode)
+        self._package_log(f"strategy_package_saved boss={boss_mode} strategy={strategy_id} "
+                          f"status={status['status']} team={status['team']} opening={status['opening']} "
+                          f"accountBonuses={status['accountBonuses']}")
+        config["simulationPackage"] = package
+        return config
+
+    def _package_log(self, message: str) -> None:
+        logger = getattr(self, "package_log", None)
+        if callable(logger):
+            logger(message)
+
     def recover_strategies(self, document: Any = None, boss_mode: str = "chimera") -> None:
         with self.lock:
             if self.controller.snapshot()["running"]:
-                raise ValueError("请先暂停接管再恢复策略")
+                raise ValueError(ui_text("web.pauseBeforeRecovery"))
             if document is None:
                 recover_strategy_store(self.store_path())
                 return
@@ -706,17 +842,32 @@ class ChimeraService:
             if (not isinstance(document, dict) or document.get("format") != "raid-boss-strategy"
                     or type(document.get("version")) is not int or document["version"] not in {1, 2}
                     or not isinstance(document.get("strategy"), dict)):
-                raise ValueError("请选择有效的导出策略文件")
+                raise ValueError(ui_text("web.chooseExport"))
             if document.get("bossMode") != boss_mode:
-                raise ValueError("导出策略所属 Boss 与当前模式不一致")
+                raise ValueError(ui_text("web.exportOtherBoss"))
             config = normalized_strategy(document["strategy"], strategy_template(boss_mode), boss_mode)
             if isinstance(config.get("team"), dict):
                 config["team"].pop("heroInstanceIds", None)
+            supplied = document.get("simulationPackage", config.get("simulationPackage"))
+            package = sanitize_package(supplied, boss_mode, (config.get("team") or {}).get("heroTypeIds"))
+            if supplied is not None and (package is None or any(
+                    supplied.get(key) is not None and key not in package for key in ("team", "opening", "accountBonuses"))):
+                raise ValueError(ui_text("package.invalidData"))
+            if package:
+                config["simulationPackage"] = package
+                if package.get("team"):
+                    config["referenceTeam"] = sanitize_reference_team(package["team"])
+                    if not config.get("team"):
+                        config["team"] = {"heroTypeIds": [hero["typeId"] for hero in package["team"]["heroes"]]}
+            elif document.get("teamSnapshot"):
+                reference = sanitize_reference_team(document["teamSnapshot"])
+                if reference:
+                    config["referenceTeam"] = reference
             store = update_mode_strategy(default_store(), boss_mode, config)
             restore_strategy_value(self.store_path(), store)
 
     def create_strategy_profile(
-        self, value: Any, name: Any, boss_mode: str = "chimera"
+        self, value: Any, name: Any, boss_mode: str = "chimera", pid: int | None = None
     ) -> dict[str, Any]:
         boss_mode = normalize_mode(boss_mode)
         profile_name = self.strategy_profile_name(name)
@@ -733,6 +884,7 @@ class ChimeraService:
                 strategy_id = f"strategy-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
                 if strategy_id not in existing_ids:
                     break
+            config = self._package_strategy(config, boss_mode, pid, previous, strategy_id)
             updated = update_mode_strategy(
                 store, boss_mode, config, strategy_id=strategy_id
             )
@@ -789,15 +941,17 @@ class ChimeraService:
             ).strip()
             strategy = strategy_for_mode(store, boss_mode, selected_id)
         team = strategy.get("team")
-        snapshot = None
+        package = sanitize_package(strategy.pop("simulationPackage", None), boss_mode,
+                                   team.get("heroTypeIds") if isinstance(team, dict) else None)
+        snapshot = package.get("team") if package else None
         if isinstance(team, dict):
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             strategy["team"] = portable_team
             # The team as it was when the strategy group was saved, simulatable by others.
             saved = self.strategy_team_store().load(boss_mode, selected_id)
-            if saved and same_team(saved.get("heroTypeIds"), portable_team.get("heroTypeIds")):
-                snapshot = exported_team(saved)
+            if snapshot is None and saved and ordered_team_matches(saved.get("heroTypeIds"), portable_team.get("heroTypeIds")):
+                snapshot = exported_team(saved, boss_mode=boss_mode, strategy_team=portable_team.get("heroTypeIds"))
         # An imported strategy passes its author's team on unchanged; otherwise
         # the newest look of this team on a preparation screen (display only).
         snapshot = snapshot or sanitize_reference_team(strategy.get("referenceTeam"))
@@ -810,6 +964,7 @@ class ChimeraService:
             "bossMode": boss_mode,
             "strategy": strategy,
             **({"teamSnapshot": snapshot} if snapshot else {}),
+            **({"simulationPackage": package} if package else {}),
         }
 
     def import_strategy_profile(
@@ -818,31 +973,44 @@ class ChimeraService:
         """Validate a portable document and create an independent profile."""
         boss_mode = normalize_mode(boss_mode)
         if not isinstance(document, dict):
-            raise ValueError("导入文件的根节点必须是对象")
+            raise ValueError(ui_text("web.importRootNotObject"))
         if document.get("format") == "raid-boss-strategy":
             version = document.get("version")
             if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2}:
-                raise ValueError("不支持此策略导出版本")
+                raise ValueError(ui_text("web.importVersion"))
             value = document.get("strategy")
             declared_mode = document.get("bossMode")
         elif "format" in document:
-            raise ValueError("不支持此策略文件格式")
+            raise ValueError(ui_text("web.importFormat"))
         else:
             # Also accept a raw strategy JSON from older/source-only builds.
             value = document
             declared_mode = document.get("bossMode")
         if not isinstance(value, dict):
-            raise ValueError("导入文件中没有有效策略")
+            raise ValueError(ui_text("web.importNoStrategy"))
         if declared_mode is not None and normalize_mode(declared_mode) != boss_mode:
-            raise ValueError("策略所属 Boss 与当前界面不一致，请先切换模式")
+            raise ValueError(ui_text("web.importOtherBoss"))
         portable = dict(value)
+        supplied_package = document.get("simulationPackage", portable.get("simulationPackage"))
         team = portable.get("team")
         if isinstance(team, dict):
             portable_team = dict(team)
             portable_team.pop("heroInstanceIds", None)
             portable["team"] = portable_team
+        package = sanitize_package(supplied_package, boss_mode,
+                                   (portable.get("team") or {}).get("heroTypeIds"))
+        if supplied_package is not None and (package is None or any(
+                supplied_package.get(key) is not None and key not in package
+                for key in ("team", "opening", "accountBonuses"))):
+            raise ValueError(ui_text("package.invalidData"))
+        portable.pop("simulationPackage", None)
+        if package:
+            portable["simulationPackage"] = package
+            if not isinstance(portable.get("team"), dict) and package.get("team"):
+                portable["team"] = {"heroTypeIds": [hero["typeId"] for hero in package["team"]["heroes"]]}
         # The author's heroes and gear stay with the strategy for reference.
-        reference = sanitize_reference_team(document.get("teamSnapshot")) or \
+        reference = sanitize_reference_team(package.get("team") if package else None) or \
+            sanitize_reference_team(document.get("teamSnapshot")) or \
             sanitize_reference_team(portable.get("referenceTeam"))
         portable.pop("referenceTeam", None)
         if reference:
@@ -1237,7 +1405,7 @@ class ChimeraService:
         except (FileNotFoundError, ValueError, OSError) as error:
             return {
                 "bossMode": boss_mode,
-                "statusLabel": f"尚无已验证的{spec['label']}状态",
+                "statusLabel": ui_text("web.noVerifiedState", spec=spec['label']),
                 "agentReady": False,
                 "modeReady": False,
                 "error": str(error),
@@ -1359,25 +1527,25 @@ class ChimeraService:
         form = chimera.get("currentForm")
         hero = state.get("activeHeroName")
         if screen == "team_selection" and mode_matches:
-            status = f"{spec['label']}队伍准备界面"
+            status = ui_text("web.teamScreen", spec=spec['label'])
         elif screen == "result":
-            status = "战绩结算画面 · 等待你的决定"
+            status = ui_text("web.resultScreen")
         elif state and mode_matches:
             status = " · ".join(
                 value
                 for value in (
                     (
-                        {"Ultimate": "终极形态", "Ram": "公羊形态", "Lion": "狮子形态", "Snake": "毒蛇形态"}.get(str(form), str(form or "未知形态"))
+                        ui_text(CHIMERA_FORM_NAMES[str(form)]) if str(form) in CHIMERA_FORM_NAMES else str(form or ui_text("web.unknownForm"))
                         if boss_mode == "chimera"
-                        else f"{len(bosses)} 个在场目标"
+                        else ui_text("web.targetsOnField", bossesCount=len(bosses))
                     ),
-                    str(hero or "未知英雄"),
-                    "等待行动" if battle.get("waitingForManualCommand") else "战斗进行中",
+                    str(hero or ui_text("web.unknownChampion")),
+                    ui_text("web.waitingForAction") if battle.get("waitingForManualCommand") else ui_text("web.battleRunning"),
                 )
                 if value
             )
         else:
-            status = f"已连接 · 等待{spec['label']}状态"
+            status = ui_text("web.connectedWaiting", spec=spec['label'])
         damage = (
             ledger.get("damage", 0)
             if screen == "result" and ledger.get("bossMode") == boss_mode
@@ -1430,10 +1598,12 @@ class ChimeraService:
                       catalog_revision: str | None = None,
                       log_cursor: str | None = None) -> dict[str, Any]:
         state = self.live_state(pid, boss_mode) if pid is not None else {
-            "bossMode": boss_mode, "statusLabel": "没有找到 Raid 账户", "modeReady": False,
+            "bossMode": boss_mode, "statusLabel": ui_text("web.noAccount"), "modeReady": False,
         }
         health = storage_health(self.store_path())
         store = self.strategy_store() if health["ok"] else default_store()
+        if health["ok"]:
+            self._refresh_pending_package(store, boss_mode, pid)
         prepared = self.prepared_team_preview(pid)
         sources = self.team_sources(store, boss_mode, pid)
         return {
@@ -1451,6 +1621,73 @@ class ChimeraService:
             "teamPreview": self.team_preview_summary(pid, prepared),
             **self.catalog_payload(catalog_revision),
         }
+
+    def _refresh_pending_package(self, store: dict[str, Any], boss_mode: str, pid: int | None) -> None:
+        """Complete an interrupted save or a newly available opening automatically.
+
+        Work is bounded and account-pinned. No battles are started and no extra
+        UI operation is needed once the missing data becomes available.
+        """
+        refreshes = getattr(self, "package_refreshes", None)
+        if refreshes is None:
+            return
+        strategy_id = active_strategy_id(store, boss_mode)
+        config = strategy_for_mode(store, boss_mode, strategy_id)
+        ids = (config.get("team") or {}).get("heroTypeIds")
+        if not isinstance(ids, list) or len(ids) != TEAM_SIZE[boss_mode]:
+            return
+        status = package_status(config, boss_mode)
+        if status["status"] == "complete" and not (config.get("simulationPackage") or {}).get("lastReadIssue"):
+            return
+        account = self.strategy_account()
+        key = (account.key, boss_mode, strategy_id)
+        with self.lock:
+            if time.monotonic() - refreshes.get(key, float("-inf")) < 10:
+                return
+            if self.controller.snapshot(boss_mode).get("running"):
+                return
+            refreshes[key] = time.monotonic()
+        observed_revision = revision(config)
+        observed_package = revision({"package": config.get("simulationPackage")})
+
+        def work() -> None:
+            self._store_context.account = account
+            try:
+                if self.stopping.is_set():
+                    return
+                # Never store a read from an account that changed during an
+                # asynchronous refresh of the selected game process.
+                if isinstance(pid, int) and account.key:
+                    current = usable_account_state(pid, latest_account_state(pid))
+                    if not isinstance(current, dict) or str(current.get("userId")) != account.key:
+                        return
+                refreshed = self._package_strategy(config, boss_mode, pid, config, strategy_id)
+                before = {key: value for key, value in (config.get("simulationPackage") or {}).items() if key not in {"savedAt", "lastReadIssue"}}
+                after = {key: value for key, value in (refreshed.get("simulationPackage") or {}).items() if key not in {"savedAt", "lastReadIssue"}}
+                if before == after or self.stopping.is_set():
+                    return
+                if isinstance(pid, int) and account.key:
+                    current = usable_account_state(pid, latest_account_state(pid))
+                    if not isinstance(current, dict) or str(current.get("userId")) != account.key:
+                        return
+                if self.controller.snapshot(boss_mode).get("running"):
+                    return
+                with self.lock:
+                    latest = self.strategy_store()
+                    current_config = strategy_for_mode(latest, boss_mode, strategy_id)
+                    if revision(current_config) != observed_revision \
+                            or revision({"package": current_config.get("simulationPackage")}) != observed_package \
+                            or self.stopping.is_set():
+                        return
+                    selected = active_strategy_id(latest, boss_mode)
+                    active_mode = latest.get("activeMode")
+                    updated = update_mode_strategy(latest, boss_mode, refreshed, strategy_id)
+                    updated["modes"][boss_mode]["activeStrategyId"] = selected
+                    updated["activeMode"] = active_mode
+                    write_strategy_store(self.store_path(), updated)
+            except (OSError, ValueError) as error:
+                self._package_log(f"strategy_package_refresh_failed boss={boss_mode} strategy={strategy_id}: {error}")
+        threading.Thread(target=work, name="strategy-package-refresh", daemon=True).start()
 
     def prepared_team_preview(self, pid: int | None) -> dict[str, Any] | None:
         """The preparation-screen team with its battle-setup parts (internal; not for the interface)."""
@@ -1501,29 +1738,40 @@ class ChimeraService:
         strategy_id = active_strategy_id(store, boss_mode)
         config = strategy_for_mode(store, boss_mode, strategy_id)
         team = config.get("team") if isinstance(config.get("team"), dict) else {}
+        package = sanitize_package(config.get("simulationPackage"), boss_mode, team.get("heroTypeIds")) or {}
+        reference = package.get("team") or sanitize_reference_team(config.get("referenceTeam"))
+        saved = unpack_simulation(package["team"]["simulation"], boss_mode, team.get("heroTypeIds")) if package.get("team") else None
+        if saved is not None:
+            saved.update(savedAt=package["team"].get("savedAt"), display=package["team"])
+        else:
+            saved = self.strategy_team_store().load(boss_mode, strategy_id)
         # The current team and every account bonus are read from the running game.
-        return {"strategyId": strategy_id, "accountReadable": isinstance(pid, int), **team_sources(
+        sources = {"strategyId": strategy_id, "accountReadable": isinstance(pid, int), **team_sources(
             boss_mode, team.get("heroTypeIds"), bound=bool(team_hero_ids(team)),
-            saved=self.strategy_team_store().load(boss_mode, strategy_id),
-            reference=sanitize_reference_team(config.get("referenceTeam")), check=latest_check(boss_mode))}
+            saved=saved,
+            reference=reference, check=latest_check(boss_mode))}
+        if sources.get("author"):
+            sources["author"]["offlineReady"] = bool(package.get("team") and package.get("accountBonuses"))
+            sources["author"]["matches"] = ordered_team_matches(sources["author"]["heroTypeIds"], team.get("heroTypeIds"))
+        return sources
 
     @staticmethod
     def agent_request(pid: Any, ids: list[int], kind: int, slot: str, what: str,
                       timeout: float = 5.0) -> dict[str, Any]:
         """Ask the game (read only) for account data and wait for the answer with its nonce."""
         if not isinstance(pid, int) or isinstance(pid, bool):
-            raise TeamSetupError(f"需要打开游戏读取{what}")
+            raise TeamSetupError(ui_text("web.needGame", what=what))
         nonce = secrets.randbits(62) + 1
         try:
             queued = request_account_bonuses(pid, [int(value) for value in ids], nonce, kind=kind)
         except RuntimeError as error:
             if "ABI" in str(error) or "incompatible" in str(error):
-                raise TeamSetupError("游戏内模块不是最新版本：请重启一次游戏") from error
-            raise TeamSetupError(f"没有读到{what}：{error}") from error
+                raise TeamSetupError(ui_text("web.readerOutdated")) from error
+            raise TeamSetupError(ui_text("web.notRead", what=what, error=error)) from error
         except (OSError, ValueError) as error:
-            raise TeamSetupError(f"没有读到{what}：{error}") from error
+            raise TeamSetupError(ui_text("web.notRead", what=what, error=error)) from error
         if not queued.get("queued"):
-            raise TeamSetupError(f"游戏暂时无法读取{what}（{queued.get('agentResult')}），请稍后重试")
+            raise TeamSetupError(ui_text("web.readBusy", what=what, get=queued.get('agentResult')))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -1534,13 +1782,13 @@ class ChimeraService:
             if isinstance(raw, dict) and raw.get("nonce") == nonce:
                 return raw
             time.sleep(0.05)
-        raise TeamSetupError(f"游戏没有及时返回{what}：请确认游戏在运行后重试")
+        raise TeamSetupError(ui_text("web.readTimeout", what=what))
 
     @classmethod
     def account_bonuses(cls, pid: Any, type_ids: list[int]) -> dict[str, Any]:
         """The current account's academy, building and area bonuses for these hero types (read only)."""
         raw = cls.agent_request(pid, type_ids, REQUEST_BONUSES_BY_TYPE, "account_bonuses",
-                                "当前账号的学院、建筑和区域加成")
+                                ui_text("web.whatBonuses"))
         return decode_account_bonuses(raw, type_ids)
 
     def boss_skill_labels(self, timeline: Any, actors: Any = None) -> dict[str, dict[str, Any]]:
@@ -1558,10 +1806,10 @@ class ChimeraService:
             ), None)
             try:
                 if pid is None:
-                    raise TeamSetupError("没有可读取的游戏")
+                    raise TeamSetupError(ui_text("web.noGame"))
                 for start in range(0, len(missing), 8):
                     chunk = missing[start:start + 8]
-                    raw = self.agent_request(pid, chunk, REQUEST_SKILL_TYPES, "team_data", "Boss 技能说明", 2.0)
+                    raw = self.agent_request(pid, chunk, REQUEST_SKILL_TYPES, "team_data", ui_text("web.whatBossSkills"), 2.0)
                     if raw.get("status") != "captured":
                         raise TeamSetupError(str(raw.get("reason") or "unavailable"))
                     # Ids the static data does not have are recorded too, so they are not asked again.
@@ -1574,22 +1822,22 @@ class ChimeraService:
     @classmethod
     def roster(cls, pid: Any) -> list[dict[str, Any]]:
         """The current account's champions, for choosing a strategy group's team (read only)."""
-        return decode_roster(cls.agent_request(pid, [1], REQUEST_ROSTER, "team_data", "账号的英雄列表", 10.0))
+        return decode_roster(cls.agent_request(pid, [1], REQUEST_ROSTER, "team_data", ui_text("web.whatRoster"), 10.0))
 
     @classmethod
     def team_data(cls, pid: Any, hero_ids: list[int], boss_mode: str, timeout: float = 5.0) -> dict[str, Any]:
         """These heroes of the current account as they are now: hero screen data and battle inputs."""
         kind = REQUEST_TEAM_DATA | (REQUEST_HYDRA if boss_mode == "hydra" else 0)
-        raw = cls.agent_request(pid, hero_ids, kind, "team_data", "策略组英雄现在的装备", timeout)
+        raw = cls.agent_request(pid, hero_ids, kind, "team_data", ui_text("web.whatTeamGear"), timeout)
         preview = decode_preview(raw)
         if preview is None or preview.get("status") != "captured":
             reason = (preview or {}).get("reason") or "unknown"
             if reason == "heroes_not_found":
-                raise TeamSetupError("当前账号里找不到策略组的英雄（可能切换了账号，或英雄已不在）")
-            raise TeamSetupError(f"没有读到策略组英雄现在的装备（{reason}）")
+                raise TeamSetupError(ui_text("web.teamNotOnAccount"))
+            raise TeamSetupError(ui_text("web.teamGearNotRead", reason=reason))
         found = [hero.get("heroId") for hero in preview.get("heroes") or []]
         if sorted(found) != sorted(hero_ids):
-            raise TeamSetupError("当前账号里找不到策略组的部分英雄（可能切换了账号，或英雄已不在）")
+            raise TeamSetupError(ui_text("web.partOfTeamNotOnAccount"))
         preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return preview
 
@@ -1630,10 +1878,25 @@ class ChimeraService:
         config = stored if isinstance(stored.get("team"), dict) else config
         team = config.get("team") if isinstance(config.get("team"), dict) else {}
         hero_ids = team_hero_ids(team)
+        package = sanitize_package(config.get("simulationPackage"), boss_mode, team.get("heroTypeIds")) or {}
+        reference = package.get("team") or sanitize_reference_team(config.get("referenceTeam"))
+        saved = unpack_simulation(package["team"]["simulation"], boss_mode, team.get("heroTypeIds")) if package.get("team") else None
+        if saved is not None:
+            saved.update(savedAt=package["team"].get("savedAt"), display=package["team"])
+        else:
+            saved = self.strategy_team_store().load(boss_mode, strategy_id) if strategy_id else None
+
+        def bonuses(type_ids: list[int]) -> dict[str, Any]:
+            saved_bonuses = package.get("accountBonuses")
+            if source in {"author", "strategy"} and valid_account_bonuses(saved_bonuses, type_ids, boss_mode):
+                return {**saved_bonuses, "heroes": {int(key): value for key, value in saved_bonuses["heroes"].items()}}
+            if pid is None:
+                raise TeamSetupError(ui_text("package.noAccountBonuses"))
+            return self.account_bonuses(pid, type_ids)
 
         def current() -> dict[str, Any] | None:
             if not hero_ids:
-                raise TeamSetupError("这个策略组还没有绑定你账号里的英雄：在“策略组队伍”卡片上选择英雄")
+                raise TeamSetupError(ui_text("web.teamNotBound"))
             preview = self.team_data(pid, hero_ids, boss_mode)
             self.check_team_setups(preview)
             team = preview_team(preview, boss_mode)
@@ -1643,11 +1906,11 @@ class ChimeraService:
 
         return simulation_team(
             source, boss_mode, team.get("heroTypeIds"),
-            saved=self.strategy_team_store().load(boss_mode, strategy_id) if strategy_id else None,
-            reference=sanitize_reference_team(config.get("referenceTeam")),
+            saved=saved,
+            reference=reference,
             check=latest_check(boss_mode),
             current=current if pid is not None else None,
-            bonuses=(lambda type_ids: self.account_bonuses(pid, type_ids)) if pid is not None else None)
+            bonuses=bonuses if pid is not None or package.get("accountBonuses") else None)
 
     def team_preview_summary(self, pid: int | None, preview: dict[str, Any] | None = None) -> dict[str, Any] | None:
         preview = preview if preview is not None else self.prepared_team_preview(pid)
@@ -1658,39 +1921,64 @@ class ChimeraService:
                 "heroes": len(preview.get("heroes") or [])}
 
     def simulation_overview(self) -> dict[str, Any]:
-        return {"captures": list_chimera_captures(8), "job": self.simulations.status(),
+        return self._package_overview("chimera", {"captures": list_chimera_captures(8), "job": self.simulations.status(),
                 "recent": recent_chimera_simulations(8),
-                "battleForecasts": recent_chimera_simulations(6, root=BATTLE_FORECAST_ROOT)}
+                "battleForecasts": recent_chimera_simulations(6, root=BATTLE_FORECAST_ROOT)})
 
     def hydra_simulation_overview(self) -> dict[str, Any]:
-        return {"captures": self.hydra_simulations.captures(8), "job": self.hydra_simulations.status(),
-                "recent": recent_hydra_simulations(8)}
+        return self._package_overview("hydra", {"captures": self.hydra_simulations.captures(8), "job": self.hydra_simulations.status(),
+                "recent": recent_hydra_simulations(8)})
+
+    def _package_overview(self, boss_mode: str, overview: dict[str, Any]) -> dict[str, Any]:
+        store = self.strategy_store()
+        strategy_id = active_strategy_id(store, boss_mode)
+        config = strategy_for_mode(store, boss_mode, strategy_id)
+        package = sanitize_package(config.get("simulationPackage"), boss_mode,
+                                   (config.get("team") or {}).get("heroTypeIds"))
+        row = capture_row(package, strategy_id, boss_mode, str(config.get("name") or "")) if package else None
+        return {**overview, "strategyId": strategy_id,
+                "captures": ([row] if row else []) + overview["captures"]}
+
+    def _portable_capture(self, body: dict[str, Any], boss_mode: str) -> Path | None:
+        capture_id = str(body.get("captureId") or "")
+        if not capture_id.startswith("strategy-package:"):
+            return None
+        strategy_id = str(body.get("strategyId") or "")
+        if capture_id != f"strategy-package:{strategy_id}" or not strategy_id:
+            raise ValueError(ui_text("package.invalidData"))
+        config = strategy_for_mode(self.strategy_store(), boss_mode, strategy_id)
+        package = sanitize_package(config.get("simulationPackage"), boss_mode,
+                                   (config.get("team") or {}).get("heroTypeIds")) or {}
+        root = getattr(self, "portable_capture_root", PROJECT_ROOT / "cache" / "strategy-openings") / (self.strategy_account().key or "shared")
+        return materialize_opening(package.get("opening"), root, boss_mode)
 
     def start_hydra_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
         config = normalized_strategy(body.get("config"), {}, "hydra")
         runs = body.get("runs")
         if not isinstance(runs, int) or isinstance(runs, bool):
-            raise ValueError("模拟场数无效")
+            raise ValueError(ui_text("web.badRunCount"))
         pid = body.get("pid")
         return self.hydra_simulations.start(
             config,
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
-            team=self.simulation_team(body, config, "hydra"))
+            team=self.simulation_team(body, config, "hydra"),
+            capture_folder=self._portable_capture(body, "hydra"))
 
     def start_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
         config = normalized_strategy(body.get("config"), {}, "chimera")
         runs = body.get("runs")
         if not isinstance(runs, int) or isinstance(runs, bool):
-            raise ValueError("模拟场数无效")
+            raise ValueError(ui_text("web.badRunCount"))
         pid = body.get("pid")
         return self.simulations.start(
             config,
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
-            team=self.simulation_team(body, config, "chimera"))
+            team=self.simulation_team(body, config, "chimera"),
+            capture_folder=self._portable_capture(body, "chimera"))
 
     def bootstrap(
         self, pid: int | None = None, force: bool = False,
@@ -1713,7 +2001,7 @@ class ChimeraService:
         live = (
             self.live_state(pid, boss_mode)
             if isinstance(pid, int)
-            else {"bossMode": boss_mode, "statusLabel": "没有找到 Raid 账户", "modeReady": False}
+            else {"bossMode": boss_mode, "statusLabel": ui_text("web.noAccount"), "modeReady": False}
         )
         team = live.get("teamHeroIds") if isinstance(live, dict) else []
         if isinstance(team, list) and team:
@@ -1736,10 +2024,7 @@ class ChimeraService:
             "state": live,
             "controller": self.controller.snapshot(boss_mode),
             "cacheStatus": (
-                f"{len(difficulties) if isinstance(difficulties, list) else 0} 个难度 · "
-                f"{self.visual_cache_status.get('avatars', 0)} 个头像 · "
-                f"{self.visual_cache_status.get('skills', 0)} 个当前队伍技能图标 · "
-                f"{self.visual_cache_status.get('rewards', 0)} 个奖励图标已缓存"
+                ui_text("web.cacheStatus", difficultiesCount=len(difficulties) if isinstance(difficulties, list) else 0, get=self.visual_cache_status.get('avatars', 0), get2=self.visual_cache_status.get('skills', 0), get3=self.visual_cache_status.get('rewards', 0))
             ),
         }
 
@@ -1748,18 +2033,18 @@ class ChimeraService:
         processes = {int(item["pid"]): item for item in self.refresh_processes()}
         item = processes.get(pid)
         if item is None:
-            raise RuntimeError("所选 Raid 进程已经不存在")
+            raise RuntimeError(ui_text("web.processGone"))
         account = item.get("account")
         if not isinstance(account, dict):
-            raise RuntimeError("必须先读取到游戏内用户名和玩家 ID，不能只按 PID 启动")
+            raise RuntimeError(ui_text("web.needAccountIdentity"))
         name = account.get("accountName")
         user_id = account.get("userId")
         if not isinstance(name, str) or not name or not isinstance(user_id, int) or isinstance(user_id, bool):
-            raise RuntimeError("游戏内账户信息不完整，已拒绝启动")
+            raise RuntimeError(ui_text("web.accountIncomplete"))
         live = self.live_state(pid, boss_mode)
         if boss_mode == "hydra" and live.get("modeReady") is not True:
             raise RuntimeError(
-                "尚未读取到当前账户的六头蛇准备界面或战斗状态；为避免误操作，暂不启动接管"
+                ui_text("web.hydraNotDetected")
             )
         self.use_strategy_account(pid, account)
         with self.lock:
@@ -1775,6 +2060,7 @@ class ChimeraService:
             requested_hero_id = int(parts[0])
             hero = self.hero_catalog.get(requested_hero_id)
             if hero is None:
+                # A rank/ascension variant id: the catalog's runtime ids, or the base id.
                 hero = next(
                     (
                         candidate
@@ -1783,7 +2069,7 @@ class ChimeraService:
                         and requested_hero_id in candidate.get("runtimeTypeIds", [])
                     ),
                     None,
-                )
+                ) or self.hero_catalog.get(requested_hero_id - requested_hero_id % 10)
             if isinstance(hero, dict):
                 hero_id = hero_catalog_identity(requested_hero_id, hero)
                 native = game_hero_asset(hero_id, hero)
@@ -1807,9 +2093,14 @@ class ChimeraService:
             )
         if kind == "skill" and len(parts) == 2 and all(value.isdigit() for value in parts):
             hero_id, identity = map(int, parts)
+            # Skills the game never shows have no icon (the team preview leaves them out).
+            data = getattr(self.hero_data, "data", None)
+            if isinstance(data, dict) and ((data.get("skills") or {}).get(str(identity)) or {}).get("hidden") is True:
+                return None
             hero = self.hero_catalog.get(hero_id)
             if hero is None:
-                # A live hero type id (rank/ascension variant) from the team preview.
+                # A live hero type id (rank/ascension variant) from the team preview,
+                # or one the account has not shown yet: the base id plus the rank digit.
                 hero = next(
                     (
                         candidate
@@ -1817,9 +2108,8 @@ class ChimeraService:
                         if isinstance(candidate, dict)
                         and hero_id in candidate.get("runtimeTypeIds", [])
                     ),
-                    {},
-                )
-                # Hero type ids are the base id plus the rank digit.
+                    None,
+                ) or self.hero_catalog.get(hero_id - hero_id % 10) or {}
                 hero_id = hero_catalog_identity(hero_id, hero) if hero else hero_id - hero_id % 10
             if isinstance(hero, dict):
                 skill = next(
@@ -1889,11 +2179,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0 or length > 2_000_000:
+        if length <= 0:
             return {}
+        if length > 20 * 1024 * 1024:
+            raise ValueError(ui_text("package.invalidData"))
         value = json.loads(self.rfile.read(length).decode("utf-8"))
         if not isinstance(value, dict):
-            raise ValueError("请求格式无效")
+            raise ValueError(ui_text("web.badRequest"))
         return value
 
     def do_GET(self) -> None:  # noqa: N802
@@ -1910,13 +2202,13 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/session":
                 supplied = query.get("token", [""])[0]
                 if not secrets.compare_digest(str(supplied), self.server.token):
-                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
                     return
                 self._session_stream()
                 return
             if parsed.path == "/api/bootstrap":
                 if not self._write_authorized():
-                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
                     return
                 raw_pid = query.get("pid", [None])[0]
                 pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
@@ -1929,7 +2221,7 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/state":
                 if not self._write_authorized():
-                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
                     return
                 raw_pid = query.get("pid", [None])[0]
                 if not raw_pid or not str(raw_pid).isdigit():
@@ -1944,15 +2236,23 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/roster":
                 if not self._write_authorized():
-                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
                     return
                 raw_pid = query.get("pid", [None])[0]
                 pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
                 self._json({"heroes": self.server.service.roster(pid)})
                 return
+            if parsed.path == "/api/hero-data":
+                if not self._write_authorized():
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
+                    return
+                raw_pid = query.get("pid", [None])[0]
+                pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
+                self._json(self.server.service.hero_data.snapshot(pid))
+                return
             if parsed.path == "/api/team-preview":
                 if not self._write_authorized():
-                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
                     return
                 raw_pid = query.get("pid", [None])[0]
                 pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
@@ -1960,7 +2260,7 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path in ("/api/chimera-simulation", "/api/hydra-simulation"):
                 if not self._write_authorized():
-                    self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
                     return
                 service = (self.server.service.hydra_simulations if parsed.path == "/api/hydra-simulation"
                            else self.server.service.simulations)
@@ -1975,10 +2275,10 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/api/asset/"):
                 parts = [part for part in parsed.path.split("/") if part][2:]
                 if len(parts) < 2:
-                    raise FileNotFoundError("资源不存在")
+                    raise FileNotFoundError(ui_text("web.assetNotFound"))
                 asset = self.server.service.asset(parts[0], parts[1:])
                 if asset is None or not asset.is_file():
-                    raise FileNotFoundError("资源尚未缓存")
+                    raise FileNotFoundError(ui_text("web.assetNotCached"))
                 payload = asset.read_bytes()
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", mimetypes.guess_type(asset.name)[0] or "application/octet-stream")
@@ -2016,7 +2316,7 @@ class ChimeraHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._write_authorized():
-            self._error(PermissionError("本次界面会话已失效"), HTTPStatus.FORBIDDEN)
+            self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
             return
         try:
             body = self._body()
@@ -2040,14 +2340,15 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     config, boss_mode,
                     strategy_id=strategy_id,
                     expected_revision=body.get("expectedRevision"),
+                    pid=body.get("pid"),
                 )
-                team_saved = snapshot_requested(body) and self.server.service.remember_strategy_team(
-                    body.get("pid"), boss_mode, strategy_id or result["activeStrategyId"])
-                self._json({**result, "message": "策略组和队伍数据已保存" if team_saved else "策略组已保存"})
+                status = result["simulationPackage"]
+                self._json({**result, "message": ui_text("app.strategySavedWithSimulationPackage")
+                            if status["status"] == "complete" else ui_text("app.strategySavedWithPartialSimulationPackage", reason=status["reason"])})
                 return
             if self.path == "/api/config/recover":
                 self.server.service.recover_strategies(body.get("document"), body.get("bossMode", "chimera"))
-                self._json({"message": "已恢复策略；原文件已保留"})
+                self._json({"message": ui_text("web.restored")})
                 return
             if self.path == "/api/preferences":
                 self._json(self.server.service.save_ui_preferences(body))
@@ -2059,33 +2360,32 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 if action == "create":
                     config = body.get("config")
                     result = self.server.service.create_strategy_profile(
-                        config, body.get("name"), boss_mode
+                        config, body.get("name"), boss_mode, pid=body.get("pid")
                     )
-                    message = "新策略组已创建"
-                    if snapshot_requested(body) and self.server.service.remember_strategy_team(
-                            body.get("pid"), boss_mode, result["activeStrategyId"]):
-                        message = "新策略组已创建，队伍数据已保存"
+                    message = ui_text("web.created")
+                    if result["simulationPackage"]["status"] == "complete":
+                        message = ui_text("app.strategySavedWithSimulationPackage")
                 elif action == "rename":
                     if not strategy_id:
-                        raise ValueError("缺少策略组 ID")
+                        raise ValueError(ui_text("web.missingGroupId"))
                     result = self.server.service.rename_strategy_profile(
                         strategy_id, body.get("name"), boss_mode
                     )
-                    message = "策略组已重命名"
+                    message = ui_text("web.renamed")
                 elif action == "select":
                     if not strategy_id:
-                        raise ValueError("缺少策略组 ID")
+                        raise ValueError(ui_text("web.missingGroupId"))
                     result = self.server.service.select_strategy_profile(
                         strategy_id, boss_mode
                     )
-                    message = "已切换策略组"
+                    message = ui_text("web.switched")
                 elif action == "delete":
                     if not strategy_id:
-                        raise ValueError("缺少策略组 ID")
+                        raise ValueError(ui_text("web.missingGroupId"))
                     result = self.server.service.delete_strategy_profile(
                         strategy_id, boss_mode
                     )
-                    message = "策略组已删除"
+                    message = ui_text("web.deleted")
                 elif action == "export":
                     document = self.server.service.export_strategy_profile(
                         strategy_id or None, boss_mode
@@ -2096,15 +2396,15 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     result = self.server.service.import_strategy_profile(
                         body.get("document"), boss_mode
                     )
-                    message = "策略已导入为新的策略组"
+                    message = ui_text("web.imported")
                 else:
-                    raise ValueError("未知的策略组操作")
+                    raise ValueError(ui_text("web.unknownGroupAction"))
                 self._json({**result, "message": message})
                 return
             if self.path == "/api/start":
                 pid = body.get("pid")
                 if not isinstance(pid, int) or isinstance(pid, bool):
-                    raise ValueError("请选择游戏内账户")
+                    raise ValueError(ui_text("web.chooseAccount"))
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
                 self._json(
                     {"controller": self.server.service.start(pid, boss_mode)}
@@ -2135,7 +2435,7 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 self.server.service.controller.clear_logs(boss_mode)
                 self._json({"controller": self.server.service.controller.snapshot(boss_mode)})
                 return
-            self._error(FileNotFoundError("接口不存在"), HTTPStatus.NOT_FOUND)
+            self._error(FileNotFoundError(ui_text("web.apiNotFound")), HTTPStatus.NOT_FOUND)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             return
         except Exception as error:
@@ -2145,7 +2445,7 @@ class ChimeraHandler(BaseHTTPRequestHandler):
         relative = unquote(raw_path).lstrip("/") or "index.html"
         candidate = (DIST_DIR / relative).resolve()
         if DIST_DIR.resolve() not in candidate.parents and candidate != DIST_DIR.resolve():
-            raise FileNotFoundError("页面不存在")
+            raise FileNotFoundError(ui_text("web.pageNotFound"))
         if not candidate.is_file():
             candidate = DIST_DIR / "index.html"
         payload = candidate.read_bytes()
@@ -2228,7 +2528,7 @@ def run_internal_worker(worker: str, arguments: list[str]) -> int:
         elif worker == "controller":
             from chimera_controller import main as worker_main
         else:
-            raise ValueError(f"未知内部工作进程：{worker}")
+            raise ValueError(ui_text("web.unknownWorker", worker=worker))
         return int(worker_main())
     finally:
         # Preserve the worker marker for the outer error handler; otherwise a
@@ -2360,7 +2660,7 @@ def self_test() -> int:
     service.client_closed()
     assert service.client_count() == 0
     service.shutdown()
-    assert service.controller.snapshot()["status"] == "已关闭"
+    assert render(service.controller.snapshot()["status"], "zh-CN") == "已关闭"
     desktop_log("chimera-web-selftest-ok")
     return 0
 
@@ -2392,7 +2692,7 @@ def main() -> int:
     if args.self_test:
         return self_test()
     if not (DIST_DIR / "index.html").is_file():
-        raise RuntimeError("React 界面未构建，请重新运行安装步骤")
+        raise RuntimeError(ui_text("web.uiNotBuilt"))
 
     mutex: NamedMutex | None = None
     # The hidden no-window mode exists only for local UI verification.  It may
@@ -2404,7 +2704,7 @@ def main() -> int:
         except RuntimeError:
             ctypes.windll.user32.MessageBoxW(
                 None,
-                f"{APP_NAME} 已经在运行，请使用现有窗口。",
+                render(ui_text("web.alreadyOpen", app=APP_NAME), dialog_locale()),
                 APP_NAME,
                 0x40,
             )
@@ -2417,8 +2717,7 @@ def main() -> int:
                     migrated = migrate_legacy_data(PROJECT_ROOT)
                 except OSError as error:
                     raise RuntimeError(
-                        f"无法把旧版本的策略和记录复制到 {PROJECT_ROOT}：{error}\n\n"
-                        "旧数据没有改动；释放磁盘空间或检查权限后重新打开即可继续。"
+                        ui_text("web.migrationFailed", folder=PROJECT_ROOT, error=error)
                     ) from error
                 if migrated:
                     desktop_lifecycle_log(f"data_migrated from={migrated['from']} files={migrated['files']}")
@@ -2530,7 +2829,7 @@ if __name__ == "__main__":
         if not any(flag in sys.argv for flag in ("--self-test", "--no-window", "--internal-worker")):
             ctypes.windll.user32.MessageBoxW(
                 None,
-                f"{APP_NAME} 启动失败：\n\n{error}",
+                render(ui_text("web.startFailed", app=APP_NAME, error=str(error)), dialog_locale()),
                 APP_NAME,
                 0x10,
             )

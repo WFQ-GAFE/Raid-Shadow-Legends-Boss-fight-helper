@@ -35,6 +35,7 @@ from chimera_controller import (
     validate_strategy_config,
     wait_for_turn_advance,
 )
+from ui_text import render
 
 
 def sample_state() -> dict:
@@ -286,7 +287,7 @@ def main() -> int:
     positioned_decision = evaluate(position_rule, positioned)
     assert positioned_decision is not None
     assert positioned_decision.target_id == 1
-    assert positioned_decision.target_label.startswith("2号位")
+    assert render(positioned_decision.target_label, "zh-CN").startswith("2号位")
     strict_and_default = {
         "rules": [
             {
@@ -362,6 +363,22 @@ def main() -> int:
     reordered_default_decision = evaluate(reserved_listed_after_default, positioned)
     assert reordered_default_decision is not None
     assert reordered_default_decision.skill["typeId"] == 88961
+    # Rules keep their champion when they hold only the base id (a champion the
+    # catalog has not seen in a battle) or an id from before ascending; the
+    # strict rule's skill stays reserved for the default rule as well.
+    for rule_ids in ([8890], [8895]):
+        champion_rules = copy.deepcopy(strict_and_default)
+        for rule in champion_rules["rules"]:
+            rule["when"]["activeHeroTypeId"] = rule_ids
+        champion_decision = evaluate(champion_rules, positioned)
+        assert champion_decision is not None, rule_ids
+        assert champion_decision.rule == "default-priority", rule_ids
+        assert champion_decision.skill["typeId"] == 88961, rule_ids
+    other_champion = copy.deepcopy(strict_and_default)
+    for rule in other_champion["rules"]:
+        rule["when"]["activeHeroTypeId"] = [8880, 8886]
+    assert evaluate(other_champion, positioned) is None
+    assert not matches({"activeHeroTypeId": [889]}, positioned)
     form_switch_a1_config = {
         "rules": [
             {
@@ -798,8 +815,8 @@ def main() -> int:
             nonce=3,
             ignore_freshness=True,
         )
-    assert "未行动：当前英雄“测试英雄”没有匹配且可安全执行的规则" in no_match_output.getvalue()
-    assert "没有为当前英雄配置规则" in no_match_output.getvalue()
+    assert "未行动：当前英雄“测试英雄”没有匹配且可安全执行的规则" in render(no_match_output.getvalue(), "zh-CN")
+    assert "没有为当前英雄配置规则" in render(no_match_output.getvalue(), "zh-CN")
 
     assert not is_battle_decision_state({"type": "hero_catalog_state", "heroes": []})
     assert is_battle_decision_state({"type": "decision_state", "sequence": 1})
@@ -815,7 +832,7 @@ def main() -> int:
         boss.pop("isHydraHead", None)
         boss.pop("isHydraNeck", None)
     with patch("chimera_controller.ACTIVE_BOSS_MODE", "hydra"):
-        assert safety_reason(unidentified_hydra, 1500, ignore_freshness=True) == "当前回合快照尚未确认是六头蛇战斗"
+        assert render(safety_reason(unidentified_hydra, 1500, ignore_freshness=True), "zh-CN") == "当前回合快照尚未确认是六头蛇战斗"
 
     hydra_state = json.loads(json.dumps(executable_state))
     hydra_state["skills"][0]["name"] = "测试技能"
@@ -845,9 +862,9 @@ def main() -> int:
             ignore_freshness=True,
         )
     hydra_log = hydra_log_output.getvalue()
-    assert "英雄“测试英雄”命中规则“recoverable-manual-race”" in hydra_log
-    assert "执行成功：英雄“测试英雄”已按规则“recoverable-manual-race”" in hydra_log
-    assert "六头蛇回合 4→5" in hydra_log
+    assert "英雄“测试英雄”命中规则“recoverable-manual-race”" in render(hydra_log, "zh-CN")
+    assert "执行成功：英雄“测试英雄”已按规则“recoverable-manual-race”" in render(hydra_log, "zh-CN")
+    assert "六头蛇回合 4→5" in render(hydra_log, "zh-CN")
     assert wait_for_turn_advance(
         ResultIpc(), state, 123, timeout_seconds=0.1
     ) is None
