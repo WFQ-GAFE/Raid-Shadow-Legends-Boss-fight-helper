@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from forecast_advice import advice, error_advice, failure_advice
+from ui_text import LOCALES, render
 
 CODES = (
     "not_opening", "capture_timeout", "capture_unavailable", "opening_window_passed", "opening_validation_failed",
@@ -17,23 +18,28 @@ CODES = (
 )
 
 
-def test_every_failure_code_is_explained_in_both_languages() -> None:
+def test_every_failure_code_is_explained_in_every_language() -> None:
     for boss in ("hydra", "chimera"):
         for code in CODES:
             note = advice(boss, code)
             assert note is not None, code
-            for key in ("explain", "action", "explainEn", "actionEn"):
-                assert note[key].strip(), (code, key)
+            for key in ("explain", "action"):
+                for locale in LOCALES:
+                    text = render(note[key], locale)
+                    assert text.strip() and "advice." not in text, (code, key, locale)
     assert advice("hydra", "retry") is None and advice("hydra", "continue") is None and advice("hydra", None) is None
 
 
 def test_specific_codes_get_specific_suggestions() -> None:
     assert advice("hydra", "policy_stopped:policy_returned_no_skill_command")["code"] == "no_matching_rule"
-    assert "兜底规则" in advice("hydra", "policy_stopped:policy_returned_no_skill_command")["action"]
+    assert "兜底规则" in render(advice("hydra", "policy_stopped:policy_returned_no_skill_command")["action"], "zh-CN")
+    assert "lowest-health head" in render(advice("hydra", "policy_stopped:policy_returned_no_skill_command")["action"], "en")
     assert advice("chimera", "policy_stopped:policy_command_not_legal_in_supplied_state")["code"] == "rule_command_not_legal"
-    assert "开始接管" in advice("chimera", "not_opening")["action"]
-    assert "（打过的第 3 回合）" in advice("hydra", "live_window_differs", "打过的第 3 回合")["explain"]
-    assert advice("hydra", "something_new")["explain"] == "推演没有完成（something_new）。"
+    assert "开始接管" in render(advice("chimera", "not_opening")["action"], "zh-CN")
+    assert "（打过的第 3 回合）" in render(advice("hydra", "live_window_differs", "打过的第 3 回合")["explain"], "zh-CN")
+    assert render(advice("hydra", "something_new")["explain"], "zh-CN") == "推演没有完成（something_new）。"
+    assert render(advice("hydra", "something_new")["explain"], "pt-BR") == "A execução não terminou (something_new)."
+    assert render(advice("hydra", "capture_timeout")["explain"], "en") == "The in-game module did not provide this battle's opening data."
 
 
 def test_engine_preparation_errors_are_classified() -> None:

@@ -10,6 +10,10 @@
 //   chimera-forecast <input-directory> [seed]
 //       The same for a captured Chimera battle; with a seed, the same team and
 //       Chimera under another battle seed (strategy simulation).
+//   hero-data <directory> [all | id,id,...]
+//       The champions' static definitions and skills from the copied static
+//       data, written into the report (champion search and profiles). The
+//       directory is not read; pass the probe's own folder.
 //
 // The launcher runs the work in a hidden child inside a temporary
 // AppContainer with no capabilities, one active process and 2 GB of memory.
@@ -34,6 +38,7 @@
 #include "json_to_pack_probe.hpp"
 #include "forecast_battle.hpp"
 #include "chimera_forecast.hpp"
+#include "hero_data.hpp"
 #include "crash_observation.hpp"
 
 namespace fs = std::filesystem;
@@ -191,7 +196,8 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
     if (parent.value || parent_error != ERROR_ACCESS_DENIED) return 23;
     const bool chimera = mode == L"chimera-forecast";
     const bool forecast = mode == L"forecast" || chimera;
-    if (!forecast && mode != L"json-convert") return 24;
+    const bool hero_data = mode == L"hero-data";
+    if (!forecast && !hero_data && mode != L"json-convert") return 24;
     if (forecast && (!policy_input || !policy_output)) return 34;
     const std::string isolated = "\"appContainer\":true,\"capabilityCount\":0,\"parentMemoryAccessDenied\":true,";
     emit(isolated + "\"phase\":\"isolation_verified\"");
@@ -239,6 +245,18 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
         ManagedRuntime client(library, current, "Unity.Model.dll");
         client.invoke(client.method(client.klass("Client.Model.Common", "SharedModelLogger"), "Configure", 0), nullptr);
         ManagedRuntime model(library, current);
+        if (hero_data) {
+            void* static_data = load_static_data(model, current, bundle / L"static-data.msgpack", [&](const char* step) {
+                stage = step;
+                emit(isolated + "\"phase\":\"static_data_loading\",\"stage\":\"" + step + "\"");
+            });
+            const auto result = export_hero_data(model, static_data, parameter, [&](const char* step) {
+                stage = step;
+                emit(isolated + "\"phase\":\"hero_data_exporting\",\"stage\":\"" + step + "\"");
+            });
+            emit(isolated + "\"phase\":\"hero_data_exported\"," + result);
+            return 0;
+        }
         if (!forecast) {
             stage = "convert_original_json";
             configure_original_messagepack(model, current);
@@ -301,17 +319,23 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
         emit(isolated + "\"phase\":\"policy_forecast_executed\"," + result);
         return 0;
     } catch (const std::exception& error) {
-        emit(isolated + "\"phase\":\"" + (forecast ? "captured_setup_battle_failed" : "original_setup_messagepack_failed") +
+        emit(isolated + "\"phase\":\"" + (hero_data ? "hero_data_failed" : forecast ? "captured_setup_battle_failed"
+                                                                           : "original_setup_messagepack_failed") +
              "\",\"stage\":\"" + sanitized(stage) + "\",\"error\":\"" + sanitized(error.what()) + "\"");
-        return forecast ? 31 : 33;
+        return hero_data ? 35 : forecast ? 31 : 33;
     }
 }
 
 int launch(const std::wstring& mode, const fs::path& input_argument, const std::wstring& parameter) {
     const bool chimera = mode == L"chimera-forecast";
     const bool forecast = mode == L"forecast" || chimera;
-    if (!forecast && mode != L"json-convert") return 2;
-    if (chimera) {
+    const bool hero_data = mode == L"hero-data";
+    if (!forecast && !hero_data && mode != L"json-convert") return 2;
+    if (hero_data) {
+        for (const wchar_t c : parameter)
+            if (!(c == L',' || (c >= L'0' && c <= L'9')) && parameter != L"all")
+                throw std::runtime_error("Hero list must be 'all' or comma-separated ids");
+    } else if (chimera) {
         if (parameter != L"captured") {
             std::size_t used = 0;
             const long long seed = std::stoll(parameter, &used);
@@ -334,9 +358,9 @@ int launch(const std::wstring& mode, const fs::path& input_argument, const std::
     }
     const auto exe = executable();
     const fs::path input = fs::weakly_canonical(input_argument);
-    const std::vector<const wchar_t*> required = forecast
-        ? std::vector<const wchar_t*>{L"battle-setup.msgpack", L"battle-settings.msgpack"}
-        : std::vector<const wchar_t*>{L"battle-setup.json", L"battle-settings.json"};
+    const std::vector<const wchar_t*> required = hero_data ? std::vector<const wchar_t*>{}
+        : forecast ? std::vector<const wchar_t*>{L"battle-setup.msgpack", L"battle-settings.msgpack"}
+                   : std::vector<const wchar_t*>{L"battle-setup.json", L"battle-settings.json"};
     if (!fs::is_directory(input)) throw std::runtime_error("Input directory is missing");
     for (const auto* name : required)
         if (!fs::is_regular_file(input / name)) throw std::runtime_error("Input directory lacks battle setup or settings");
@@ -409,7 +433,7 @@ int launch(const std::wstring& mode, const fs::path& input_argument, const std::
     }
     if (!AssignProcessToJobObject(job.value, child.value)) { TerminateProcess(child.value, 28); return 6; }
     ResumeThread(thread.value);
-    const DWORD deadline_ms = forecast ? 300000 : 30000;
+    const DWORD deadline_ms = forecast ? 300000 : hero_data ? 180000 : 30000;
     const auto worker_started_at = GetTickCount64();
     const DWORD wait = WaitForSingleObject(child.value, deadline_ms);
     if (wait != WAIT_OBJECT_0) { TerminateJobObject(job.value, 29); WaitForSingleObject(child.value, 5000); }
@@ -458,7 +482,8 @@ int wmain(int argc, wchar_t** argv) {
         const std::wstring mode = argv[1];
         if (mode == L"json-convert" && argc != 3) return 1;
         const std::wstring parameter = argc == 4 ? std::wstring(argv[3])
-                                                 : (mode == L"chimera-forecast" ? L"captured" : L"1000");
+                                                 : (mode == L"chimera-forecast" ? L"captured"
+                                                    : mode == L"hero-data" ? L"all" : L"1000");
         return launch(mode, fs::path(argv[2]), parameter);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

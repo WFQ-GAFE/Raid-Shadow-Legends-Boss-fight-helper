@@ -195,6 +195,13 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         result["swallows"] = swallow_stream(observation, result["marks"])
     except ForecastError as error:
         result["marksIssue"] = str(error)
+    return _settle(result)
+
+
+def _settle(result: dict[str, Any]) -> dict[str, Any]:
+    """The run's status from how the engine stopped; a stop the rules caused is "stuck"."""
+    engine = result.get("engine") or {}
+    decisions = result.get("decisions") or []
     stop = engine.get("stopReason")
     result["status"] = "complete" if stop in ("battle_finished", "game_turn_limit") else "partial"
     if result["status"] != "complete":
@@ -216,6 +223,58 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                            "targetId": last.get("targetId"), "detail": engine.get("policyStop"),
                            "skills": [], "rules": [], "snapshot": last.get("snapshot")}
     return result
+
+
+# The engine facts a live opening forecast keeps (hydra_forecast.run_forecast).
+FORECAST_ENGINE_KEYS = ("battleSetupId", "seed", "stageId", "turn", "battleFinished", "stopReason", "resultType",
+                        "finishCause", "commands", "policyStop", "effectiveMaxTurnsInBattle", "playerActors",
+                        "actors", "hydraDamage")
+
+
+def forecast_run(forecast: dict[str, Any]) -> dict[str, Any] | None:
+    """A live opening forecast as one simulation run, for its report.
+
+    Needs a forecast made with HydraSimulationSession decisions (rule numbers,
+    stall reports); None when the engine never played the battle.
+    """
+    if not forecast.get("stopReason"):
+        return None
+    decisions = []
+    for decision in forecast.get("decisions") or []:
+        command = decision.get("command") if isinstance(decision.get("command"), dict) else {}
+        decisions.append({key: value for key, value in decision.items() if key not in ("command", "rngBefore", "round")}
+                         | {"skillTypeId": command.get("skillTypeId"), "targetId": command.get("targetId")})
+    result: dict[str, Any] = {
+        "schema": SCHEMA, "type": "hydra_strategy_simulation", "status": "unknown", "reason": None,
+        "decisions": decisions, "marks": forecast.get("marks") or [], "swallows": forecast.get("swallows"),
+        "engine": {**{key: forecast.get(key) for key in FORECAST_ENGINE_KEYS if key in forecast},
+                   "turns": forecast.get("engineTurns") or []},
+        "elapsedSeconds": forecast.get("elapsedSeconds"),
+    }
+    return _settle(result)
+
+
+def battle_report(record_id: str, strategy: dict[str, Any], provenance: dict[str, Any], capture_id: str,
+                  forecast: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The report summary of a live opening forecast and its one run (None without a played battle)."""
+    run = forecast_run(forecast)
+    if run is None:
+        return None
+    summary = summarize_run(run, strategy)
+    summary["index"] = 1
+    return {
+        "schema": 1, "id": record_id, "kind": "battle", "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "complete",
+        "strategy": {"id": strategy.get("id"), "name": strategy.get("name"), "rules": len(strategy.get("rules") or [])},
+        "capture": {"id": capture_id, "stageId": provenance.get("stageId"), "seed": provenance.get("seed"),
+                    "teamHeroTypeIds": provenance.get("teamHeroTypeIds"),
+                    "difficulty": difficulty_for_stage(provenance.get("stageId"))},
+        "runs": [summary], "aggregate": aggregate([summary], strategy)}, run
+
+
+def difficulty_for_stage(stage_id: object) -> int | None:
+    # Hydra stages end in the difficulty, e.g. 8039003 (1 Normal .. 4 Nightmare).
+    return stage_id % 10 if isinstance(stage_id, int) and 8000000 < stage_id < 9000000 else None
 
 
 def _player_rows(result: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:

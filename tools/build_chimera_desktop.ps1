@@ -160,6 +160,7 @@ try {
         "--collect-all", "fmod_toolkit",
         "--collect-all", "archspec",
         "--add-data", "$uiDist;ui\dist",
+        "--add-data", "$(Join-Path $projectRoot 'ui\src\i18n\messages');ui\src\i18n\messages",
         "--add-data", "$dataDir;data",
         "--add-data", "$(Join-Path $projectRoot 'LICENSE');legal",
         "--add-data", "$(Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md');legal",

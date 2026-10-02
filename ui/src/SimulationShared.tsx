@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { effectName } from './effectNames'
 import { AlertTriangle, Skull, Sparkles, Users, Waves, Zap } from 'lucide-react'
 import { HoverCard } from './HoverCard'
-import { translateToolText, type UiLanguage } from './i18n'
+import { backendText, hasMessage, translate, type MessageKey, type Translate, type UiLanguage, useI18n } from './i18n'
 import { TeamPreviewDialog, type TeamSnapshot } from './TeamPreview'
 
 // Pieces shared by the Chimera and Hydra strategy simulation reports:
@@ -62,11 +63,12 @@ export function SimProvider({ lang, boss, heroes, heads = [], effects = [], tria
 
 export function useSim() {
   const data = useContext(SimContext)
-  return { ...data, en: data.lang === 'en', t: (zh: string, en: string) => (data.lang === 'en' ? en : zh) }
+  const { t } = useI18n()
+  return { ...data, t }
 }
 
 export function toolText(lang: Lang, value: string) {
-  return lang === 'en' ? translateToolText(value) : value
+  return backendText(value, lang)
 }
 
 // Game descriptions carry Unity rich-text colour tags.
@@ -102,7 +104,7 @@ export function findHero(heroes: SimulationHero[], typeId: number | undefined) {
 }
 
 export function heroName(lang: Lang, heroes: SimulationHero[], typeId: number | undefined) {
-  return findHero(heroes, typeId)?.name ?? (typeId ? (lang === 'en' ? `Champion ${typeId}` : `英雄 ${typeId}`) : '—')
+  return findHero(heroes, typeId)?.name ?? (typeId ? translate(lang, 'sim.champion', { typeId }) : '—')
 }
 
 // Battle head type ids add a difficulty step to the catalog's base id (a multiple of 40).
@@ -112,19 +114,14 @@ export function findHead(heads: SimHead[], typeId: number | undefined) {
     ?? heads.find((head) => head.typeId === Math.floor(typeId / 40) * 40 || head.canonicalTypeId === Math.floor(typeId / 40) * 40)
 }
 
-const HEAD_NAMES_EN: Record<string, string> = {
-  Support: 'Head of Decay', Ghost: 'Head of Torment', Poison: 'Head of Blight', Tank: 'Head of Suffering', Thief: 'Head of Mischief', Berserk: 'Head of Wrath',
-}
-const HEAD_NAMES_ZH: Record<string, string> = {
-  Support: '腐朽之头', Ghost: '煎熬之头', Poison: '枯萎之头', Tank: '苦痛之头', Thief: '灾祸之头', Berserk: '愤怒之头',
-}
-
 export function headName(lang: Lang, heads: SimHead[], typeId: number | undefined) {
   const head = findHead(heads, typeId)
-  if (!head) return lang === 'en' ? 'Hydra head' : '蛇头'
-  if (lang === 'en') return HEAD_NAMES_EN[head.resourceKind ?? ''] ?? head.name
-  // Before the game has named the heads the catalog holds "蛇头 <id> · <kind>".
-  return /^蛇头\s*\d/.test(head.name) ? HEAD_NAMES_ZH[head.resourceKind ?? ''] ?? head.name : head.name
+  if (!head) return translate(lang, 'sim.hydraHead')
+  // In Chinese the game's own names come first (the client is Chinese); before the
+  // game has named the heads the catalog holds "蛇头 <id> · <kind>".
+  if (lang === 'zh-CN' && !/^蛇头\s*\d/.test(head.name)) return head.name
+  const key = `hydra.head.${head.resourceKind ?? ''}`
+  return hasMessage(key) ? translate(lang, key) : head.name
 }
 
 function skillOf(heroes: SimulationHero[], heroTypeId: number | undefined, skillTypeId: number) {
@@ -132,7 +129,7 @@ function skillOf(heroes: SimulationHero[], heroTypeId: number | undefined, skill
 }
 
 export function skillName(lang: Lang, heroes: SimulationHero[], heroTypeId: number | undefined, skillTypeId: number) {
-  return skillOf(heroes, heroTypeId, skillTypeId)?.name ?? (lang === 'en' ? `Skill ${skillTypeId % 100}` : `技能 ${skillTypeId % 100}`)
+  return skillOf(heroes, heroTypeId, skillTypeId)?.name ?? translate(lang, 'sim.skill', { value: skillTypeId % 100 })
 }
 
 function AssetImage({ sources, fallback, className, hideWithoutImage = false }: { sources: string[]; fallback: ReactNode; className: string; hideWithoutImage?: boolean }) {
@@ -165,7 +162,7 @@ export function HeadIcon({ typeId, size = 'sm' }: { typeId: number | undefined; 
 
 export function ChimeraIcon({ size = 'sm', form }: { size?: 'xs' | 'sm' | 'md'; form?: number }) {
   const { lang, t } = useSim()
-  return <HoverCard content={<strong>{t('奇美拉', 'Chimera')}{form !== undefined ? ` · ${formName(lang, form)}` : ''}</strong>}>
+  return <HoverCard content={<strong>{t('sim.chimera')}{form !== undefined ? ` · ${formName(lang, form)}` : ''}</strong>}>
     <span className={`sim-icon boss ${size}`}><Skull size={size === 'md' ? 18 : 13} /></span>
   </HoverCard>
 }
@@ -192,8 +189,8 @@ export function SkillIcon({ heroTypeId, skillTypeId, player = true, cooldown, si
   const sources = player && heroTypeId ? [`/api/asset/skill/${hero?.typeId ?? heroTypeId}/${skillTypeId}`] : []
   const card = player ? <div className="hover-skill">
     <strong>{name}</strong>
-    {typeof cooldown === 'number' && cooldown >= 0 && <em>{cooldown > 0 ? t(`冷却 ${cooldown} 回合`, `Cooldown ${cooldown}`) : t('已就绪', 'Ready')}</em>}
-    {skill?.defaultCooldown ? <small>{t(`默认冷却 ${skill.defaultCooldown}`, `Base cooldown ${skill.defaultCooldown}`)}</small> : null}
+    {typeof cooldown === 'number' && cooldown >= 0 && <em>{cooldown > 0 ? t('sim.cooldown', { cooldown }) : t('sim.ready')}</em>}
+    {skill?.defaultCooldown ? <small>{t('sim.baseCooldown', { defaultCooldown: skill.defaultCooldown })}</small> : null}
     {skill?.description && <p>{plainText(skill.description)}</p>}
   </div> : <BossSkillCard actorTypeId={heroTypeId} skillTypeId={skillTypeId} cooldown={cooldown} form={form} />
   if (hideWithoutIcon && (missing || !sources.length)) return null
@@ -207,30 +204,22 @@ export function SkillIcon({ heroTypeId, skillTypeId, player = true, cooldown, si
   </HoverCard>
 }
 
-// The heads' shared mark, swallow and exposed-neck skills, until the game's static data has named them.
-const BOSS_SKILL_FALLBACK: Record<number, [string, string]> = {
-  260006: ['吞噬标记', 'Devour mark'],
-  260007: ['吞下', 'Swallow'],
-  260009: ['蛇颈技能', 'Neck skill'],
-  260010: ['蛇颈技能', 'Neck skill'],
-  260011: ['蛇颈技能', 'Neck skill'],
-}
-
 export function bossSkillName(lang: Lang, skills: Map<number, BossSkill>, skillTypeId: number) {
   const known = skills.get(skillTypeId)?.name
   if (known) return known
-  const fallback = BOSS_SKILL_FALLBACK[skillTypeId]
-  if (fallback) return lang === 'en' ? fallback[1] : fallback[0]
+  // The heads' shared mark, swallow and exposed-neck skills, until the game's static data has named them.
+  const fallback = `boss.skill.${skillTypeId}`
+  if (hasMessage(fallback)) return translate(lang, fallback)
   // Shown next to the head or Chimera form that used it.
-  return lang === 'en' ? `Skill ${skillTypeId % 100}` : `技能 ${skillTypeId % 100}`
+  return translate(lang, 'sim.skill', { value: skillTypeId % 100 })
 }
 
 // "Head of Decay", or "Chimera · Ram form".
 export function bossActorLabel(lang: Lang, boss: BossKind, heads: SimHead[], typeId: number | undefined, form?: number) {
   if (boss === 'hydra') return headName(lang, heads, typeId)
   const shape = formName(lang, form)
-  if (!shape) return lang === 'en' ? 'Chimera' : '奇美拉'
-  return lang === 'en' ? `Chimera · ${shape} form` : `奇美拉 · ${shape}形态`
+  if (!shape) return translate(lang, 'sim.chimera')
+  return translate(lang, 'sim.chimeraForm', { shape })
 }
 
 export function BossSkillCard({ actorTypeId, skillTypeId, cooldown, form }: { actorTypeId: number | undefined; skillTypeId: number; cooldown?: number; form?: number }) {
@@ -239,11 +228,11 @@ export function BossSkillCard({ actorTypeId, skillTypeId, cooldown, form }: { ac
   return <div className="hover-skill">
     <strong>{bossSkillName(lang, bossSkills, skillTypeId)}</strong>
     <span>{bossActorLabel(lang, boss, heads, actorTypeId, form)}</span>
-    {typeof cooldown === 'number' && cooldown >= 0 && <em>{cooldown > 0 ? t(`冷却 ${cooldown} 回合`, `Cooldown ${cooldown}`) : t('已就绪', 'Ready')}</em>}
-    {skill?.defaultCooldown ? <small>{t(`默认冷却 ${skill.defaultCooldown}`, `Base cooldown ${skill.defaultCooldown}`)}</small> : null}
+    {typeof cooldown === 'number' && cooldown >= 0 && <em>{cooldown > 0 ? t('sim.cooldown', { cooldown }) : t('sim.ready')}</em>}
+    {skill?.defaultCooldown ? <small>{t('sim.baseCooldown', { defaultCooldown: skill.defaultCooldown })}</small> : null}
     {skill?.description
       ? <p>{plainText(skill.description)}</p>
-      : <small>{t('技能说明会在游戏运行时读取一次并保存，之后再打开报告即可看到。', 'The description is read once while the game is running and kept; open the report again to see it.')}</small>}
+      : <small>{t('sim.theDescriptionIsReadOnce')}</small>}
   </div>
 }
 
@@ -255,17 +244,17 @@ function EnemyAction({ row }: { row: LogRow }) {
   </HoverCard>
 }
 
-const EFFECT_GROUP_EN: Record<string, string> = { 增益: 'Buff', 减益: 'Debuff', 特殊: 'Special', 奇美拉: 'Chimera' }
+const EFFECT_GROUP: Record<string, MessageKey> = { 增益: 'effect.group.buff', 减益: 'effect.group.debuff', 特殊: 'effect.group.special', 奇美拉: 'effect.group.chimera' }
 
 export function EffectBadge({ effect: [typeId, turns, count] }: { effect: [number, number, number] }) {
-  const { en, effects, t } = useSim()
+  const { lang, effects, t } = useSim()
   const option = effects.get(String(typeId))
-  const label = option ? (en ? option.labelEn ?? option.label : option.label) : t(`效果 ${typeId}`, `Effect ${typeId}`)
-  const group = option ? (en ? EFFECT_GROUP_EN[option.group] ?? option.group : option.group) : ''
+  const label = option ? effectName(option, lang) : t('sim.effect', { typeId })
+  const group = option ? (EFFECT_GROUP[option.group] ? t(EFFECT_GROUP[option.group]) : option.group) : ''
   const card = <div className="hover-effect">
     <strong>{label}</strong>
-    <span>{[group, turns > 0 ? t(`剩余 ${turns} 回合`, `${turns} turns left`) : turns === 0 ? t('本回合结束', 'Ends this turn') : t('持续', 'Lasting'),
-      count > 1 ? t(`${count} 层`, `${count} stacks`) : ''].filter(Boolean).join(' · ')}</span>
+    <span>{[group, turns > 0 ? t('sim.turnsLeft', { turns }) : turns === 0 ? t('sim.endsThisTurn') : t('sim.lasting'),
+      count > 1 ? t('sim.stacks', { count }) : ''].filter(Boolean).join(' · ')}</span>
   </div>
   return <HoverCard content={card}>
     <span className={`sim-effect ${option?.group === '增益' ? 'buff' : option?.group === '减益' ? 'debuff' : ''}`}>
@@ -280,28 +269,27 @@ export function EffectBadge({ effect: [typeId, turns, count] }: { effect: [numbe
 
 // --- Chimera trials: "Ram · Trial 1 · Easy", as the game groups them ---
 
-const FORM_ZH = ['终极', '公羊', '狮子', '毒蛇']
-const FORM_EN = ['Ultimate', 'Ram', 'Lion', 'Viper']
+const FORM_KEYS: MessageKey[] = ['chimera.form.0', 'chimera.form.1', 'chimera.form.2', 'chimera.form.3']
 export const FORM_INDEX: Record<string, number> = { Ultimate: 0, Ram: 1, Lion: 2, Snake: 3, Viper: 3 }
 // Boss difficulties as the game names them: Chimera stages 1-6 are Easy..Ultra-Nightmare,
 // Hydra stages 1-4 are Normal..Nightmare.
-const BOSS_DIFFICULTY_ZH = ['简单', '普通', '困难', '地狱', '噩梦', '终极噩梦']
-const BOSS_DIFFICULTY_EN = ['Easy', 'Normal', 'Hard', 'Brutal', 'Nightmare', 'Ultra-Nightmare']
+const BOSS_DIFFICULTY_KEYS: MessageKey[] = [
+  'boss.difficulty.0', 'boss.difficulty.1', 'boss.difficulty.2', 'boss.difficulty.3', 'boss.difficulty.4', 'boss.difficulty.5',
+]
 
 export function bossDifficultyText(lang: Lang, boss: BossKind, difficulty?: number) {
   const index = typeof difficulty === 'number' ? (boss === 'hydra' ? difficulty : difficulty - 1) : -1
-  return (lang === 'en' ? BOSS_DIFFICULTY_EN : BOSS_DIFFICULTY_ZH)[index]
-    ?? (lang === 'en' ? `Difficulty ${difficulty ?? '?'}` : `难度 ${difficulty ?? '?'}`)
+  return (BOSS_DIFFICULTY_KEYS[index] ? translate(lang, BOSS_DIFFICULTY_KEYS[index]) : undefined)
+    ?? translate(lang, 'sim.difficulty', { difficulty: difficulty ?? '?' })
 }
 
-const LEVEL_ZH = ['简单', '普通', '困难']
-const LEVEL_EN = ['Easy', 'Normal', 'Hard']
+const LEVEL_KEYS: MessageKey[] = ['trial.level.1', 'trial.level.2', 'trial.level.3']
 const LEVEL_INDEX: Record<string, number> = { Easy: 1, Normal: 2, Hard: 3 }
 const PART_INDEX: Record<string, number> = { Wing: 1, Tail: 2, Paw: 3 }
 
 export function formName(lang: Lang, index: number | undefined) {
   if (index === undefined || index < 0 || index > 3) return ''
-  return lang === 'en' ? FORM_EN[index] : FORM_ZH[index]
+  return translate(lang, FORM_KEYS[index])
 }
 
 export function formNameByKey(lang: Lang, form: string | null | undefined) {
@@ -323,28 +311,27 @@ export function trialIdentity(trial: SimulationTrial | undefined, id: number) {
 
 export function trialShortLabel(lang: Lang, trial: SimulationTrial | undefined, id: number) {
   const { form, part, level } = trialIdentity(trial, id)
-  const en = lang === 'en'
   const pieces = [
     form !== undefined ? formName(lang, form) : '',
-    part ? (en ? `Trial ${part}` : `试炼${part}`) : (en ? 'Trial' : '试炼'),
-    level ? (en ? LEVEL_EN[level - 1] : LEVEL_ZH[level - 1]) : '',
+    part ? translate(lang, 'sim.trial', { part }) : translate(lang, 'chimeraSim.trial'),
+    level ? translate(lang, LEVEL_KEYS[level - 1]) : '',
   ].filter(Boolean)
   return pieces.join(' · ')
 }
 
 export function TrialCard({ id }: { id: number }) {
-  const { lang, trialById, effects, en, t } = useSim()
+  const { lang, trialById, effects, t } = useSim()
   const trial = trialById.get(id)
   const description = plainText(trial?.description)
   const trialEffects = (trial?.effects ?? []).filter((effect) => typeof effect.id === 'number')
   return <div className="hover-trial">
     <strong>{trialShortLabel(lang, trial, id)}</strong>
-    <p>{description || t('试炼内容会在游戏读取试炼目录后显示。', 'The trial text appears once the game has provided the trial catalog.')}</p>
+    <p>{description || t('sim.theTrialTextAppearsOnce')}</p>
     {trialEffects.length > 0 && <div className="hover-trial-effects">{trialEffects.map((effect) => {
       const option = effects.get(String(effect.id))
       return <span key={effect.id}>{option && option.iconReady !== false
         ? <img src={`/api/asset/effect/${encodeURIComponent(option.icon)}`} alt="" />
-        : <Sparkles size={11} />}{option ? (en ? option.labelEn ?? option.label : option.label) : effect.name}</span>
+        : <Sparkles size={11} />}{option ? effectName(option, lang) : effect.name}</span>
     })}</div>}
   </div>
 }
@@ -375,15 +362,15 @@ export function StateStrip({ state, actorId, targetId }: { state: BattleSnapshot
       <div className="state-portrait">
         <ActorIcon typeId={actor.t} player={actor.s === 'a'} form={actor.f} size="md" />
         <span className="state-hp"><span style={{ width: `${Math.max(0, Math.min(100, actor.hp ?? 0))}%` }} /></span>
-        <small>{actor.d ? t('阵亡', 'Dead') : actor.hp === null ? '' : `${Math.round(actor.hp)}%`}</small>
+        <small>{actor.d ? t('sim.dead') : actor.hp === null ? '' : `${Math.round(actor.hp)}%`}</small>
       </div>
       <div className="state-details">
         {actor.fx.length > 0 ? <div className="state-effects">{actor.fx.map((effect) => <EffectBadge key={effect[0]} effect={effect} />)}</div>
-          : <span className="state-none">{t('无效果', 'No effects')}</span>}
+          : <span className="state-none">{t('sim.noEffects')}</span>}
         {actor.cd && actor.cd.length > 0 && <div className="state-skills">{actor.cd.map(([skill, cooldown]) =>
           <SkillIcon key={skill} heroTypeId={actor.t} skillTypeId={skill} cooldown={cooldown} size="xs" hideWithoutIcon />)}</div>}
-        {actor.neck && <em className="tag">{t('暴露蛇颈', 'Exposed neck')}</em>}
-        {typeof actor.dv === 'number' && <em className="tag warn">{t('正在吞噬', 'Devouring')}</em>}
+        {actor.neck && <em className="tag">{t('sim.exposedNeck')}</em>}
+        {typeof actor.dv === 'number' && <em className="tag warn">{t('sim.devouring')}</em>}
       </div>
     </div>
   )
@@ -395,20 +382,25 @@ export function StateStrip({ state, actorId, targetId }: { state: BattleSnapshot
 
 // --- Why a forecast or simulation could not conclude, and what to do ---
 
-export type FailureAdvice = { code: string; explain: string; action: string; explainEn: string; actionEn: string }
+// explain and action are message tokens; records from 1.1.1 hold Chinese
+// with an English copy (explainEn, actionEn).
+export type FailureAdvice = { code: string; explain: string; action: string; explainEn?: string; actionEn?: string }
+
+function adviceText(language: Lang, text: string, english?: string) {
+  return english !== undefined && language !== 'zh-CN' ? english : backendText(text, language)
+}
 
 export function AdviceNote({ language, advice }: { language: Lang; advice?: FailureAdvice | null }) {
   if (!advice) return null
-  const en = language === 'en'
   return <div className="advice-note" data-i18n-skip>
-    <p><strong>{en ? 'Why: ' : '原因：'}</strong>{en ? advice.explainEn : advice.explain}</p>
-    <p><strong>{en ? 'What to do: ' : '建议：'}</strong>{en ? advice.actionEn : advice.action}</p>
+    <p><strong>{translate(language, 'sim.why')}</strong>{adviceText(language, advice.explain, advice.explainEn)}</p>
+    <p><strong>{translate(language, 'sim.whatToDo')}</strong>{adviceText(language, advice.action, advice.actionEn)}</p>
   </div>
 }
 
 export function adviceTitle(language: Lang, advice?: FailureAdvice | null) {
   if (!advice) return undefined
-  return language === 'en' ? `${advice.explainEn}\n${advice.actionEn}` : `${advice.explain}\n${advice.action}`
+  return `${adviceText(language, advice.explain, advice.explainEn)}\n${adviceText(language, advice.action, advice.actionEn)}`
 }
 
 // --- Capture picker: the team as icons ---
@@ -418,11 +410,12 @@ export type CaptureOption = { id: string; capturedAt?: string; difficulty?: numb
 export function CapturePicker({ captures, value, onChange, disabled, difficultyText }: {
   captures: CaptureOption[]; value: string; onChange: (id: string) => void; disabled?: boolean; difficultyText: (difficulty?: number) => string
 }) {
+  const { t } = useSim()
   return <div className="capture-picker" role="radiogroup">
     {captures.map((item) => (
       <button key={item.id} type="button" role="radio" aria-checked={item.id === value} disabled={disabled}
         className={`capture-option ${item.id === value ? 'selected' : ''}`} onClick={() => onChange(item.id)}>
-        <span className="capture-meta"><strong>{item.capturedAt?.slice(5) ?? ''}</strong><small>{difficultyText(item.difficulty)}</small></span>
+        <span className="capture-meta"><strong>{item.id.startsWith('strategy-package:') ? t('sim.savedStrategyOpening') : item.capturedAt?.slice(5) ?? ''}</strong><small>{difficultyText(item.difficulty)}</small></span>
         <span className="capture-team">{item.teamHeroTypeIds.map((typeId, index) => <HeroIcon key={`${typeId}-${index}`} typeId={typeId} size="sm" />)}</span>
         {item.strategyName && <em>{item.strategyName}</em>}
       </button>
@@ -444,18 +437,17 @@ export type TeamSources = {
   // The snapshot taken when the strategy group was saved.
   strategy?: { heroTypeIds: number[]; savedAt?: string; matches: boolean } | null
   // An imported strategy's author's team.
-  author?: { heroTypeIds: number[]; savedAt?: string } | null
+  author?: { heroTypeIds: number[]; savedAt?: string; matches?: boolean; offlineReady?: boolean } | null
   check?: TeamCheck | null
 }
 
 export function teamSourceLabel(lang: Lang, source?: string | null) {
-  const en = lang === 'en'
   switch (source) {
-    case 'current': return en ? "Strategy's team now" : '策略组当前队伍'
-    case 'strategy': return en ? 'Team when the strategy was saved' : '策略组保存时的队伍'
-    case 'author': return en ? "The author's team" : '作者的队伍'
-    case 'preparation': return en ? 'Preparation screen team' : '准备界面当前队伍'  // reports before 1.1.1's final build
-    default: return en ? "The battle's own team" : '战斗原队伍'
+    case 'current': return translate(lang, 'sim.strategySTeamNow')
+    case 'strategy': return translate(lang, 'sim.teamWhenTheStrategyWas')
+    case 'author': return translate(lang, 'sim.theAuthorSTeam')
+    case 'preparation': return translate(lang, 'sim.preparationScreenTeam')  // reports before 1.1.1's final build
+    default: return translate(lang, 'sim.theBattleSOwnTeam')
   }
 }
 
@@ -467,13 +459,12 @@ export function SimulationTeamButton({ team }: { team?: SimulationTeam | null })
   const { lang, heroes, t } = useSim()
   const [open, setOpen] = useState(false)
   if (!team || !(team.heroes?.length)) return null
-  const saved = team.savedAt ? t(` · 保存于 ${team.savedAt}`, ` · saved ${team.savedAt}`) : ''
+  const saved = team.savedAt ? t('sim.saved', { savedAt: team.savedAt }) : ''
   return <>
-    <button type="button" className="button ghost team-setup-button" onClick={() => setOpen(true)}><Users size={15} />{t('队伍配置', 'Team setup')}</button>
+    <button type="button" className="button ghost team-setup-button" onClick={() => setOpen(true)}><Users size={15} />{t('sim.teamSetup')}</button>
     <TeamPreviewDialog language={lang} snapshot={open ? team : null}
-      title={t('模拟用的队伍配置', 'Team setup of this simulation')}
-      description={t(`${teamSourceLabel(lang, team.source)}${saved}。属性是战斗开始时的战斗属性，已计入区域、建筑、学院等全部加成。`,
-        `${teamSourceLabel(lang, team.source)}${saved}. Stats are the battle stats when the battle started, every bonus (area, buildings, academy) included.`)}
+      title={t('sim.teamSetupOfThisSimulation')}
+      description={t('sim.statsAreTheBattleStats', { source: teamSourceLabel(lang, team.source), saved })}
       onClose={() => setOpen(false)}
       heroName={(typeId) => heroName(lang, heroes, typeId)}
       heroAvatar={(typeId) => <HeroIcon typeId={typeId} size="md" title={false} />}
@@ -482,48 +473,94 @@ export function SimulationTeamButton({ team }: { team?: SimulationTeam | null })
 }
 
 export function originalRunLabel(lang: Lang, swapped: boolean) {
-  return swapped ? (lang === 'en' ? 'Original seed' : '原种子') : (lang === 'en' ? 'Original' : '原战斗')
+  return swapped ? translate(lang, 'sim.originalSeed') : translate(lang, 'sim.original')
 }
 
 type TeamSourceOption = { source: TeamSource; team: number[]; ready: boolean; note: string }
 
 export function teamSourceOptions(lang: Lang, sources: TeamSources | undefined, captureTeam: number[], strategyTeam: number[]): TeamSourceOption[] {
-  const t = (zh: string, en: string) => (lang === 'en' ? en : zh)
+  const t: Translate = (key, params) => translate(lang, key, params)
   const hasTeam = strategyTeam.length > 0
   const gameOpen = sources?.accountReadable !== false
-  const noTeam = t('当前策略组还没有设定队伍：在“策略组队伍”卡片上选择英雄', "This strategy has no team yet: choose its champions on the strategy's team card")
-  const bonusesNote = t('学院、建筑和区域加成按当前账号读取', 'academy, building and area bonuses from the current account')
+  const noTeam = t('sim.thisStrategyHasNoTeam')
+  const bonusesNote = t('sim.academyBuildingAndAreaBonuses')
   const current = sources?.current
   const saved = sources?.strategy
   const author = sources?.author
   const options: TeamSourceOption[] = [
     { source: 'battle', team: captureTeam, ready: captureTeam.length > 0,
-      note: t('这场战斗里的英雄和当时的装备', 'The champions of this battle with the gear they had then') },
+      note: t('sim.theChampionsOfThisBattle') },
     { source: 'current', team: strategyTeam, ready: hasTeam && Boolean(current?.bound) && gameOpen,
       note: !hasTeam ? noTeam
-        : !current?.bound ? t('还没有绑定你账号里的英雄（导入的策略）：在“策略组队伍”卡片上选择英雄', "Not bound to your champions yet (imported strategy): choose them on the strategy's team card")
-        : !gameOpen ? t('需要打开游戏：模拟时读取这些英雄现在的装备和账号加成', 'Open the game: the champions\' current gear and the account bonuses are read when simulating')
-        : t('模拟时从游戏读取这些英雄现在的装备，以及学院、建筑和区域加成', 'The champions\' current gear and the academy, building and area bonuses, read from the game when simulating') },
+        : !current?.bound ? t('sim.notBoundToYourChampions')
+        : !gameOpen ? t('sim.openTheGameTheChampions')
+        : t('sim.theChampionsCurrentGearAnd') },
     { source: 'strategy', team: saved?.heroTypeIds ?? strategyTeam, ready: hasTeam && Boolean(saved?.matches) && gameOpen,
       note: !hasTeam ? noTeam
-        : !saved ? t('还没有快照：打开游戏后保存一次策略组，就会记下当时的英雄和装备', 'No snapshot yet: save the strategy once with the game open to record its champions and gear')
-        : !saved.matches ? t('策略组的队伍已更改：打开游戏后重新保存一次策略组', "The strategy's team has changed: save it again with the game open")
-        : !gameOpen ? t(`需要打开游戏：${bonusesNote}`, `Open the game: ${bonusesNote}`)
-        : t(`保存策略组时的英雄和装备（${saved.savedAt?.slice(5, 16) ?? ''}）；${bonusesNote}`, `Champions and gear when the strategy was saved (${saved.savedAt?.slice(5, 16) ?? ''}); ${bonusesNote}`) },
+        : !saved ? t('sim.noSnapshotYetSaveThe')
+        : !saved.matches ? t('sim.theStrategySTeamHas')
+        : !gameOpen ? t('sim.openTheGame', { bonusesNote })
+        : t('sim.championsAndGearWhenThe', { value: saved.savedAt?.slice(5, 16) ?? '', bonusesNote }) },
   ]
-  if (author) options.push({ source: 'author', team: author.heroTypeIds, ready: gameOpen,
-    note: !gameOpen ? t(`需要打开游戏：${bonusesNote}`, `Open the game: ${bonusesNote}`)
-      : t(`策略作者保存时的英雄和装备（${author.savedAt?.slice(5, 16) ?? ''}）；${bonusesNote}`, `The author's champions and gear when saved (${author.savedAt?.slice(5, 16) ?? ''}); ${bonusesNote}`) })
+  if (author) options.push({ source: 'author', team: author.heroTypeIds,
+    ready: author.heroTypeIds.length > 0 && author.matches !== false && (Boolean(author.offlineReady) || gameOpen),
+    note: author.matches === false ? t('sim.theStrategySTeamHas')
+      : author.offlineReady ? t('sim.theAuthorsSavedSimulationTeam', { value: author.savedAt?.slice(5, 16) ?? '' })
+      : !gameOpen ? t('sim.openTheGame', { bonusesNote })
+      : t('sim.theAuthorSChampionsAnd', { value: author.savedAt?.slice(5, 16) ?? '', bonusesNote }) })
   return options
 }
 
+export type SimulationPackageStatus = {
+  status: 'complete' | 'partial' | 'unavailable'
+  reason?: string
+  warning?: string
+  team: boolean
+  opening: boolean
+  accountBonuses: boolean
+}
+
+export function simulationSaveText(lang: Lang, packaged: SimulationPackageStatus | undefined, fallback: string) {
+  if (!packaged) return toolText(lang, fallback)
+  if (packaged.status === 'complete') return translate(lang, 'app.strategySavedWithSimulationPackage')
+    + (packaged.warning ? ` · ${toolText(lang, packaged.warning)}` : '')
+  return translate(lang, 'app.strategySavedWithPartialSimulationPackage', {
+    reason: packaged.reason ? toolText(lang, packaged.reason) : translate(lang, 'sim.simulationPackageIncomplete'),
+  })
+}
+
+// These selections belong to one strategy. A saved opening and its author's
+// team are ready to use as soon as an imported package arrives in the poll.
+export function simulationInputs<Capture extends CaptureOption>(lang: Lang, strategyId: string,
+  allCaptures: Capture[], allSources: TeamSources | undefined, strategyTeam: number[],
+  preferred?: { captureId: string; teamSource: TeamSource }) {
+  const captures = allCaptures.filter((item) => !item.id.startsWith('strategy-package:') || item.id === `strategy-package:${strategyId}`)
+  const sources = allSources?.strategyId === strategyId ? allSources : undefined
+  const packaged = captures.find((item) => item.id === `strategy-package:${strategyId}`)
+  const sameTeam = captures.find((item) => item.teamHeroTypeIds.length === strategyTeam.length
+    && item.teamHeroTypeIds.length > 0 && item.teamHeroTypeIds.every((typeId, index) => typeId === strategyTeam[index]))
+  const capture = captures.find((item) => item.id === preferred?.captureId) ?? packaged ?? sameTeam ?? captures[0]
+  const teamOptions = teamSourceOptions(lang, sources, capture?.teamHeroTypeIds ?? [], strategyTeam)
+  const preferredSource = teamOptions.find((option) => option.source === preferred?.teamSource && option.ready)
+  const author = teamOptions.find((option) => option.source === 'author' && option.ready)
+  const teamSource = preferredSource?.source ?? author?.source ?? teamOptions.find((option) => option.ready)?.source ?? 'battle'
+  return { captures, sources, capture, captureId: capture?.id ?? '', teamOptions, teamSource,
+    teamReady: Boolean(teamOptions.find((option) => option.source === teamSource)?.ready) }
+}
+
+export function useSimulationInputs<Capture extends CaptureOption>(lang: Lang, strategyId: string,
+  captures: Capture[], sources: TeamSources | undefined, strategyTeam: number[]) {
+  const [choice, setChoice] = useState<{ strategyId: string; captureId: string; teamSource: TeamSource }>()
+  const inputs = simulationInputs(lang, strategyId, captures, sources, strategyTeam, choice?.strategyId === strategyId ? choice : undefined)
+  const setCaptureId = (captureId: string) => setChoice({ strategyId, captureId, teamSource: inputs.teamSource })
+  const setTeamSource = (teamSource: TeamSource) => setChoice({ strategyId, captureId: inputs.captureId, teamSource })
+  return { ...inputs, setCaptureId, setTeamSource }
+}
+
 export function teamCheckText(lang: Lang, check?: TeamCheck | null) {
-  const t = (zh: string, en: string) => (lang === 'en' ? en : zh)
-  if (!check || !check.compared) return t(
-    '装备数据还没有和实战核对：队伍里有打过这个 Boss 的英雄时，读取队伍（保存策略组、模拟当前队伍或打开准备界面）后会自动核对。',
-    'Gear data not yet checked against a real battle: when the team has champions that fought this boss, it is checked automatically whenever the team is read (saving the strategy, simulating its current team or opening the preparation screen).')
-  return t(`装备数据已和实战核对：${check.matched ?? 0}/${check.compared} 名英雄与服务器数据完全一致（${check.checkedAt?.slice(5, 16) ?? ''}）`,
-    `Gear data checked against real battles: ${check.matched ?? 0}/${check.compared} champions identical to the server's (${check.checkedAt?.slice(5, 16) ?? ''})`)
+  const t: Translate = (key, params) => translate(lang, key, params)
+  if (!check || !check.compared) return t('sim.gearDataNotYetChecked')
+  return t('sim.gearDataCheckedAgainstReal', { matched: check.matched ?? 0, compared: check.compared, value: check.checkedAt?.slice(5, 16) ?? '' })
 }
 
 export function TeamSourcePicker({ options, value, onChange, disabled }: {
@@ -563,16 +600,9 @@ export type StuckDetail = {
   snapshot?: BattleSnapshot | null
 }
 
-const STUCK_REASON: Record<string, [string, string]> = {
-  no_matching_rule: ['没有匹配且可执行的规则', 'no rule matched with a usable skill'],
-  rule_command_not_legal: ['规则选出的技能或目标不合法', 'the rule chose a skill or target that is not legal'],
-  no_progress: ['同一回合反复决策而战斗没有推进', 'kept deciding on one turn without the battle advancing'],
-  engine_rejected_command: ['游戏引擎拒绝了规则给出的指令', "the game engine rejected the rule's command"],
-}
-
 export function stuckReasonText(lang: Lang, reason: string) {
-  const text = STUCK_REASON[reason]
-  return text ? (lang === 'en' ? text[1] : text[0]) : reason
+  const key = `stuck.${reason}`
+  return hasMessage(key) ? translate(lang, key) : reason
 }
 
 export function ruleLabel(lang: Lang, rule: string | null | undefined) {
@@ -585,18 +615,17 @@ function listText(value: unknown) {
 
 // Why one rule of the stuck champion did not act (codes from no_decision_report).
 function ruleCheckText(lang: Lang, rule: StuckRule) {
-  const en = lang === 'en'
   switch (rule.code) {
-    case 'hero_form_mismatch': return en ? `needs champion form ${listText(rule.expected)}, current ${listText(rule.actual)}` : `要求英雄形态 ${listText(rule.expected)}，当前为 ${listText(rule.actual)}`
+    case 'hero_form_mismatch': return translate(lang, 'sim.needsChampionFormCurrent', { expected: listText(rule.expected), actual: listText(rule.actual) })
     case 'chimera_form_mismatch': {
       const expected = Array.isArray(rule.expected) ? rule.expected.map((form) => formNameByKey(lang, String(form))).join('/') : listText(rule.expected)
       const actual = formNameByKey(lang, String(rule.actual ?? '')) || '?'
-      return en ? `only in ${expected} form (current ${actual})` : `只在${expected}形态生效（当前${actual}）`
+      return translate(lang, 'sim.onlyInFormCurrent', { expected, actual })
     }
-    case 'conditions_not_met': return en ? 'conditions not met' : '触发条件不满足'
-    case 'default_no_ready_skill': return en ? 'no skill in its priority list is ready with a legal target' : '优先列表中没有已就绪且目标合法的技能'
-    case 'trial_no_action': return en ? 'no safe trial action or basic skill available' : '没有可安全执行的试炼动作或基础技能'
-    case 'skill_unavailable': return en ? 'conditions met, but the skill is not ready or has no legal target' : '条件满足，但指定技能未就绪或没有合法目标'
+    case 'conditions_not_met': return translate(lang, 'sim.conditionsNotMet')
+    case 'default_no_ready_skill': return translate(lang, 'sim.noSkillInItsPriority')
+    case 'trial_no_action': return translate(lang, 'sim.noSafeTrialActionOr')
+    case 'skill_unavailable': return translate(lang, 'sim.conditionsMetButTheSkill')
     default: return toolText(lang, rule.reason ?? rule.code)
   }
 }
@@ -612,21 +641,19 @@ export function StuckCard({ run, stuck, where, context, onJump, onLog }: {
     <article className="stuck-card">
       <header>
         <AlertTriangle size={15} />
-        <strong>{t(`第 ${run.index} 场${run.exact ? `（${originalRunLabel(lang, swapped)}）` : ''}在${where}中断`, `Run ${run.index}${run.exact ? ` (${originalRunLabel(lang, swapped)})` : ''} stopped on ${where}`)}</strong>
-        {stuck.snapshot && <button className="link-button" onClick={() => setShowState((value) => !value)}>{t('当时的战场状态', 'Battle state then')}</button>}
-        {onLog && <button className="link-button" onClick={onLog}>{t('出手记录', 'Action log')}</button>}
+        <strong>{t('sim.runStoppedOn', { index: run.index, exact: Boolean(run.exact), original: originalRunLabel(lang, swapped), where })}</strong>
+        {stuck.snapshot && <button className="link-button" onClick={() => setShowState((value) => !value)}>{t('sim.battleStateThen')}</button>}
+        {onLog && <button className="link-button" onClick={onLog}>{t('sim.actionLog')}</button>}
       </header>
-      <p className="stuck-hero"><HeroIcon typeId={heroTypeId} size="md" /><span>{t(
-        `轮到出手${context ?? ''}：${stuckReasonText(lang, stuck.reason)}。实战接管会在这里停下等待。`,
-        `had to act${context ?? ''}: ${stuckReasonText(lang, stuck.reason)}. A live takeover would stop and wait here.`)}</span></p>
-      {stuck.rule && <p className="muted">{t('规则：', 'Rule: ')}{ruleLabel(lang, stuck.rule)}</p>}
+      <p className="stuck-hero"><HeroIcon typeId={heroTypeId} size="md" /><span>{t('sim.hadToActALive', { context: context ?? '', reason: stuckReasonText(lang, stuck.reason) })}</span></p>
+      {stuck.rule && <p className="muted">{t('sim.rule')}{ruleLabel(lang, stuck.rule)}</p>}
       {(stuck.skills?.length ?? 0) > 0 && <div className="stuck-skills">
         {stuck.skills!.map((skill) => (
           <span key={skill.typeId} className={`stuck-skill ${skill.ready ? 'ready' : ''}`}>
             <SkillIcon heroTypeId={heroTypeId} skillTypeId={skill.typeId} cooldown={skill.cooldown} />
-            <em>{skill.ready ? t('就绪', 'ready') : skill.cooldown ? t(`冷却 ${skill.cooldown}`, `cooldown ${skill.cooldown}`) : t('不可用', 'unavailable')}</em>
-            {skill.reserved && <em className="warn">{t('被规则保留', 'reserved by a rule')}</em>}
-            {skill.ready && skill.validTargets === 0 && <em className="warn">{t('无合法目标', 'no legal target')}</em>}
+            <em>{skill.ready ? t('sim.ready2') : skill.cooldown ? t('sim.cooldown2', { cooldown: skill.cooldown }) : t('sim.unavailable')}</em>
+            {skill.reserved && <em className="warn">{t('sim.reservedByARule')}</em>}
+            {skill.ready && skill.validTargets === 0 && <em className="warn">{t('sim.noLegalTarget')}</em>}
           </span>
         ))}
       </div>}
@@ -638,7 +665,7 @@ export function StuckCard({ run, stuck, where, context, onJump, onLog }: {
             <span>{ruleCheckText(lang, rule)}</span>
           </li>
         ))}
-      </ul> : stuck.reason === 'no_matching_rule' && <p className="muted">{t('这个英雄没有任何规则。', 'This champion has no rules at all.')}</p>}
+      </ul> : stuck.reason === 'no_matching_rule' && <p className="muted">{t('sim.thisChampionHasNoRules')}</p>}
     </article>
   )
 }
@@ -660,13 +687,13 @@ export function RulesTable({ rules, finishedRuns, withTrials, onJump }: { rules:
   const { lang, t } = useSim()
   return <div className="simulation-scroll">
     <table className="simulation-table rules">
-      <thead><tr><th>#</th><th>{t('规则', 'Rule')}</th><th>{t('每场使用', 'Uses per run')}</th><th>{t('用到的场次', 'Runs used')}</th><th>{t('伤害占比', 'Damage share')}</th>{withTrials && <th>{t('试炼贡献', 'Trial contribution')}</th>}</tr></thead>
+      <thead><tr><th>#</th><th>{t('sim.rule2')}</th><th>{t('sim.usesPerRun')}</th><th>{t('sim.runsUsed')}</th><th>{t('sim.damageShare')}</th>{withTrials && <th>{t('sim.trialContribution')}</th>}</tr></thead>
       <tbody>
         {rules.map((rule, index) => {
-          const label = rule.auto ? t('（无可用规则，自动战斗）', '(no usable rule, auto battle)') : ruleLabel(lang, rule.rule)
+          const label = rule.auto ? t('sim.noUsableRuleAutoBattle') : ruleLabel(lang, rule.rule)
           return <tr key={`${rule.ruleIndex ?? 'x'}-${index}`} className={rule.ruleIndex !== null && rule.uses === 0 ? 'unused' : rule.auto ? 'auto' : ''}>
             <td>{rule.ruleIndex ?? '—'}</td>
-            <td>{rule.ruleIndex !== null ? <button className="link-button" onClick={() => onJump(rule.ruleIndex!)}>{label}</button> : label}{rule.ruleIndex !== null && rule.uses === 0 && <em className="tag warn">{t('未使用', 'Unused')}</em>}</td>
+            <td>{rule.ruleIndex !== null ? <button className="link-button" onClick={() => onJump(rule.ruleIndex!)}>{label}</button> : label}{rule.ruleIndex !== null && rule.uses === 0 && <em className="tag warn">{t('sim.unused')}</em>}</td>
             <td>{rule.usesPerRun}</td>
             <td>{rule.runsUsed}/{finishedRuns}</td>
             <td><span className="cell-bar"><span style={{ width: `${Math.min(100, rule.damageShare * 100)}%` }} /><em>{percent(rule.damageShare, 1)}</em></span></td>
@@ -706,16 +733,6 @@ export type LogFilter<Row> = { key: string; label: string; test: (row: Row) => b
 export type UseTrigger = 'input' | 'team' | 'counter' | 'provoke' | 'activate' | 'effect' | 'passive' | 'other'
 export type ActionUse = { actorId: number; skillTypeId: number; targetId: number; trigger: UseTrigger; damage: number }
 
-const TRIGGER_TEXT: Record<UseTrigger, { zh: string; en: string; hintZh: string; hintEn: string }> = {
-  input: { zh: '本技能', en: 'Own skill', hintZh: '这次出手所用技能本身的伤害。', hintEn: 'Damage of the skill this action used.' },
-  team: { zh: '组队攻击', en: 'Ally Attack', hintZh: '被组队攻击叫来一起攻击的英雄（用其默认技能）和各自的伤害。', hintEn: 'A champion called in by an Ally Attack (with their default skill) and their damage.' },
-  counter: { zh: '反击', en: 'Counterattack', hintZh: '被攻击后用默认技能反击。', hintEn: 'Hit back with the default skill after being attacked.' },
-  provoke: { zh: '激怒攻击', en: 'Provoked attack', hintZh: '受【激怒】影响，立即攻击施放者。', hintEn: 'Provoked into attacking the champion or head that placed it.' },
-  activate: { zh: '技能触发', en: 'Activated skill', hintZh: '被其他技能或效果直接触发的技能。', hintEn: 'A skill activated by another skill or effect.' },
-  effect: { zh: '效果触发', en: 'Triggered skill', hintZh: '由某个效果触发的技能。', hintEn: 'A skill triggered by an effect.' },
-  passive: { zh: '被动', en: 'Passive', hintZh: '被动技能造成的伤害。', hintEn: 'Damage dealt by a passive skill.' },
-  other: { zh: '效果伤害', en: 'Effect damage', hintZh: '不属于某次技能使用的伤害，例如回合开始时的持续伤害，或这名英雄施放的效果在别人出手时造成的伤害；按施放效果的英雄统计。', hintEn: 'Damage outside any skill use, such as damage over time at the start of a turn or an effect this champion placed going off during another action; counted for the champion who placed it.' },
-}
 
 // The skill uses worth a line under the action: everything besides the action's own skill
 // (the bosses' only when they act, their damage to the team is not shown), plus the own
@@ -735,13 +752,12 @@ export function hasChainedSkill(uses: ActionUse[] | undefined) {
 }
 
 function UseChip({ use, actor, form }: { use: ActionUse; actor: ActorInfo | undefined; form?: number }) {
-  const { en, t } = useSim()
-  const text = TRIGGER_TEXT[use.trigger]
+  const { t } = useSim()
   const player = actor?.player === true
-  const label = use.trigger === 'other' && use.actorId < 0 ? t('其他伤害', 'Other damage') : en ? text.en : text.zh
+  const label = use.trigger === 'other' && use.actorId < 0 ? t('sim.otherDamage') : t(`chain.${use.trigger}`)
   const hint = use.trigger === 'other' && use.actorId < 0
-    ? t('找不到出手英雄的伤害，例如反伤。', 'Damage with no champion as its dealer, such as reflected damage.')
-    : en ? text.hintEn : text.hintZh
+    ? t('sim.damageWithNoChampionAs')
+    : t(`chain.${use.trigger}.hint`)
   return <span className={`use-chip ${use.trigger} ${actor && !player ? 'enemy' : ''}`}>
     <HoverCard content={<div className="hover-list"><strong>{label}</strong><span>{hint}</span></div>}><em>{label}</em></HoverCard>
     {actor && <ActorIcon typeId={actor.heroTypeId} player={player} size="xs" form={form} />}
@@ -807,13 +823,13 @@ function ActionLogView<Row extends LogRow>({ rows, actors, runs, runIndex, setRu
         <button key={index} className={index === runIndex ? 'active' : ''} onClick={() => setRunIndex(index)}>{index === 1 ? `1 ${originalRunLabel(lang, swapped)}` : index}</button>
       ))}</div>
       <div className="hero-filter">
-        <button className={hero === 0 ? 'active' : ''} onClick={() => setHero(0)}>{t('全部', 'All')}</button>
+        <button className={hero === 0 ? 'active' : ''} onClick={() => setHero(0)}>{t('sim.all')}</button>
         {team.map((typeId) => <button key={typeId} className={hero === typeId ? 'active' : ''} onClick={() => setHero(hero === typeId ? 0 : typeId)}><HeroIcon typeId={typeId} size="xs" /></button>)}
       </div>
       {filters.map((filter) => <label key={filter.key}><input type="checkbox" checked={Boolean(active[filter.key])} onChange={(event) => setActive((current) => ({ ...current, [filter.key]: event.target.checked }))} />{filter.label}</label>)}
       <label><input type="checkbox" checked={showEnemy} onChange={(event) => setShowEnemy(event.target.checked)} />{enemyToggle}</label>
     </div>
-    {!rows ? <p className="muted">{t('读取中…', 'Loading…')}</p> : <div className="simulation-log">
+    {!rows ? <p className="muted">{t('sim.loading')}</p> : <div className="simulation-log">
       {groups.slice(0, pages * PAGE_GROUPS).map(([key, groupRows]) => {
         const opening = groupRows.find((row) => row.state)?.state
         return <details key={key} open={openByDefault?.(key, groupRows) ?? false}>
@@ -827,16 +843,16 @@ function ActionLogView<Row extends LogRow>({ rows, actors, runs, runIndex, setRu
                 <span className="who"><ActorIcon typeId={row.actorTypeId} player={row.source !== 'enemy'} form={row.form} /></span>
                 <span className="what"><SkillIcon heroTypeId={row.actorTypeId} skillTypeId={row.skillTypeId} player={row.source !== 'enemy'} form={row.form} /><span className="arrow">→</span>{target(row.targetId, row.form)}</span>
                 <span className="why">{row.source === 'policy' ? `#${row.ruleIndex ?? '—'} ${ruleLabel(lang, row.rule)}`
-                  : row.source === 'auto' ? `${t('自动：', 'Auto: ')}${row.autoDetail ? toolText(lang, row.autoDetail) : t('无可用规则', 'no usable rule')}`
+                  : row.source === 'auto' ? `${t('sim.auto')}${row.autoDetail ? toolText(lang, row.autoDetail) : t('sim.noUsableRule')}`
                   : <EnemyAction row={row} />}
-                  {row.reservationReleased && <em className="tag warn">{t('动用保留技能', 'reserved skill used')}</em>}</span>
+                  {row.reservationReleased && <em className="tag warn">{t('sim.reservedSkillUsed')}</em>}</span>
                 <span className="dmg">{row.damage ? damageText(row.damage) : ''}</span>
-                <span className="trials">{extras?.(row)}{row.deaths.filter((id) => id >= 0).map((id) => <em key={`d${id}`} className="bad death">{target(id)}{t('阵亡', 'died')}</em>)}</span>
+                <span className="trials">{extras?.(row)}{row.deaths.filter((id) => id >= 0).map((id) => <em key={`d${id}`} className="bad death">{target(id)}{t('sim.died')}</em>)}</span>
                 {row.state ? <button className="state-toggle" aria-expanded={open} onClick={() => setExpanded((current) => {
                   const next = new Set(current)
                   if (next.has(rowKey)) next.delete(rowKey); else next.add(rowKey)
                   return next
-                })}>{open ? t('收起', 'Hide') : t('状态', 'State')}</button> : <span />}
+                })}>{open ? t('sim.hide') : t('sim.state')}</button> : <span />}
               </div>
               {(() => {
                 const chain = chainUses(row.uses, byId)
@@ -849,8 +865,8 @@ function ActionLogView<Row extends LogRow>({ rows, actors, runs, runIndex, setRu
         </details>
       })}
       {remaining <= 0 && footer}
-      {remaining > 0 && <button className="button ghost" onClick={() => setPages((value) => value + 1)}>{t(`显示后面的回合（还有 ${remaining} 组）`, `Show later turns (${remaining} more groups)`)}</button>}
-      {!groups.length && <p className="muted">{t('没有符合筛选条件的行动。', 'No actions match the filters.')}</p>}
+      {remaining > 0 && <button className="button ghost" onClick={() => setPages((value) => value + 1)}>{t('sim.showLaterTurnsMoreGroups', { remaining })}</button>}
+      {!groups.length && <p className="muted">{t('sim.noActionsMatchTheFilters')}</p>}
     </div>}
   </>
 }

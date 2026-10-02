@@ -34,6 +34,7 @@ from hydra_forecast_live import (ForecastSetupError, ensure_runtime_bundle, game
                                  newest_static_data, probe_source)
 from simulation_common import write_run
 from strategy_storage import atomic_write_json
+from ui_text import ui_text
 
 
 KEEP_RECORDS = 20
@@ -51,12 +52,8 @@ def forecast_enabled(config: dict[str, Any]) -> bool:
     return bool(mandatory) or (isinstance(minimum, (int, float)) and not isinstance(minimum, bool) and minimum > 0)
 
 
-STUCK_REASONS = {
-    "no_matching_rule": "没有匹配且可执行的规则",
-    "rule_command_not_legal": "规则选出的技能或目标不合法",
-    "no_progress": "同一回合反复决策而战斗没有推进",
-    "engine_rejected_command": "游戏引擎拒绝了规则给出的指令",
-}
+# Why a simulated battle stopped (the stuck.<reason> messages).
+STUCK_REASONS = {"no_matching_rule", "rule_command_not_legal", "no_progress", "engine_rejected_command"}
 
 
 def _names_by_type(state: dict[str, Any]) -> dict[int, str]:
@@ -102,19 +99,19 @@ def window_difference(result: dict[str, Any], window: dict[str, Any], command: d
     turn = window["turn"]
     decision = next((item for item in result.get("decisions", []) if item.get("turn") == turn), None)
     if decision is None:
-        return f"第 {turn} 回合不在模拟的玩家回合中"
+        return ui_text("chimeraForecast.turnNotSimulated", turn=turn)
     if decision.get("playerTurnCount") != window["playerTurnCount"]:
-        return f"第 {turn} 回合玩家行动次数不同"
+        return ui_text("chimeraForecast.turnActionCountDiffers", turn=turn)
     if decision.get("activeHeroId") != window["activeHeroId"]:
-        return f"第 {turn} 回合行动英雄不同"
+        return ui_text("chimeraForecast.turnHeroDiffers", turn=turn)
     if window["words"] is not None:
         action = next((item for item in (result.get("engine") or {}).get("actions", [])
                        if item.get("turn") == turn and item.get("source") != "enemy"), None)
         if action is not None and list(action.get("rng") or []) != window["words"]:
-            return f"第 {turn} 回合随机状态不同"
+            return ui_text("chimeraForecast.turnRandomDiffers", turn=turn)
     if command is not None and decision.get("status") == "command" and (
             decision.get("skillTypeId") != command["skillTypeId"] or decision.get("targetId") != command["targetId"]):
-        return f"第 {turn} 回合提交的技能或目标不同"
+        return ui_text("chimeraForecast.turnCommandDiffers", turn=turn)
     return None
 
 
@@ -195,7 +192,7 @@ class ChimeraForecastMonitor:
             self.battle = _Battle(generation=generation)
             battle = state.get("battle") if isinstance(state.get("battle"), dict) else {}
             if battle.get("playerTurnCount") not in (0, 1):
-                self._conclude("not_opening", "奇美拉开局模拟：本场不是从开局接管，跳过整场模拟。", "not_opening")
+                self._conclude("not_opening", ui_text("chimeraForecast.notOpening"), "not_opening")
                 return None
             # What the controller decides with from the opening on.
             self.battle.strategy = copy.deepcopy(config)
@@ -217,7 +214,7 @@ class ChimeraForecastMonitor:
             difference = window_difference(current.result, window, current.commands.get(window["turn"]))
             if difference:
                 current.divergence_reported = True
-                self.emit(f"奇美拉开局模拟：实战已偏离模拟（{difference}）；此后按实际战况判断。")
+                self.emit(ui_text("chimeraForecast.deviated", difference=difference))
         return None
 
     def observe_command(self, state: dict[str, Any], *, skill_type_id: Any, target_id: Any) -> None:
@@ -233,7 +230,7 @@ class ChimeraForecastMonitor:
             difference = window_difference(current.result, window, command) if window else None
             if difference:
                 current.divergence_reported = True
-                self.emit(f"奇美拉开局模拟：实战已偏离模拟（{difference}）；此后按实际战况判断。")
+                self.emit(ui_text("chimeraForecast.deviated", difference=difference))
 
     def _conclude(self, status: str, conclusion: str, reason: str | None = None,
                   detail: str | None = None) -> None:
@@ -260,7 +257,7 @@ class ChimeraForecastMonitor:
                 pass
 
     def _give_up(self, reason: str, code: str, detail: str | None = None) -> None:
-        self._conclude("unavailable", f"奇美拉开局模拟无法进行：{reason}；本场按实际战况判断。", code, detail)
+        self._conclude("unavailable", ui_text("chimeraForecast.cannotRun", reason=reason), code, detail)
 
     def _start(self, state: dict[str, Any], capture: Any) -> None:
         assert self.battle is not None
@@ -269,11 +266,11 @@ class ChimeraForecastMonitor:
         capture_status = getattr(capture, "status", None)
         if getattr(capture, "generation", None) != current.generation or capture_status == "waiting":
             if self.clock() - current.started_at > CAPTURE_WAIT_SECONDS:
-                self._give_up("开局数据未保存", "capture_timeout")
+                self._give_up(ui_text("chimeraForecast.openingNotSaved"), "capture_timeout")
             return
         if capture_status != "saved" or not isinstance(folder, Path):
             missing = str(getattr(capture, "reason", None) or capture_status)
-            self._give_up(f"开局数据未保存（{missing}）", "capture_unavailable", missing)
+            self._give_up(ui_text("chimeraForecast.openingNotSavedReason", missing=missing), "capture_unavailable", missing)
             return
         opening = getattr(capture, "opening", None) or {}
         static_state = dict(getattr(capture, "static_payload", None) or {})
@@ -309,7 +306,7 @@ class ChimeraForecastMonitor:
         job.thread = threading.Thread(target=work, daemon=True, name="chimera-forecast")
         current.job = job
         current.status = "running"
-        self.emit("奇美拉开局模拟：已取得本局开局数据，正在后台模拟整场战斗；战斗照常进行。")
+        self.emit(ui_text("chimeraForecast.started"))
         job.thread.start()
 
     def _save(self, strategy: dict[str, Any], provenance: dict[str, Any], capture_id: str,
@@ -344,48 +341,48 @@ class ChimeraForecastMonitor:
         current = self.battle
         job = current.job
         if job.error or not job.result:
-            self._give_up(job.error or "没有结果", "setup_failed" if job.error else "no_result", job.error)
+            self._give_up(job.error or ui_text("forecast.noResult"), "setup_failed" if job.error else "no_result", job.error)
             return None
         result = job.result
         strategy = current.strategy or {}
         evaluation = evaluate_forecast(strategy, result)
         current.evaluation = evaluation
         if evaluation["verdict"] == "unavailable":
-            self._give_up(f"模拟没有完成（{result.get('reason')}）", str(result.get("reason") or "no_result"))
+            self._give_up(ui_text("chimeraForecast.unfinished", reason=str(result.get("reason"))), str(result.get("reason") or "no_result"))
             return None
         if not current.windows:
-            self._give_up("没有可核对的实战回合", "no_live_windows")
+            self._give_up(ui_text("chimeraForecast.noLiveTurns"), "no_live_windows")
             return None
         for turn in sorted(current.windows):
             difference = window_difference(result, current.windows[turn], current.commands.get(turn))
             if difference:
-                self._conclude("unavailable", f"奇美拉开局模拟与实战不一致（{difference}）；本场不据此重整。",
+                self._conclude("unavailable", ui_text("chimeraForecast.differs", difference=difference),
                                "live_turn_differs", difference)
                 return None
         current.result = result
         record_id = job.record.name if job.record else None
         checked = len(current.windows)
         missing = evaluation["missingTrialIds"]
-        damage_note = (f"预计伤害 {damage_text(evaluation['damage'])}"
-                       + (f"（最低要求 {damage_text(evaluation['minimumDamage'])}）"
-                          if evaluation["minimumDamage"] > 0 else ""))
-        trial_note = ("必要试炼全部完成" if not missing
-                      else "必要试炼未完成：" + ", ".join(map(str, missing)))
+        damage_note = ui_text("chimeraForecast.damage", damage=damage_text(evaluation["damage"]),
+                              hasMinimum=evaluation["minimumDamage"] > 0, minimum=damage_text(evaluation["minimumDamage"]))
+        trial_note = (ui_text("chimeraForecast.trialsDone") if not missing
+                      else ui_text("chimeraForecast.trialsMissing", trials=", ".join(map(str, missing))))
         stuck = evaluation.get("stuck") if isinstance(evaluation.get("stuck"), dict) else None
         stuck_note = None
         if stuck:
             type_id = stuck.get("activeHeroTypeId")
             hero = _names_by_type(state).get(type_id, f"英雄 {type_id}")
-            stuck_note = (f"模拟在 Boss 第 {stuck.get('bossTurns')} 回合卡住：“{hero}”"
-                          f"{STUCK_REASONS.get(stuck.get('reason'), stuck.get('reason'))}")
-        header = (f"奇美拉开局模拟完成（{result.get('elapsedSeconds')} 秒，已与 {checked} 个实战回合逐项核对一致）：")
-        parts = [part for part in (stuck_note, trial_note, damage_note) if part]
+            reason = stuck.get("reason")
+            stuck_note = ui_text("chimeraForecast.stuck", bossTurn=stuck.get("bossTurns"), hero=hero,
+                                 reason=ui_text(f"stuck.{reason}") if reason in STUCK_REASONS else str(reason))
+        details = ui_text("forecast.separator").join(part for part in (stuck_note, trial_note, damage_note) if part)
+        summary = {"seconds": result.get("elapsedSeconds"), "checked": checked, "details": details}
         if evaluation["verdict"] == "continue":
-            self._conclude("applied", header + "；".join(parts) + "，继续战斗。", "continue")
+            self._conclude("applied", ui_text("chimeraForecast.continue", **summary), "continue")
             return None
         objectives = strategy.get("objectives") if isinstance(strategy.get("objectives"), dict) else {}
         behavior = objectives.get("onMandatoryTrialImpossible", "free_regroup_and_retry_manual")
-        message = header + "；".join(parts) + "，预计无法完成目标，执行免费重整。"
+        message = ui_text("chimeraForecast.retry", **summary)
         self._conclude("applied", message, "retry")
         return ChimeraForecastRetry(cause=evaluation["cause"] or "goals", behavior=str(behavior),
                                     message=message, record_id=record_id)

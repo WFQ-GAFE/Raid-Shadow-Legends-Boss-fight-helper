@@ -18,9 +18,15 @@ function visit(node) {
 }
 visit(ast);
 assert.equal(parts.length, names.size);
+// Text comes from the Chinese catalog, as in a window set to Chinese.
+const zh = JSON.parse(fs.readFileSync(path.join(__dirname, '../src/i18n/messages/zh-CN.json'), 'utf8'));
 const prelude = `let effectConditionSequence=0, skillCooldownConditionSequence=0,
   heroStateConditionSequence=0, conditionGroupSequence=0, effectCountSequence=0;
-  const team=[4716,4716,8736],teamSize=3;`;
+  const team=[4716,4716,8736],teamSize=3;
+  const zh=${JSON.stringify(zh)};
+  const tr=(key,params={})=>zh[key].replace(/\\{(\\w+)\\}/g,(m,name)=>String(params[name]));
+  const effectName=(effect)=>zh['effect.'+effect.token]??effect.label;
+  const withoutStrength=(text)=>text.replace(/\\s*\\d+(?:[.,]\\d+)?%/g,'').replace(/\\s*[（(]\\s*[）)]/g,'').trim();`;
 const js = ts.transpileModule(prelude + parts.join('\n') + '\nreturn {hydrateConditionTree,serializeConditionNode,createConditionEffectCount,effectPickerSelection};',
   {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText;
 const ui = new Function(js)();
@@ -52,9 +58,8 @@ test('saved kind predicates and unknown effects are never displayed as an empty 
     {token:'470',icon:'AoEContinuousDamage',label:'生命值燃烧',labelEn:'HP Burn',group:'减益'}];
   const kind = ui.effectPickerSelection(effects,'StatusReduceAttack');
   assert.equal(kind.token,'StatusReduceAttack');
-  assert.equal(kind.label,'降低攻击（按效果种类）');
-  assert(!kind.labelEn.includes('25%'));
-  assert.equal(ui.effectPickerSelection(effects,'AoEContinuousDamage').label,'生命值燃烧（按效果种类）');
+  assert.equal(kind.name,'降低攻击（按效果种类）');
+  assert.equal(ui.effectPickerSelection(effects,'AoEContinuousDamage').name,'生命值燃烧（按效果种类）');
   assert.equal(ui.effectPickerSelection(effects,'130'),effects[0]);
   assert.equal(ui.effectPickerSelection(effects,'unknown-saved-kind').token,'unknown-saved-kind');
   assert.equal(ui.effectPickerSelection(effects,''),undefined);

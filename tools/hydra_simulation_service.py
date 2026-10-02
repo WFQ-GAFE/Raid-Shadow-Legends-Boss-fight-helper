@@ -15,21 +15,17 @@ from typing import Any, Callable
 
 from capture_identity import unique_first
 from chimera_simulation_service import KEEP_SIMULATIONS, SimulationService, _read_json, recent_folders, summary_row
-from hydra_simulation import aggregate, run_simulation, run_timeline, summarize_run
+from hydra_forecast_live import REPORT_PREFIX, WORK_ROOT as FORECAST_ROOT
+from hydra_simulation import aggregate, difficulty_for_stage, run_simulation, run_timeline, summarize_run
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
     os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-CAPTURE_ROOTS = {"capture": PROJECT_ROOT / "cache" / "hydra-capture",
-                 "forecast": PROJECT_ROOT / "cache" / "hydra-forecast"}
+CAPTURE_ROOTS = {"capture": PROJECT_ROOT / "cache" / "hydra-capture", "forecast": FORECAST_ROOT}
 SIMULATION_ROOT = PROJECT_ROOT / "cache" / "hydra-simulations"
 PROVENANCE_TYPE = "verified_hydra_replay_source"
-
-
-def difficulty_for_stage(stage_id: object) -> int | None:
-    # Hydra stages end in the difficulty, e.g. 8039003 (1 Normal .. 4 Nightmare).
-    return stage_id % 10 if isinstance(stage_id, int) and 8000000 < stage_id < 9000000 else None
 
 
 def list_captures(limit: int = 20, roots: dict[str, Path] | None = None) -> list[dict[str, Any]]:
@@ -100,7 +96,18 @@ class HydraSimulationService(SimulationService):
                  bundle_provider: Callable[[int | None], Path] | None = None):
         self.capture_roots = capture_roots or CAPTURE_ROOTS
         super().__init__(capture_root=self.capture_roots["capture"], simulation_root=simulation_root,
-                         runner=runner, bundle_provider=bundle_provider, battle_forecast_root=simulation_root)
+                         runner=runner, bundle_provider=bundle_provider,
+                         battle_forecast_root=self.capture_roots.get("forecast", simulation_root))
+
+    def _folder(self, simulation_id: str) -> Path:
+        # An opening forecast's report lives in the forecast's own folder (hydra_forecast_live).
+        if not str(simulation_id).startswith(REPORT_PREFIX):
+            return super()._folder(simulation_id)
+        root = self.battle_forecast_root.resolve()
+        folder = (root / str(simulation_id)[len(REPORT_PREFIX):]).resolve()
+        if folder.parent != root:
+            raise FileNotFoundError(ui_text("simService.recordNotFound"))
+        return folder
 
     def captures(self, limit: int = 20) -> list[dict[str, Any]]:
         return list_captures(limit, self.capture_roots)
@@ -109,12 +116,12 @@ class HydraSimulationService(SimulationService):
         key, _, name = capture_id.partition(":")
         root = self.capture_roots.get(key)
         if root is None or not name:
-            raise ValueError("找不到这次战斗的开局数据")
+            raise ValueError(ui_text("simService.openingNotFound"))
         folder = (root / name).resolve()
         provenance = _read_json(folder / "capture-provenance.json")
         if folder.parent != root.resolve() or not isinstance(provenance, dict) \
                 or provenance.get("type") != PROVENANCE_TYPE:
-            raise ValueError("找不到这次战斗的开局数据")
+            raise ValueError(ui_text("simService.openingNotFound"))
         return folder
 
     def _capture_facts(self, provenance: dict[str, Any]) -> dict[str, Any]:

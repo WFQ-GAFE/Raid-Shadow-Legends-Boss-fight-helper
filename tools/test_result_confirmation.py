@@ -7,13 +7,14 @@ from unittest.mock import patch
 import chimera_controller as controller
 import controller_manager as manager_module
 from test_chimera_lifecycle_flow import FakeResultIpc, SESSION
+from ui_text import render
 
 
 def rejects(function, reason):
     try:
         function()
     except RuntimeError as error:
-        assert reason in str(error), str(error)
+        assert reason in render(str(error), "zh-CN"), render(str(error), "zh-CN")
     else:
         raise AssertionError('Unconfirmed result was accepted')
 

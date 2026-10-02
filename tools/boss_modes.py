@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from hydra_state import hydra_head_is_devouring
 from strategy_storage import read_object
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
@@ -171,7 +172,7 @@ HYDRA_BATTLE_TURN_CONDITION_KEYS = frozenset(
 def normalize_mode(value: Any) -> str:
     mode = str(value or "chimera").strip().lower()
     if mode not in MODE_SPECS:
-        raise ValueError(f"未知 Boss 模式：{value}")
+        raise ValueError(ui_text("modes.unknownMode", value=value))
     return mode
 
 
@@ -348,7 +349,7 @@ def strategy_for_mode(
     selected_id = str(strategy_id or section["activeStrategyId"])
     value = section["strategies"].get(selected_id)
     if not isinstance(value, dict):
-        raise ValueError(f"策略组不存在：{selected_id}")
+        raise ValueError(ui_text("modes.groupNotFoundSelected", selectedId=selected_id))
     strategy = copy.deepcopy(value)
     return sanitize_strategy_for_mode(strategy, mode_id)
 
@@ -400,7 +401,7 @@ def update_mode_strategy(
     section = result["modes"][mode_id]
     selected_id = str(strategy_id or section["activeStrategyId"]).strip()
     if not selected_id:
-        raise ValueError("策略组 ID 不能为空")
+        raise ValueError(ui_text("modes.groupIdEmpty"))
     section["strategies"][selected_id] = sanitize_strategy_for_mode(strategy, mode_id)
     section["activeStrategyId"] = selected_id
     result["schemaVersion"] = 2
@@ -415,7 +416,7 @@ def select_mode_strategy(
     result = normalize_strategy_store(store)
     section = result["modes"][mode_id]
     if strategy_id not in section["strategies"]:
-        raise ValueError(f"策略组不存在：{strategy_id}")
+        raise ValueError(ui_text("modes.groupNotFound", strategyId=strategy_id))
     section["activeStrategyId"] = strategy_id
     result["activeMode"] = mode_id
     return result
@@ -429,9 +430,9 @@ def delete_mode_strategy(
     section = result["modes"][mode_id]
     strategies = section["strategies"]
     if strategy_id not in strategies:
-        raise ValueError(f"策略组不存在：{strategy_id}")
+        raise ValueError(ui_text("modes.groupNotFound", strategyId=strategy_id))
     if len(strategies) <= 1:
-        raise ValueError("每种 Boss 模式至少保留一个策略组")
+        raise ValueError(ui_text("modes.keepOneGroup"))
     del strategies[strategy_id]
     if section["activeStrategyId"] == strategy_id:
         section["activeStrategyId"] = next(iter(strategies))

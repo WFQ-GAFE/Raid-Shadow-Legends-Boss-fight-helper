@@ -3,11 +3,14 @@ import { createPortal } from 'react-dom'
 
 // A small card shown while the pointer (or keyboard focus) is on its anchor.
 // Rendered into <body> so scrolling panels and dialogs never clip it.
-export function HoverCard({ content, children, className = '', inline = true }: {
+export function HoverCard({ content, children, className = '', inline = true, focusable = true }: {
   content: ReactNode
   children: ReactNode
   className?: string
   inline?: boolean
+  // False when the anchor wraps controls that take focus themselves, or would add
+  // a tab stop to every row of a list.
+  focusable?: boolean
 }) {
   const anchor = useRef<HTMLSpanElement | null>(null)
   const card = useRef<HTMLDivElement | null>(null)
@@ -28,7 +31,7 @@ export function HoverCard({ content, children, className = '', inline = true }: 
   const Tag = inline ? 'span' : 'div'
   return (
     <>
-      <Tag ref={anchor as never} className={`hover-anchor ${className}`} onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide} tabIndex={0}>
+      <Tag ref={anchor as never} className={`hover-anchor ${className}`} onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide} tabIndex={focusable ? 0 : undefined}>
         {children}
       </Tag>
       {open && content && createPortal(

@@ -25,6 +25,7 @@ from capture_identity import drop_repeats
 from chimera_replay_source import validate_chimera_replay_source
 from hydra_replay_source import ReplaySourceError, validate_replay_source
 from strategy_storage import atomic_write_bytes, atomic_write_json
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
@@ -234,17 +235,17 @@ class ChimeraCaptureMonitor:
                     "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
             except OSError:
                 pass
-        self.emit(f"{self.label}开局数据未保存（{reason}）；不影响本场战斗。")
+        self.emit(ui_text("capture.openingNotSaved", label=self.label, reason=reason))
 
     def _try_capture(self, ipc: Any) -> None:
         source = ipc.replay_input()
         waited = self.clock() - self.started_at
         if not isinstance(source, dict) or source.get("battleGeneration") != self.generation:
             if waited > INPUT_WAIT_SECONDS:
-                self._fail("代理未发布本局开局数据")
+                self._fail(ui_text("capture.agentNoOpening"))
             return
         if source.get("type") != self.source_type or source.get("status") != "captured":
-            self._fail(f"代理未取得本局开局数据：{source.get('reason') or source.get('status')}")
+            self._fail(ui_text("capture.agentOpeningFailed", get=source.get('reason') or source.get('status')))
             return
         account = ipc.account()
         account_name = account.get("accountName") if isinstance(account, dict) else None
@@ -254,21 +255,21 @@ class ChimeraCaptureMonitor:
         except ReplaySourceError as error:
             if str(error).startswith("opening_") and waited <= INPUT_WAIT_SECONDS:
                 return  # The opening snapshot may still lack hero models.
-            self._fail(f"开局数据校验失败：{error}")
+            self._fail(ui_text("capture.openingInvalid", error=error))
             return
         folder = self._open_folder(provenance["battleSetupId"])
         if folder is None:
-            self._fail("无法创建保存目录")
+            self._fail(ui_text("capture.cannotCreateFolder"))
             return
         try:
             atomic_write_bytes(folder / "battle-setup.json", setups)
             atomic_write_bytes(folder / "battle-settings.json", settings)
             atomic_write_json(folder / "capture-provenance.json", provenance)
         except OSError as error:
-            self._fail(f"写入失败：{error}")
+            self._fail(ui_text("capture.writeFailed", error=error))
             return
         self.status = "saved"
-        self.emit(f"{self.label}开局数据已保存（用于离线模拟核对）：{folder.name}")
+        self.emit(ui_text("capture.openingSaved", label=self.label, folderName=folder.name))
         self.run_later(lambda: self._drop_repeats(folder))
 
     def _drop_repeats(self, folder: Path) -> None:
@@ -278,7 +279,7 @@ class ChimeraCaptureMonitor:
         except Exception:  # Housekeeping never disturbs the takeover.
             return
         if removed:
-            self.emit(f"已删除 {len(removed)} 份队伍配置相同的旧{self.label}开局数据（只保留最新一份）")
+            self.emit(ui_text("capture.openingDuplicatesRemoved", removedCount=len(removed), label=self.label))
 
     def observe_decision(self, state: dict[str, Any], *, ipc: Any, config: dict[str, Any] | None = None,
                          capability_memory: Any = None) -> None:

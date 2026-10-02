@@ -4,8 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ts = require('../node_modules/typescript');
 
-// i18n.ts touches window/document only inside functions these tests do not call.
-const source = fs.readFileSync(path.join(__dirname, '../src/i18n.ts'), 'utf8');
+// The 1.1.1 phrase table (i18n/legacy.ts) touches window/document only inside functions these tests do not call.
+const source = fs.readFileSync(path.join(__dirname, '../src/i18n/legacy.ts'), 'utf8');
 const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
 const i18n = {};
 new Function('require', 'exports', js)(require, i18n);

@@ -12,12 +12,12 @@ A Windows helper for the Chimera and Hydra fights in **RAID: Shadow Legends**: w
 
 **RAID: Shadow Legends** 奇美拉与六头蛇战斗的 Windows 助手：为队伍编写技能规则，让工具按规则出手，并在实战前离线检验规则。
 
-Current version: **1.1.1** ([release notes](docs/1.1.1-release-notes.md)) · 当前版本：**1.1.1**（[更新说明](docs/1.1.1-release-notes.md)）
+Current version: **1.1.2** ([release notes / notas da versão](docs/1.1.2-release-notes.md)) · 当前版本：**1.1.2**（[更新说明](docs/1.1.2-release-notes.md)）
 
 ## Getting started / 开始使用
 
-1. Download `RSL-Boss-helper-1.1.1.exe` from the latest release and run it; no installation is needed (Windows x64 with the Microsoft Edge WebView2 Runtime).<br>
-   从最新版本下载 `RSL-Boss-helper-1.1.1.exe` 直接运行，无需安装（Windows x64，需要 Microsoft Edge WebView2 运行库）。
+1. Download `RSL-Boss-helper-1.1.2.exe` from the latest release and run it; no installation is needed (Windows x64 with the Microsoft Edge WebView2 Runtime).<br>
+   从最新版本下载 `RSL-Boss-helper-1.1.2.exe` 直接运行，无需安装（Windows x64，需要 Microsoft Edge WebView2 运行库）。
 2. Start RAID, pick your account in the tool and choose Chimera or Hydra. Open the boss preparation screen and the tool reads your team.<br>
    打开游戏，在工具中选择账号和奇美拉或六头蛇模式。打开 Boss 准备界面，工具会读取你的队伍。
 3. Write rules in **Strategy Tree** (or import a strategy someone shared) and set **Battle Goals**. On the preparation screen, click **Start** under **Controller**: the tool starts the battle and plays it from the opening.<br>
@@ -25,18 +25,20 @@ Current version: **1.1.1** ([release notes](docs/1.1.1-release-notes.md)) · 当
 4. After updating the tool, restart the game once. Your strategies are kept in `%LOCALAPPDATA%\RSL-Boss-helper` and carried over from earlier versions automatically.<br>
    更新工具后请重启一次游戏。策略保存在 `%LOCALAPPDATA%\RSL-Boss-helper`，旧版本的策略会自动带过来。
 
-## What's new in 1.1.1 / 1.1.1 新功能
+## What's new in 1.1.2 / 1.1.2 新功能
 
-- **Hydra strategy simulation:** after the tool has played a Hydra battle from its opening, choose that battle under **Strategy Simulation** and click **Simulate current rules**.<br>
-  **六头蛇策略模拟：** 工具从开局接管过一场六头蛇战斗后，在「策略模拟」选择这场开局，点击「模拟当前规则」。
-- **Simulate any team:** set a strategy's team with **Choose champions** (the game only needs to be open), then simulate it in any saved battle, even against a boss it never fought.<br>
-  **模拟任意队伍：** 用「选择英雄」设定策略组的队伍（游戏开着即可），再放进任意保存的开局模拟，即使这支队伍没打过这个 Boss。
-- **Better reports:** up to 100 runs, the team and stats used, the bosses' skills, and what every action set off (ally attacks, counterattacks, provoked attacks) with each champion's damage.<br>
-  **更完整的报告：** 最多 100 场，显示用的队伍和属性、Boss 的技能，以及每次出手引发的组队攻击、反击、激怒攻击和每名英雄打了多少。
-- **Hydra:** new target **Lowest-DEF Head**; **Selected Champions Are Never Devoured** now counts real swallows only.<br>
-  **六头蛇：** 新增目标「防御最低蛇头」；「所选英雄从未被吞噬」只按真正被吞下判定。
-- Strategy groups are kept per game account.<br>
-  策略组按游戏账号分开保存。
+- **Complete simulation packages:** **Save** packages the team setup, account bonuses and an existing Boss opening when available. Export and share them together; importing a complete package selects the author's team and opening for simulation. Missing data is clearly shown and filled in automatically when available; a compatible local game runtime is still required.<br>
+  **完整模拟包：** 数据可用时，「保存」会一起打包队伍配置、账号加成和已有 Boss 开局。导出后一并分享，导入完整包会自动选好作者队伍与开局。缺少数据会明确提示，数据可用后自动补全；仍需本机兼容游戏引擎。
+- **New champion picker and profiles:** drag champions into team slots, reorder or remove them, and filter by affinity, role, faction, damage basis, auras and skill effects. Double-click a champion for base stats, skill descriptions, readable damage formulas and book bonuses. Team slots do not determine actual turn order.<br>
+  **新英雄选择与简介：** 拖入英雄组队、调整站位或移出，按属性、定位、阵营、伤害基于、光环和技能效果筛选。双击查看基础属性、技能说明、伤害公式的文字解释与技能书加成。队伍站位不等于实际出手顺序。
+- **Full Hydra opening forecast reports:** open a generated report to inspect devour marks, damage, deaths and the rule behind each action; stalled rules show the champion, turn and reasons.<br>
+  **六头蛇开局推演完整报告：** 打开已生成的报告，查看吞噬标记、伤害、阵亡和每次出手的规则；卡住时定位英雄、回合及规则未执行的原因。
+- **Português (Brasil):** the interface, tool messages and new logs now support three languages. Game-provided names and descriptions follow the game client's language.<br>
+  **巴西葡萄牙语：** 界面、工具提示和新日志支持三种语言；游戏提供的名称与说明跟随游戏客户端语言。
+- **More reliable editing and scrolling:** explicit save and unsaved-change prompts, rules that keep matching after ascension, skill details on hover and corrected skill icons, plus consistent scrolling over cards and nested lists.<br>
+  **编辑和滚动更可靠：** 显式保存与未保存提醒、觉醒后继续匹配的规则、技能悬浮说明与图标修正，以及卡片和内嵌列表的稳定滚轮体验。
+
+[Read the full release notes in 简体中文, English or Português (Brasil) / 查看完整三语更新说明](docs/1.1.2-release-notes.md).
 
 ## Features / 主要功能
 
@@ -48,10 +50,10 @@ Current version: **1.1.1** ([release notes](docs/1.1.1-release-notes.md)) · 当
   **六头蛇：** 按蛇头类型选择目标；吞噬顺序违反设定条件或伤害未达标时免费重整；开局推演可以提前预测吞噬顺序。
 - **Offline simulation:** replay saved Chimera and Hydra battles in a copy of the game's own engine with your rules, and see where they succeed or stall.<br>
   **离线模拟：** 用游戏自己的引擎副本按你的规则重打保存的奇美拉和六头蛇战斗，查看规则在哪里成功、在哪里卡住。
-- **Sharing:** export and import strategies, including the author's team setup.<br>
-  **分享：** 导入导出策略，并附带作者的队伍配置。
-- English and Chinese interface.<br>
-  中英文界面。
+- **Sharing:** export and import strategies with the author's team setup. Complete simulation packages also include account bonuses and a Boss opening, so you can simulate without owning the same champions or opening the game to read the author's setup; a compatible local game runtime is required.<br>
+  **分享：** 导入导出策略，并附带作者的队伍配置。完整模拟包还包含账号加成与 Boss 开局，接收者无需拥有相同英雄，也无需打开游戏读取作者配置即可模拟；需要本机兼容游戏引擎。
+- English, 简体中文 and Português (Brasil) interface, tool messages and new logs. Game-provided names and descriptions follow the game client's language, and custom names are preserved.<br>
+  界面、工具提示和新日志支持英文、简体中文和巴西葡萄牙语。游戏提供的名称与说明跟随游戏客户端语言，用户自定义名称保留原文。
 
 ## Please note / 注意
 

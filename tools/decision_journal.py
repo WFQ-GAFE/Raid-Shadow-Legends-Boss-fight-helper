@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+from ui_text import ui_text
 
 
 class DecisionJournal:
@@ -29,7 +30,7 @@ class DecisionJournal:
             record = {"schema": 1, "time": now.isoformat(), "event": event, **fields}
             data = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
             if len(data) > self.max_bytes:
-                raise ValueError("单条诊断记录超过大小上限")
+                raise ValueError(ui_text("journal.recordTooLarge"))
             self.directory.mkdir(parents=True, exist_ok=True)
             rotating = self.path is None or not self.path.exists() or self.path.stat().st_size + len(data) > self.max_bytes
             if rotating:

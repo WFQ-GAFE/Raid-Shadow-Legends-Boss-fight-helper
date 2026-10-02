@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import chimera_controller as c
 from test_trial_skill_reservation import fixture
+from ui_text import render
 
 # A flow as older versions saved it; only its presence matters now.
 SAVED_FLOW = {"nodes": [{"id": "start", "type": "rule", "rule": 0}], "edges": [], "revision": "saved"}
@@ -40,7 +41,7 @@ def test_retired_flow_export_preserves_data_but_import_rejects_execution():
             try:
                 service.import_strategy_profile(document, 'chimera')
             except ValueError as error:
-                assert '1.0.6' in str(error)
+                assert '1.0.6' in render(str(error), "zh-CN")
             else:
                 raise AssertionError('Retired flow must not be imported as executable')
             assert service.strategy('chimera')['strategyFlow'] == config['strategyFlow']
@@ -52,7 +53,7 @@ def test_live_evaluator_rejects_retired_flow_without_falling_back_to_list():
     try:
         c.evaluate(config_for([generic, fallback]), state)
     except ValueError as error:
-        assert '1.0.6' in str(error)
+        assert '1.0.6' in render(str(error), "zh-CN")
     else:
         raise AssertionError('Hidden flow execution or silent list fallback')
     assert state == before

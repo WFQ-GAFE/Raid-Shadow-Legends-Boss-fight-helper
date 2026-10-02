@@ -11,6 +11,7 @@ from controller_manager import ControllerManager
 from decision_journal import DecisionJournal
 from decision_observability import decision_details
 from test_lydia_trial_rules import BASE_GROUPS, profile, state, update_profile
+from ui_text import render
 
 
 def traced(snapshot):
@@ -137,4 +138,4 @@ def test_unwritable_history_keeps_controller_telemetry_working():
         snapshot = manager.snapshot()
         assert snapshot['telemetry']['decision']['rule'] == 'second'
         assert snapshot['diagnosticError'] and len(snapshot['logs']) == 1
-        assert '出手诊断无法保存' in snapshot['logs'][0]
+        assert '出手诊断无法保存' in render(snapshot['logs'][0], "zh-CN")

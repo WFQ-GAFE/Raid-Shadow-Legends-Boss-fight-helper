@@ -10,10 +10,12 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from raid_processes import is_supported_raid_executable, raid_processes
+from ui_text import catalog, ui_text
 
 
 PROJECT_ROOT = Path(
@@ -27,6 +29,8 @@ _GAME_ASSET_LOCK = threading.RLock()
 _GAME_ASSET_MANIFEST_MEMORY: dict[str, Any] | None = None
 _GAME_AVATAR_PATHS_MEMORY: dict[str, Path] = {}
 _GAME_SKILL_PATHS_MEMORY: dict[str, Path] = {}
+# Skill type id -> icon, from the game's own VisualSkill records in the hero bundles.
+_GAME_SKILL_ID_PATHS_MEMORY: dict[int, Path] = {}
 _GAME_REWARD_PATHS_MEMORY: dict[str, Path] = {}
 _GAME_AVATAR_CACHE_CHECKED = False
 _GAME_SKILL_CACHE_CHECKED: set[int] = set()
@@ -127,13 +131,13 @@ def discover_game_hydra_heads() -> tuple[tuple[int, str], ...]:
 EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
     {"token": "10", "icon": "Stun", "label": "眩晕", "group": "减益"},
     {"token": "20", "icon": "Freeze", "label": "冰冻", "group": "减益"},
-    {"token": "30", "icon": "Sleep", "label": "睡眠", "group": "减益"},
-    {"token": "40", "icon": "Provoke", "label": "挑衅", "group": "减益"},
-    {"token": "70", "icon": "BlockHeal", "label": "封锁治疗 100%", "group": "减益"},
-    {"token": "71", "icon": "BlockHeal2", "label": "封锁治疗 50%", "group": "减益"},
+    {"token": "30", "icon": "Sleep", "label": "沉睡", "group": "减益"},
+    {"token": "40", "icon": "Provoke", "label": "激怒", "group": "减益"},
+    {"token": "70", "icon": "BlockHeal", "label": "降低治疗（100%）", "group": "减益"},
+    {"token": "71", "icon": "BlockHeal2", "label": "降低治疗（50%）", "group": "减益"},
     {"token": "80", "icon": "ContinuousDamage", "label": "中毒 5%", "group": "减益"},
     {"token": "81", "icon": "ContinuousDamage2", "label": "中毒 2.5%", "group": "减益"},
-    {"token": "110", "icon": "BlockBuffs", "label": "封锁增益", "group": "减益"},
+    {"token": "110", "icon": "BlockBuffs", "label": "阻挡增益", "group": "减益"},
     {"token": "130", "icon": "StatusReduceAttack", "label": "降低攻击 25%", "group": "减益"},
     {"token": "131", "icon": "StatusReduceAttack2", "label": "降低攻击 50%", "group": "减益"},
     {"token": "150", "icon": "StatusReduceDefence", "label": "降低防御 30%", "group": "减益"},
@@ -146,22 +150,22 @@ EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
     {"token": "251", "icon": "StatusReduceCriticalChance2", "label": "降低暴击率 30%", "group": "减益"},
     {"token": "270", "icon": "StatusReduceCriticalDamage", "label": "降低暴击伤害 15%", "group": "减益"},
     {"token": "271", "icon": "StatusReduceCriticalDamage2", "label": "降低暴击伤害 25%", "group": "减益"},
-    {"token": "290", "icon": "BlockActiveSkills", "label": "封锁主动技能", "group": "减益"},
-    {"token": "350", "icon": "IncreaseDamageTaken2", "label": "虚弱 25%", "group": "减益"},
-    {"token": "351", "icon": "IncreaseDamageTaken", "label": "虚弱 15%", "group": "减益"},
-    {"token": "360", "icon": "BlockRevive", "label": "封锁复活", "group": "减益"},
+    {"token": "290", "icon": "BlockActiveSkills", "label": "阻挡主动技能", "group": "减益"},
+    {"token": "350", "icon": "IncreaseDamageTaken2", "label": "虚弱（25%）", "group": "减益"},
+    {"token": "351", "icon": "IncreaseDamageTaken", "label": "虚弱（15%）", "group": "减益"},
+    {"token": "360", "icon": "BlockRevive", "label": "阻挡复活", "group": "减益"},
     {"token": "470", "icon": "AoEContinuousDamage", "label": "生命值燃烧", "group": "减益"},
     {"token": "490", "icon": "Fear", "label": "恐惧", "group": "减益"},
     {"token": "491", "icon": "Fear2", "label": "真实恐惧", "group": "减益"},
-    {"token": "500", "icon": "IncreasePoisoning", "label": "中毒敏感 25%", "group": "减益"},
-    {"token": "501", "icon": "IncreasePoisoning2", "label": "中毒敏感 50%", "group": "减益"},
+    {"token": "500", "icon": "IncreasePoisoning", "label": "中毒敏感度（25%）", "group": "减益"},
+    {"token": "501", "icon": "IncreasePoisoning2", "label": "中毒敏感度（50%）", "group": "减益"},
     {"token": "720", "icon": "StatusReduceResistance", "label": "降低抗性 25%", "group": "减益"},
     {"token": "721", "icon": "StatusReduceResistance2", "label": "降低抗性 50%", "group": "减益"},
-    {"token": "740", "icon": "FireMark", "label": "重击（Smite）", "group": "减益"},
-    {"token": "770", "icon": "Polymorph", "label": "变羊", "group": "减益"},
-    {"token": "100", "icon": "BlockDebuff", "label": "封锁减益", "group": "增益"},
+    {"token": "740", "icon": "FireMark", "label": "重击", "group": "减益"},
+    {"token": "770", "icon": "Polymorph", "label": "绵羊", "group": "减益"},
+    {"token": "100", "icon": "BlockDebuff", "label": "阻挡减益", "group": "增益"},
     {"token": "50", "icon": "StatusCounterattack", "label": "反击", "group": "增益"},
-    {"token": "60", "icon": "BlockDamage", "label": "伤害免疫", "group": "增益"},
+    {"token": "60", "icon": "BlockDamage", "label": "阻挡伤害", "group": "增益"},
     {"token": "90", "icon": "ContinuousHeal", "label": "持续治疗 7.5%", "group": "增益"},
     {"token": "91", "icon": "ContinuousHeal2", "label": "持续治疗 15%", "group": "增益"},
     {"token": "120", "icon": "StatusIncreaseAttack", "label": "增加攻击 25%", "group": "增益"},
@@ -177,25 +181,25 @@ EFFECT_OPTIONS: tuple[dict[str, str], ...] = (
     {"token": "260", "icon": "StatusIncreaseCriticalDamage", "label": "增加暴击伤害 15%", "group": "增益"},
     {"token": "261", "icon": "StatusIncreaseCriticalDamage2", "label": "增加暴击伤害 30%", "group": "增益"},
     {"token": "280", "icon": "Shield", "label": "护盾", "group": "增益"},
-    {"token": "300", "icon": "ReviveOnDeath", "label": "死亡后复活", "group": "增益"},
-    {"token": "310", "icon": "ShareDamage", "label": "分担伤害 50%", "group": "增益"},
-    {"token": "311", "icon": "ShareDamage2", "label": "分担伤害 25%", "group": "增益"},
+    {"token": "300", "icon": "ReviveOnDeath", "label": "阵亡复活", "group": "增益"},
+    {"token": "310", "icon": "ShareDamage", "label": "队友保护（50%）", "group": "增益"},
+    {"token": "311", "icon": "ShareDamage2", "label": "队友保护（25%）", "group": "增益"},
     {"token": "320", "icon": "Unkillable", "label": "不死", "group": "增益"},
-    {"token": "370", "icon": "Shield2", "label": "神器套装护盾", "group": "增益"},
-    {"token": "410", "icon": "ReflectDamage", "label": "反射伤害 15%", "group": "增益"},
-    {"token": "411", "icon": "ReflectDamage2", "label": "反射伤害 30%", "group": "增益"},
+    {"token": "370", "icon": "Shield2", "label": "护盾（神器套装）", "group": "增益"},
+    {"token": "410", "icon": "ReflectDamage", "label": "反弹伤害 15%", "group": "增益"},
+    {"token": "411", "icon": "ReflectDamage2", "label": "反弹伤害 30%", "group": "增益"},
     {"token": "460", "icon": "LifeDrainOnDamage", "label": "血液榨取", "group": "减益"},
     {"token": "480", "icon": "Invisible", "label": "隐身", "group": "增益"},
     {"token": "481", "icon": "Invisible2", "label": "完美隐身", "group": "增益"},
-    {"token": "510", "icon": "ReduceDamageTaken", "label": "减少承受伤害 15%", "group": "增益"},
-    {"token": "511", "icon": "ReduceDamageTaken2", "label": "减少承受伤害 25%", "group": "增益"},
+    {"token": "510", "icon": "ReduceDamageTaken", "label": "加固（15%）", "group": "增益"},
+    {"token": "511", "icon": "ReduceDamageTaken2", "label": "加固（25%）", "group": "增益"},
     {"token": "620", "icon": "StoneSkin", "label": "石肤", "group": "增益"},
-    {"token": "640", "icon": "MirrorDamage", "label": "伤害转移", "group": "增益"},
+    {"token": "640", "icon": "MirrorDamage", "label": "苦痛连接", "group": "增益"},
     {"token": "710", "icon": "StatusIncreaseResistance", "label": "增加抗性 25%", "group": "增益"},
     {"token": "711", "icon": "StatusIncreaseResistance2", "label": "增加抗性 50%", "group": "增益"},
     {"token": "840", "icon": "Negator", "label": "拦截", "group": "增益"},
-    {"token": "860", "icon": "HuntersMark", "label": "猎人印记", "group": "特殊"},
-    {"token": "870", "icon": "Inspiration", "label": "激励", "group": "特殊"},
+    {"token": "860", "icon": "HuntersMark", "label": "猎人凝视", "group": "特殊"},
+    {"token": "870", "icon": "Inspiration", "label": "狂热", "group": "特殊"},
     {"token": "910", "icon": "Duel", "label": "对决目标", "group": "奇美拉"},
     {"token": "920", "icon": "Duel", "label": "对决发起者", "group": "奇美拉"},
     {"token": "930", "icon": "Necrosis", "label": "死灵化来源", "group": "奇美拉"},
@@ -244,84 +248,84 @@ GAME_EFFECT_LABELS_EN: dict[str, str] = {
 }
 
 GAME_EFFECT_LABELS_ZH: dict[str, str] = {
-    "40": "嘲讽", "60": "阻挡伤害",
-    "70": "治疗量降低（100%）", "71": "治疗量降低（50%）",
+    "40": "激怒", "60": "阻挡伤害",
+    "70": "降低治疗（100%）", "71": "降低治疗（50%）",
     "100": "阻挡减益", "110": "阻挡增益",
-    "290": "阻挡主动技能", "300": "死亡后复活",
-    "310": "盟友保护（50%）", "311": "盟友保护（25%）",
+    "290": "阻挡主动技能", "300": "阵亡复活",
+    "310": "队友保护（50%）", "311": "队友保护（25%）",
     "320": "不死", "350": "虚弱（25%）", "351": "虚弱（15%）",
     "360": "阻挡复活", "370": "护盾（神器套装）",
     "460": "血液榨取", "470": "生命值燃烧",
     "480": "隐身", "481": "完美隐身",
     "500": "中毒敏感度（25%）", "501": "中毒敏感度（50%）",
-    "510": "强化（15%）", "511": "强化（25%）",
-    "640": "苦痛连接", "740": "重击", "770": "变羊",
-    "840": "拦截", "860": "猎人印记", "870": "激励",
+    "510": "加固（15%）", "511": "加固（25%）",
+    "640": "苦痛连接", "740": "重击", "770": "绵羊",
+    "840": "拦截", "860": "猎人凝视", "870": "狂热",
 }
 
 # Runtime names come from SharedModel.Battle.Effects.StatusEffectTypeId.  The
 # game owns the numeric IDs; these labels only make the native names friendlier.
 RUNTIME_EFFECT_LABELS: dict[str, str] = {
-    "AoEContinuousDamage": "范围持续伤害",
-    "BlockPassiveSkills": "封锁被动技能",
-    "BloodRage": "血怒",
+    "AoEContinuousDamage": "生命值燃烧",
+    "BlockPassiveSkills": "阻挡被动技能",
+    "BloodRage": "复仇",
     "BoneShield": "骨盾",
     "BoneShield20": "骨盾 20%",
     "BoneShield30": "骨盾 30%",
-    "Brutality": "残暴",
-    "Brutality2": "残暴（强化）",
-    "Brutality075": "残暴 7.5%",
-    "Brutality15": "残暴 15%",
-    "Chewing": "咀嚼",
-    "Chrono": "时序",
-    "Cocoon": "茧",
+    "Brutality": "粉碎",
+    "Brutality2": "粉碎（强化）",
+    "Brutality075": "粉碎 7.5%",
+    "Brutality15": "粉碎 15%",
+    "Chewing": "吞食",
+    "Chrono": "不变",
+    "Cocoon": "生命屏障",
     "CrabShell": "蟹壳",
     "CritShield25": "暴击护盾 25%",
     "CritShield50": "暴击护盾 50%",
     "CritShield75": "暴击护盾 75%",
     "CritShield100": "暴击护盾 100%",
     "DamageCounter": "伤害计数",
-    "DelayedDamage": "延迟伤害",
+    "DelayedDamage": "延迟",
     "Digestion": "消化",
     "Devoured": "被吞噬",
     "ElectricMark": "电击标记",
-    "Eclipse": "蚀",
+    "Eclipse": "月蚀",
     "Enfeeble": "衰弱",
-    "Enrage": "狂怒",
+    "Enrage": "永恒狂怒",
     "Ensnare": "诱捕",
     "Ensnare2": "诱捕（强化）",
     "Ensnare50": "诱捕 50%",
     "Ensnare100": "诱捕 100%",
-    "Entangle": "缠绕",
+    "Entangle": "纠缠",
     "Fatigue": "疲劳",
-    "Fortify": "强化",
-    "Fortify2": "强化（强）",
-    "Fortify15": "强化 15%",
-    "Fortify25": "强化 25%",
-    "GoldenArmor": "黄金护甲",
+    "Fortify": "巩固",
+    "Fortify2": "巩固（强）",
+    "Fortify15": "巩固 15%",
+    "Fortify25": "巩固 25%",
+    "GoldenArmor": "镀金",
     "Grabbed": "被抓取",
-    "GreaterSeal": "强力封印",
+    "GreaterSeal": "强效封印",
     "HitCounterShield": "次数护盾",
-    "HungerCounter": "饥饿计数",
-    "HydraHitCounter": "六头蛇受击计数",
-    "HydraNeckIncreaseDamageTaken": "六头蛇断颈增伤",
+    "HungerCounter": "六头蛇印记",
+    "HydraHitCounter": "复仇",
+    "HydraNeckIncreaseDamageTaken": "斩首",
     "IncreaseCritResistance": "增加暴击抗性",
-    "IncreaseMaxHp": "增加最大生命",
-    "IncreaseStamina": "增加耐力",
-    "Infest": "寄生",
+    "IncreaseMaxHp": "增加最大生命值",
+    "IncreaseStamina": "增加行动条",
+    "Infest": "感染",
     "LightOrbs": "光球",
-    "LesserSeal": "弱效封印",
+    "LesserSeal": "封印",
     "MagmaShield": "熔岩护盾",
-    "Mark": "标记",
-    "MarkOfDeath": "死亡印记",
-    "MarkOfMadness": "疯狂印记",
-    "NewbieDefence": "新手保护",
-    "Nullifier": "消除",
-    "OnGuard": "警戒",
+    "Mark": "妖术",
+    "MarkOfDeath": "死亡烙印",
+    "MarkOfMadness": "钢铁印记",
+    "NewbieDefence": "巨蟒意志",
+    "Nullifier": "废除",
+    "OnGuard": "全面守护",
     "Petrification": "石化",
     "PoisonCloud": "毒云",
-    "Rage": "怒气",
-    "ReduceStamina": "降低耐力",
+    "Rage": "狂暴",
+    "ReduceStamina": "降低行动条",
     "ReflectiveStoneSkin": "反射石肤",
     "Seal": "封印",
     "Seal2": "封印（强化）",
@@ -330,12 +334,12 @@ RUNTIME_EFFECT_LABELS: dict[str, str] = {
     "SleepCounter": "睡眠计数",
     "SoulCounter": "灵魂计数",
     "StatusBanish": "放逐",
-    "SwapHealth": "交换生命",
+    "SwapHealth": "生命值交换",
     "Syphon": "虹吸",
     "Taunt": "嘲讽",
-    "Thunder": "雷霆",
+    "Thunder": "风暴召唤",
     "ThunderStunApplier": "雷霆眩晕",
-    "TimeBomb": "定时炸弹",
+    "TimeBomb": "炸弹",
     "VoidAbyss": "虚空深渊",
 }
 
@@ -634,7 +638,7 @@ EFFECT_TYPE_ICONS: dict[int, str] = {
 def effect_label(token: Any) -> str:
     text = canonical_effect_token(token)
     if not text:
-        return "未选择"
+        return ui_text("effect.unselected")
     option = EFFECT_BY_TOKEN.get(text)
     if option:
         return option["label"]
@@ -646,7 +650,7 @@ def effect_label(token: Any) -> str:
         for candidate in EFFECT_OPTIONS:
             if candidate["icon"] == icon:
                 return candidate["label"]
-    return "已保存的自定义效果"
+    return ui_text("effect.customSaved")
 
 
 @lru_cache(maxsize=1)
@@ -678,7 +682,6 @@ def skill_effect_details(skill_type_id: Any) -> list[dict[str, Any]]:
         return []
     result: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    scope_labels = {"boss": "奇美拉", "ally": "队友", "self": "自己"}
     for capability in _skill_capabilities().get(type_id, []):
         effect_id = capability.get("effectTypeId")
         token = str(effect_id if isinstance(effect_id, int) else capability.get("effectKind") or "")
@@ -692,7 +695,7 @@ def skill_effect_details(skill_type_id: Any) -> list[dict[str, Any]]:
             {
                 "token": token,
                 "label": effect_label(token),
-                "scope": scope_labels.get(scope, "目标"),
+                "scope": scope,
                 "turns": turns if isinstance(turns, int) and turns > 0 else None,
             }
         )
@@ -702,15 +705,21 @@ def skill_effect_details(skill_type_id: Any) -> list[dict[str, Any]]:
 def skill_effect_summary(skill_type_id: Any, *, limit: int = 5) -> str:
     details = skill_effect_details(skill_type_id)
     if not details:
-        return "尚未学习到效果资料"
+        return ui_text("effectSummary.none")
     values = [
-        f"{item['scope']}：{item['label']}"
-        + (f"（{item['turns']}回合）" if item.get("turns") else "")
+        ui_text("effectSummary.item", scope=ui_text(f"effectSummary.scope.{item['scope'] if item['scope'] in ('boss', 'ally', 'self') else 'target'}"),
+                effect=effect_name_text(item["token"]), turns=item.get("turns") or 0)
         for item in details[:limit]
     ]
     if len(details) > limit:
-        values.append(f"另有 {len(details) - limit} 项")
-    return "；".join(values)
+        values.append(ui_text("effectSummary.more", count=len(details) - limit))
+    return ui_text("forecast.separator").join(values)
+
+
+def effect_name_text(token: Any) -> str:
+    """An effect's name as a message (effect.<type id>) when the catalog has it, else its Chinese label."""
+    key = f"effect.{canonical_effect_token(token)}"
+    return ui_text(key) if key in catalog("en") else effect_label(token)
 
 
 def _asset_cache_path(source: str, kind: str, identity: Any) -> Path:
@@ -819,7 +828,8 @@ def _source_fingerprint(sources: list[Path]) -> list[dict[str, Any]]:
 def _hero_base_id(hero: Any, fallback: Any = None) -> int | None:
     if isinstance(hero, dict):
         source = str(hero.get("avatar") or hero.get("avatarUrl") or "")
-        match = re.search(r"(?:^|/)HeroAvatars/(\d+)$", source, re.IGNORECASE)
+        # "HeroAvatars/8250"; a few carry a suffix ("1770_temp", "1190temp", "6480_avatar").
+        match = re.search(r"(?:^|/)HeroAvatars/(\d+)\D*$", source, re.IGNORECASE)
         if match:
             return int(match.group(1))
     try:
@@ -852,6 +862,12 @@ def _avatar_bundle_sources() -> list[Path]:
         for path in directory.rglob("__data")
         if path.is_file()
     ]
+    # Starter and early heroes' portraits ship with the build (HeroAvatarsLocal, HeroAvatarsLocal_2).
+    build = game_build_directory()
+    shipped = build / "Raid_Data" / "StreamingAssets" / "AssetBundles" if build is not None else None
+    if shipped is not None and shipped.is_dir():
+        sources.extend(path for directory in shipped.glob("HeroAvatarsLocal*") if directory.is_dir()
+                       for path in directory.rglob("*.unity3d") if path.is_file())
     # Older bundles are read first, so a newer sprite with the same ID wins.
     return sorted(sources, key=lambda value: (value.stat().st_mtime_ns, str(value)))
 
@@ -870,7 +886,7 @@ def ensure_game_avatar_cache() -> dict[str, Path]:
         avatar_count = len(avatar_entries) if isinstance(avatar_entries, dict) else 0
         if (
             fingerprint
-            and manifest.get("avatarExtractorVersion") == 2
+            and manifest.get("avatarExtractorVersion") == AVATAR_EXTRACTION
             and manifest.get("avatarSources") == fingerprint
             and cached
             and len(cached) == avatar_count
@@ -889,6 +905,8 @@ def ensure_game_avatar_cache() -> dict[str, Path]:
 
         ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         avatars = dict(manifest.get("avatars", {})) if isinstance(manifest.get("avatars"), dict) else {}
+        plain: set[str] = set()
+        suffixed: dict[str, Any] = {}
         for source in sources:
             try:
                 environment = UnityPy.load(str(source))
@@ -899,15 +917,29 @@ def ensure_game_avatar_cache() -> dict[str, Path]:
                     name = str(getattr(sprite, "m_Name", "") or "")
                     identity = re.fullmatch(r"(\d+)(?:-\d+)?", name)
                     if identity is None:
+                        # A few heroes only have a suffixed portrait ("1510_skin", "1410_temp", "6480_avatar").
+                        suffix = re.fullmatch(r"(\d{2,})_?[A-Za-z]+", name)
+                        if suffix:
+                            suffixed[suffix.group(1)] = sprite
                         continue
                     base_name = identity.group(1)
                     filename = f"native-hero-{base_name}.png"
                     sprite.image.save(ASSET_CACHE_DIR / filename)
                     avatars[base_name] = filename
+                    plain.add(base_name)
             except Exception as error:
                 _record_asset_extraction_error("avatar", source, error)
                 continue
-        manifest["avatarExtractorVersion"] = 2
+        for base_name, sprite in suffixed.items():
+            if base_name in plain:
+                continue
+            try:
+                filename = f"native-hero-{base_name}.png"
+                sprite.image.save(ASSET_CACHE_DIR / filename)
+                avatars[base_name] = filename
+            except Exception as error:
+                _record_asset_extraction_error("avatar", Path(base_name), error)
+        manifest["avatarExtractorVersion"] = AVATAR_EXTRACTION
         manifest["avatarSources"] = fingerprint
         manifest["avatars"] = avatars
         _write_game_asset_manifest(manifest)
@@ -922,32 +954,68 @@ def _version_tuple(name: str) -> tuple[int, ...]:
 
 
 def _hero_skill_bundle_sources(base_id: int) -> list[Path]:
-    """Locate only the hero prefab bundles that can contain this hero's sprites."""
-    resource_dir = game_resource_directory()
-    if resource_dir is None or not resource_dir.is_dir():
-        return []
+    """Locate only the hero prefab bundles that can contain this hero's sprites.
+
+    Downloaded bundles are "<resources>/<name>_<version>/<hash>/__data"; starter
+    heroes' bundles ship with the build as
+    "<StreamingAssets>/AssetBundles/<name>/<version>/<n>/WindowsPlayer/<name>_<version>.unity3d"
+    (Kael's icons are only there).
+    """
     token = re.compile(rf"(?:id|_){base_id}(?:_|$)", re.IGNORECASE)
-    candidates: list[Path] = []
+
+    def wanted(name: str) -> bool:
+        # "1032_Order_10270"; some carry a letter ("0245a_BloodMage_1510", "0081b_coldheart_id40").
+        return (re.match(r"^\d+[a-z]?_", name) is not None and token.search(name) is not None
+                and re.search(r"_(?:LOD|Res|Boss)(?:_|$)", name, re.IGNORECASE) is None)
+
+    # Keep the newest version of every logical prefab/form bundle.
+    newest: dict[str, tuple[tuple[int, ...], Path]] = {}
+
+    def offer(logical: str, version: tuple[int, ...], source: Path) -> None:
+        if logical not in newest or version > newest[logical][0]:
+            newest[logical] = (version, source)
+
+    resource_dir = game_resource_directory()
+    if resource_dir is not None and resource_dir.is_dir():
+        for directory in resource_dir.iterdir():
+            logical = re.sub(r"_\d+\.\d+\.\d+$", "", directory.name)
+            if directory.is_dir() and wanted(logical):
+                for path in directory.rglob("__data"):
+                    if path.is_file():
+                        offer(logical, _version_tuple(directory.name), path)
+    build = game_build_directory()
+    shipped = build / "Raid_Data" / "StreamingAssets" / "AssetBundles" if build is not None else None
+    if shipped is not None and shipped.is_dir():
+        for directory in shipped.iterdir():
+            if directory.is_dir() and wanted(directory.name):
+                for path in directory.rglob("*.unity3d"):
+                    if path.is_file():
+                        offer(directory.name, _version_tuple(path.stem), path)
+    return sorted((source for _, source in newest.values()), key=str)
+
+
+def _shared_icon_sources(icon_names: set[str]) -> list[Path]:
+    """Bundles holding icons a hero's bundle refers to, by icon name ("21030_s1" -> 21030's bundles).
+
+    That is another hero's bundle (shared art) or, for newer heroes, its own
+    SkillIcons_<id> bundle; older SkillIcons folders are empty and skipped.
+    """
+    resource_dir = game_resource_directory()
+    owners = {int(match.group(1)) for name in icon_names if (match := re.match(r"^(\d+)_", name))}
+    if not owners or resource_dir is None or not resource_dir.is_dir():
+        return []
+    newest: dict[str, Path] = {}
     for directory in resource_dir.iterdir():
         name = directory.name
-        if (
-            not directory.is_dir()
-            or not re.match(r"^\d+_", name)
-            or not token.search(name)
-            or re.search(r"_(?:LOD|Res|Boss)_", name, re.IGNORECASE)
-        ):
+        if (not directory.is_dir() or re.search(r"_(?:LOD|Res|Boss)_", name, re.IGNORECASE)
+                or not any(re.search(rf"(?:^|id|_){owner}(?:_|$)", name, re.IGNORECASE) for owner in owners)):
             continue
-        candidates.extend(path for path in directory.rglob("__data") if path.is_file())
-    if not candidates:
-        return []
-
-    # Keep the newest downloaded version of every logical prefab/form bundle.
-    newest: dict[str, Path] = {}
-    for source in candidates:
-        directory = source.parents[1]
-        logical = re.sub(r"_\d+\.\d+\.\d+$", "", directory.name)
+        source = next((path for path in directory.rglob("__data") if path.is_file()), None)
+        if source is None:
+            continue
+        logical = re.sub(r"_\d+\.\d+\.\d+$", "", name)
         previous = newest.get(logical)
-        if previous is None or _version_tuple(directory.name) > _version_tuple(previous.parents[1].name):
+        if previous is None or _version_tuple(name) > _version_tuple(previous.parents[1].name):
             newest[logical] = source
     return sorted(newest.values(), key=str)
 
@@ -956,8 +1024,27 @@ _NORMAL_SKILL_SPRITE = re.compile(r"^(\d+)_s(\d+)$", re.IGNORECASE)
 _FORM_SKILL_SPRITE = re.compile(r"^(\d+)_f(\d+)_s(\d+)$", re.IGNORECASE)
 
 
+# Bumped when the skill id -> icon extraction changes, so cached heroes are read again.
+SKILL_ID_EXTRACTION = 3
+# Bumped when the portrait extraction changes (3: suffixed portraits such as "1510_skin").
+AVATAR_EXTRACTION = 3
+
+
+def _skill_id_paths(manifest: dict[str, Any], base_id: int) -> dict[int, Path]:
+    entries = manifest.get("skillIds")
+    by_hero = entries.get(str(base_id)) if isinstance(entries, dict) else None
+    return {int(key): path for key, path in _valid_manifest_paths(by_hero).items() if str(key).isdigit()}
+
+
 def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
-    """Extract one hero's skill sprites, including both mythical forms."""
+    """Extract one hero's skill sprites, including both mythical forms.
+
+    Each skill's icon comes from the hero bundle's VisualSkill records (skill
+    type id -> sprite), which the game itself uses: sprite names vary by hero
+    ("8250_f1_s1", "8460_form_1_s2", "1440_3") and their numbers follow neither
+    the skill slot nor the type id. Sprites named in the two common patterns are
+    also kept by form and slot, for skills without a record.
+    """
     global _GAME_SKILL_PATHS_MEMORY
     with _GAME_ASSET_LOCK:
         if base_id in _GAME_SKILL_CACHE_CHECKED:
@@ -973,9 +1060,13 @@ def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
         cached = {
             key: path for key, path in all_cached.items() if key.startswith(f"{base_id}:")
         }
+        cached_ids = _skill_id_paths(manifest, base_id)
         skill_sources = manifest.get("skillSources")
         if not isinstance(skill_sources, dict):
             skill_sources = {}
+        id_sources = manifest.get("skillIdSources")
+        if not isinstance(id_sources, dict):
+            id_sources = {}
         skill_entries = manifest.get("skills")
         expected_count = (
             sum(1 for key in skill_entries if str(key).startswith(f"{base_id}:"))
@@ -985,14 +1076,17 @@ def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
         if (
             fingerprint
             and skill_sources.get(str(base_id)) == fingerprint
-            and cached
+            and id_sources.get(str(base_id)) == {"version": SKILL_ID_EXTRACTION, "sources": fingerprint}
+            and (cached or cached_ids)
             and len(cached) == expected_count
         ):
             _GAME_SKILL_PATHS_MEMORY.update(cached)
+            _GAME_SKILL_ID_PATHS_MEMORY.update(cached_ids)
             _GAME_SKILL_CACHE_CHECKED.add(base_id)
             return cached
         if not sources:
             _GAME_SKILL_PATHS_MEMORY.update(cached)
+            _GAME_SKILL_ID_PATHS_MEMORY.update(cached_ids)
             _GAME_SKILL_CACHE_CHECKED.add(base_id)
             return cached
         try:
@@ -1002,34 +1096,85 @@ def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
 
         ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         skills = dict(manifest.get("skills", {})) if isinstance(manifest.get("skills"), dict) else {}
+        skill_ids: dict[str, str] = {}
+        external: dict[int, str] = {}
         for source in sources:
             try:
                 environment = UnityPy.load(str(source))
+                sprites: dict[int, Any] = {}
+                records: list[tuple[int, int]] = []
                 for obj in environment.objects:
-                    if obj.type.name != "Sprite":
-                        continue
+                    if obj.type.name == "Sprite":
+                        sprites[obj.path_id] = obj
+                    elif obj.type.name == "MonoBehaviour":
+                        try:
+                            visual = obj.read_typetree().get("VisualSkill")
+                        except Exception:
+                            continue
+                        reference = visual.get("SkillSprite") if isinstance(visual, dict) else None
+                        if not (isinstance(reference, dict) and isinstance(visual.get("SkillId"), int) and visual["SkillId"] > 0):
+                            continue
+                        if reference.get("m_FileID") == 0:
+                            records.append((visual["SkillId"], reference.get("m_PathID")))
+                        else:
+                            # The sprite lives in another bundle (shared art): find it by its icon name.
+                            icon_name = str(visual.get("SkillIcon") or "").rsplit("/", 1)[-1]
+                            if icon_name:
+                                external[visual["SkillId"]] = icon_name
+                saved: dict[int, str] = {}
+                for path_id, obj in sprites.items():
                     sprite = obj.read()
                     name = str(getattr(sprite, "m_Name", "") or "")
                     form_match = _FORM_SKILL_SPRITE.fullmatch(name)
                     normal_match = _NORMAL_SKILL_SPRITE.fullmatch(name)
                     if form_match and int(form_match.group(1)) == base_id:
-                        form = int(form_match.group(2))
-                        slot = int(form_match.group(3))
+                        form, slot = int(form_match.group(2)), int(form_match.group(3))
+                        filename = f"native-skill-{base_id}-f{form}-s{slot}.png"
+                        skills[f"{base_id}:{form}:{slot}"] = filename
                     elif normal_match and int(normal_match.group(1)) == base_id:
-                        form = 0
                         slot = int(normal_match.group(2))
+                        filename = f"native-skill-{base_id}-f0-s{slot}.png"
+                        skills[f"{base_id}:0:{slot}"] = filename
+                    elif any(reference == path_id for _, reference in records):
+                        filename = f"native-skill-{base_id}-{_safe_name(name or str(path_id))}.png"
                     else:
                         continue
-                    key = f"{base_id}:{form}:{slot}"
-                    filename = f"native-skill-{base_id}-f{form}-s{slot}.png"
                     sprite.image.save(ASSET_CACHE_DIR / filename)
-                    skills[key] = filename
+                    saved[path_id] = filename
+                for skill_id, reference in records:
+                    if reference in saved:
+                        skill_ids[str(skill_id)] = saved[reference]
             except Exception as error:
                 _record_asset_extraction_error("skill", source, error)
                 continue
+        wanted = {skill_id: name for skill_id, name in external.items() if str(skill_id) not in skill_ids}
+        for source in _shared_icon_sources(set(wanted.values())):
+            try:
+                environment = UnityPy.load(str(source))
+                found: dict[str, str] = {}
+                for obj in environment.objects:
+                    if obj.type.name != "Sprite":
+                        continue
+                    sprite = obj.read()
+                    name = str(getattr(sprite, "m_Name", "") or "")
+                    if name in wanted.values() and name not in found:
+                        filename = f"native-skill-{base_id}-{_safe_name(name)}.png"
+                        sprite.image.save(ASSET_CACHE_DIR / filename)
+                        found[name] = filename
+                for skill_id, name in list(wanted.items()):
+                    if name in found:
+                        skill_ids[str(skill_id)] = found[name]
+                        del wanted[skill_id]
+            except Exception as error:
+                _record_asset_extraction_error("skill", source, error)
         skill_sources[str(base_id)] = fingerprint
+        id_sources[str(base_id)] = {"version": SKILL_ID_EXTRACTION, "sources": fingerprint}
+        all_ids = manifest.get("skillIds") if isinstance(manifest.get("skillIds"), dict) else {}
+        all_ids[str(base_id)] = skill_ids
         manifest["skillSources"] = skill_sources
+        manifest["skillIdSources"] = id_sources
         manifest["skills"] = skills
+        manifest["skillIds"] = all_ids
         _write_game_asset_manifest(manifest)
         resolved = {
             key: path
@@ -1037,8 +1182,17 @@ def ensure_game_skill_cache(base_id: int) -> dict[str, Path]:
             if key.startswith(f"{base_id}:")
         }
         _GAME_SKILL_PATHS_MEMORY.update(resolved)
+        _GAME_SKILL_ID_PATHS_MEMORY.update(_skill_id_paths(manifest, base_id))
         _GAME_SKILL_CACHE_CHECKED.add(base_id)
         return resolved
+
+
+def game_skill_icon(base_id: int, skill_type_id: Any) -> Path | None:
+    """The icon the game shows for one skill type id of a hero (its VisualSkill record)."""
+    if not isinstance(skill_type_id, int) or isinstance(skill_type_id, bool):
+        return None
+    ensure_game_skill_cache(base_id)
+    return _GAME_SKILL_ID_PATHS_MEMORY.get(skill_type_id)
 
 
 def _latest_resource_bundle_source(prefix: str) -> Path | None:
@@ -1150,6 +1304,9 @@ def game_skill_asset(hero_id: Any, hero: Any, skill: Any) -> Path | None:
     base_id = _hero_base_id(hero, hero_id)
     if base_id is None:
         return None
+    by_id = game_skill_icon(base_id, skill.get("typeId"))
+    if by_id is not None:
+        return by_id
     try:
         slot = int(skill.get("slot"))
     except (TypeError, ValueError):
@@ -1160,7 +1317,50 @@ def game_skill_asset(hero_id: Any, hero: Any, skill: Any) -> Path | None:
         form = 1
     cached = ensure_game_skill_cache(base_id)
     # Mythical bundles use f1/f2. Ordinary heroes omit the form marker.
-    return cached.get(f"{base_id}:{form}:{slot}") or cached.get(f"{base_id}:0:{slot}")
+    return cached.get(f"{base_id}:{form}:{slot}") or cached.get(f"{base_id}:0:{slot}") or shared_passive_icon(base_id)
+
+
+_SHARED_PASSIVE_BUNDLE = re.compile(r"^SkillIcons_(\d+)_(\d+)_Passive_(\d+\.\d+\.\d+)$")
+
+
+def shared_passive_icon(base_id: int) -> Path | None:
+    """A passive several heroes share, without a record of its own.
+
+    The Assassin's Creed heroes (10240-10280) all have 102505, drawn from the
+    bundle SkillIcons_10240_10280_Passive, whose name gives the heroes it serves.
+    """
+    resource_dir = game_resource_directory()
+    if resource_dir is None or not resource_dir.is_dir():
+        return None
+    newest: dict[tuple[int, int], tuple[tuple[int, ...], Path]] = {}
+    for directory in resource_dir.glob("SkillIcons_*_Passive_*"):
+        match = _SHARED_PASSIVE_BUNDLE.match(directory.name)
+        if not match or not int(match.group(1)) <= base_id <= int(match.group(2)):
+            continue
+        key = (int(match.group(1)), int(match.group(2)))
+        version = _version_tuple(directory.name)
+        if key not in newest or version > newest[key][0]:
+            newest[key] = (version, directory)
+    for (low, high), (_, directory) in sorted(newest.items()):
+        target = ASSET_CACHE_DIR / f"native-skill-shared-{low}-{high}-{'.'.join(map(str, _version_tuple(directory.name)))}.png"
+        with _GAME_ASSET_LOCK:
+            if target.is_file() and target.stat().st_size > 0:
+                return target
+            source = next((path for path in directory.rglob("__data") if path.is_file()), None)
+            if source is None:
+                continue
+            try:
+                import UnityPy  # type: ignore
+
+                sprites = [obj.read() for obj in UnityPy.load(str(source)).objects if obj.type.name == "Sprite"]
+                if len(sprites) != 1:
+                    continue
+                ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                sprites[0].image.save(target)
+                return target
+            except Exception as error:
+                _record_asset_extraction_error("skill", source, error)
+    return None
 
 
 def preload_game_visuals(

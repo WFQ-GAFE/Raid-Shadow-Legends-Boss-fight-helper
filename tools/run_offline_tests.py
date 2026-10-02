@@ -27,6 +27,7 @@ MODULES = (
     "test_chimera_forecast_live",
     "test_team_preview",
     "test_team_setups",
+    "test_strategy_simulation_package",
     "test_account_stores",
     "test_forecast_advice",
     "test_lydia_trial_rules",
@@ -36,6 +37,10 @@ MODULES = (
     "test_extract_hydra_playerprefs",
     "test_hydra_offline_policy",
     "test_verify_hydra_policy_replay",
+    "test_hero_data",
+    "test_ui_languages",
+    "test_ui_text",
+    "test_skill_icons",
 )
 
 def main() -> int:

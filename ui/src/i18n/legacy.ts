@@ -1,9 +1,5 @@
-export type UiLanguage = 'en' | 'zh-CN'
-
-const STORAGE_KEY = 'raid-boss-tool-language'
-const trackedText = new WeakMap<Text, { source: string; rendered: string }>()
-const trackedAttributes = new WeakMap<Element, Map<string, { source: string; rendered: string }>>()
-const translatedAttributes = ['placeholder', 'title', 'aria-label'] as const
+// The 1.1.1 phrase table (Chinese source text -> English). Kept only for text that is
+// not in the message catalogs yet: backend messages and records saved before them.
 
 // The game supplies champion names and some battle content in its own client
 // language. This table translates the tool chrome and the controller messages
@@ -162,6 +158,10 @@ const ENGLISH_PHRASES: Record<string, string> = {
   '公羊形态': 'Ram Form',
   '狮子形态': 'Lion Form',
   '毒蛇形态': 'Viper Form',
+  '终极': 'Ultimate',
+  '公羊': 'Ram',
+  '狮子': 'Lion',
+  '毒蛇': 'Viper',
   '默认技能释放顺序': 'Default Skill Order',
   '严格规则保留': 'Reserved by Strict Rule',
   '提高技能优先级': 'Move Skill Up',
@@ -309,6 +309,10 @@ const ENGLISH_PHRASES: Record<string, string> = {
   '指定技能': 'Specified Skill',
   '行动窗口满足时': 'When the Action Window Matches',
   '运行记录': 'Run Log',
+  '奇美拉运行记录': 'Chimera run log',
+  '六头蛇运行记录': 'Hydra run log',
+  '奇美拉完整运行记录': 'Full Chimera run log',
+  '六头蛇完整运行记录': 'Full Hydra run log',
   '放大运行记录': 'Expand Run Log',
   '尚无运行记录': 'No Run Log Yet',
   '完整运行记录': 'Full Run Log',
@@ -394,6 +398,8 @@ const ENGLISH_PHRASES: Record<string, string> = {
   '战绩结算画面': 'Battle Results',
   '等待你的决定': 'Waiting for Your Decision',
   '队伍准备界面': 'Team Setup',
+  '奇美拉队伍准备界面': 'Chimera team setup',
+  '六头蛇队伍准备界面': 'Hydra team setup',
   '尚无已验证的': 'No verified ',
   '状态': ' state',
   '已连接': 'Connected',
@@ -545,6 +551,13 @@ const ENGLISH_PHRASES: Record<string, string> = {
   '放弃当前策略组的未保存修改，并载入已保存版本？': 'Discard unsaved changes to this strategy and load the saved version?',
   '已设置': 'Configured',
   '未保存': 'Unsaved',
+  '策略组队伍已更改，点击「保存」后生效': "The strategy's team is changed; click Save to keep it",
+  '队伍已更改，还没有保存': 'Team changed, not saved yet',
+  '当前策略组有未保存的修改': 'This strategy group has unsaved changes',
+  '保存当前策略组': 'Save this strategy group',
+  '保存修改': 'Save changes',
+  '放弃修改': 'Discard changes',
+  '已放弃未保存的修改': 'Unsaved changes discarded',
   '等待可执行规则': 'Waiting for an executable rule',
   '查找英雄、技能或规则…': 'Find champion, skill or rule…',
   '为试炼专用规则保留技能': 'Skills reserved for trial rules',
@@ -1134,27 +1147,6 @@ const NUMBER_PATTERNS: [RegExp, string | ((match: string, ...groups: string[]) =
   [/(\d+)\s*秒/g, '$1 s'],
 ]
 
-export function getInitialLanguage(): UiLanguage {
-  let saved: string | null = null
-  try {
-    saved = window.localStorage.getItem(STORAGE_KEY)
-  } catch {
-    // Local storage can be unavailable in hardened embedded-browser sessions.
-  }
-  const language: UiLanguage = saved === 'zh-CN' ? 'zh-CN' : 'en'
-  document.documentElement.lang = language
-  return language
-}
-
-export function saveLanguage(language: UiLanguage) {
-  document.documentElement.lang = language
-  try {
-    window.localStorage.setItem(STORAGE_KEY, language)
-  } catch {
-    // The selected language still applies for this session.
-  }
-}
-
 // Whole-text translations for short words that are unsafe as phrase keys
 // because they also occur inside game-owned names and descriptions.
 const EXACT_PHRASES: Record<string, string> = {
@@ -1173,7 +1165,7 @@ export function gameText(value: string): string {
   return value ? `${value}` : value
 }
 
-function stripGameTextMarkers(value: string): string {
+export function stripGameTextMarkers(value: string): string {
   return value.includes('') ? value.replace(GAME_TEXT, '$1') : value
 }
 
@@ -1204,83 +1196,4 @@ export function translateToolText(value: string): string {
     .replaceAll('。', '.')
     .replaceAll('、', ', ')
     .replace(/ {2,}/g, ' ')
-}
-
-function isSkipped(node: Node): boolean {
-  const element = node.nodeType === Node.ELEMENT_NODE
-    ? node as Element
-    : node.parentElement
-  return Boolean(element?.closest('[data-i18n-skip]'))
-}
-
-function localizeTextNode(node: Text, language: UiLanguage) {
-  if (isSkipped(node)) return
-  const current = node.nodeValue ?? ''
-  let tracked = trackedText.get(node)
-  if (!tracked || current !== tracked.rendered) {
-    tracked = { source: current, rendered: current }
-  }
-  const rendered = language === 'en' ? translateToolText(tracked.source) : stripGameTextMarkers(tracked.source)
-  tracked.rendered = rendered
-  trackedText.set(node, tracked)
-  if (current !== rendered) node.nodeValue = rendered
-}
-
-function localizeElementAttributes(element: Element, language: UiLanguage) {
-  if (isSkipped(element)) return
-  const tracked = trackedAttributes.get(element) ?? new Map()
-  for (const attribute of translatedAttributes) {
-    const current = element.getAttribute(attribute)
-    if (current === null) continue
-    let value = tracked.get(attribute)
-    if (!value || current !== value.rendered) {
-      value = { source: current, rendered: current }
-    }
-    const rendered = language === 'en' ? translateToolText(value.source) : stripGameTextMarkers(value.source)
-    value.rendered = rendered
-    tracked.set(attribute, value)
-    if (current !== rendered) element.setAttribute(attribute, rendered)
-  }
-  trackedAttributes.set(element, tracked)
-}
-
-function localizeSubtree(root: Node, language: UiLanguage) {
-  if (root.nodeType === Node.TEXT_NODE) localizeTextNode(root as Text, language)
-  if (root.nodeType === Node.ELEMENT_NODE) localizeElementAttributes(root as Element, language)
-  const walker = document.createTreeWalker(
-    root,
-    NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
-  )
-  let node = walker.nextNode()
-  while (node) {
-    if (node.nodeType === Node.TEXT_NODE) localizeTextNode(node as Text, language)
-    else localizeElementAttributes(node as Element, language)
-    node = walker.nextNode()
-  }
-}
-
-export function installDocumentLocalization(root: HTMLElement, language: UiLanguage) {
-  document.documentElement.lang = language
-  localizeSubtree(root, language)
-  const observer = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      if (mutation.type === 'characterData') {
-        localizeTextNode(mutation.target as Text, language)
-        continue
-      }
-      if (mutation.type === 'attributes') {
-        localizeElementAttributes(mutation.target as Element, language)
-        continue
-      }
-      for (const node of mutation.addedNodes) localizeSubtree(node, language)
-    }
-  })
-  observer.observe(root, {
-    subtree: true,
-    childList: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: [...translatedAttributes],
-  })
-  return () => observer.disconnect()
 }

@@ -20,6 +20,7 @@ from chimera_controller import (
     start_first_battle_if_ready,
     validate_strategy_config,
 )
+from ui_text import render
 
 
 class HydraSelectionIpc:
@@ -258,7 +259,7 @@ def main() -> None:
     rescued = select_target(
         {"type": "devouringHead"}, late_hydra_state["skills"][0], late_hydra_state
     )
-    assert rescued == (70, "正在吞噬·victim")
+    assert rescued[0] == 70 and render(rescued[1], "zh-CN") == "正在吞噬·victim"
     assert select_target(
         {"type": "auto"}, late_hydra_state["skills"][0], late_hydra_state
     )[0] == 70
@@ -302,7 +303,7 @@ def main() -> None:
         late_hydra_state,
     )
     assert fallback_decision is not None and fallback_decision.target_id == 69
-    assert "优先目标不可用" in fallback_decision.target_label
+    assert "优先目标不可用" in render(fallback_decision.target_label, "zh-CN")
 
     # Even after hundreds of head replacements, automatic/default targeting
     # must ignore historical dead actors and trust the current SkillData window.
@@ -332,7 +333,7 @@ def main() -> None:
         {"type": "auto"}, stale_head_state["skills"][0], stale_head_state
     )
     assert stale_target is not None and stale_target[0] == 708
-    assert "技能合法目标" in stale_target[1]
+    assert "技能合法目标" in render(stale_target[1], "zh-CN")
     assert select_target(
         {"type": "boss"}, stale_head_state["skills"][0], stale_head_state
     )[0] == 708
@@ -358,7 +359,7 @@ def main() -> None:
         stale_head_state,
     )
     assert stale_decision is not None and stale_decision.target_id == 708
-    assert "优先目标不可用" in stale_decision.target_label
+    assert "优先目标不可用" in render(stale_decision.target_label, "zh-CN")
 
     state["activeHeroTypeId"] = 100
     state["skills"] = [
@@ -465,7 +466,7 @@ def main() -> None:
             boss_mode="hydra",
         )
     assert queued.call_args.kwargs["context"] == 1234
-    assert "6 名英雄开始首场六头蛇战斗" in output.getvalue()
+    assert "6 名英雄开始首场六头蛇战斗" in render(output.getvalue(), "zh-CN")
     check_hydra_lowest_defence_targets()
     print("boss-mode-tests-ok")
 

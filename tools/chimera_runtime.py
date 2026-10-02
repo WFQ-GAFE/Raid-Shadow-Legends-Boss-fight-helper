@@ -16,6 +16,7 @@ from boss_modes import STRATEGY_STORE, strategy_template as boss_strategy_templa
 from chimera_catalog_cache import load_hero_catalog, save_hero_catalog
 from chimera_controller import latest_account_state
 from desktop_lifecycle import persistent_agent
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
@@ -46,7 +47,7 @@ def worker_command(worker: str) -> list[str]:
     """Launch a source script or dispatch through the frozen desktop exe."""
     scripts = {"injector": INJECTOR, "controller": CONTROLLER}
     if worker not in scripts:
-        raise ValueError(f"未知内部工作进程：{worker}")
+        raise ValueError(ui_text("runtime.unknownWorker", worker=worker))
     if getattr(sys, "frozen", False):
         return [sys.executable, "--internal-worker", worker]
     return [sys.executable, str(scripts[worker])]
@@ -245,8 +246,7 @@ def require_expected_account(pid: int, account_name: str, user_id: int) -> None:
         user_id=user_id,
     ):
         raise RuntimeError(
-            f"所选游戏内账户已变化；预期 {account_name}（玩家 ID {user_id}），"
-            "已拒绝按进程编号继续"
+            ui_text("runtime.accountChanged", accountName=account_name, userId=user_id)
         )
 
 
@@ -266,15 +266,14 @@ def identify_account(pid: int) -> dict[str, Any] | None:
     )
     if check.returncode:
         raise RuntimeError(
-            subprocess_failure(check, f"账户读取检查失败（进程 {pid}）")
+            subprocess_failure(check, ui_text("runtime.accountCheckFailed", pid=pid))
         )
     check_payload = json.loads(check.stdout)
     if check_payload.get("agentLoaded"):
         reload_reason = reload_block_reason(check_payload.get("agentStatus"))
         if reload_reason:
             raise RuntimeError(
-                "旧版或状态不明的代理仍驻留在游戏进程中。请完全退出并重新启动 Raid 客户端；"
-                "为避免再次闪退，工具已阻止在线卸载或重载。"
+                ui_text("runtime.staleAgent")
             )
         if not check_payload.get("agentCompatible") or not check_payload.get("agentReady"):
             lifecycle: dict[str, Any] = {}
@@ -285,7 +284,7 @@ def identify_account(pid: int) -> dict[str, Any] | None:
                 pass
             screen = lifecycle.get("screen")
             if screen == "result":
-                raise RuntimeError("当前停留在战绩结算画面，暂不更新读取组件")
+                raise RuntimeError(ui_text("runtime.onResultScreen"))
             section = lifecycle.get(
                 "selection" if screen == "team_selection" else "battle"
             )
@@ -303,7 +302,7 @@ def identify_account(pid: int) -> dict[str, Any] | None:
             reload_payload = json.loads(reloaded.stdout) if reloaded.stdout.strip() else {}
             if reloaded.returncode or reload_payload.get("ok") is not True:
                 raise RuntimeError(
-                    str(reload_payload.get("reason") or reloaded.stderr.strip() or "读取组件更新失败")
+                    str(reload_payload.get("reason") or reloaded.stderr.strip() or ui_text("runtime.readerUpdateFailed"))
                 )
             cache_probe_hero_catalog(reload_payload)
             if isinstance(context, int) and context > 0 and screen in {"team_selection", "battle"}:
@@ -325,7 +324,7 @@ def identify_account(pid: int) -> dict[str, Any] | None:
                 seed_payload = json.loads(seeded.stdout) if seeded.stdout.strip() else {}
                 if seeded.returncode or seed_payload.get("ok") is not True:
                     raise RuntimeError(
-                        str(seed_payload.get("reason") or seeded.stderr.strip() or "准备界面恢复失败")
+                        str(seed_payload.get("reason") or seeded.stderr.strip() or ui_text("runtime.preparationRestoreFailed"))
                     )
             state = usable_account_state(pid, latest_account_state(pid))
         return state or wait_for_account_state(pid, timeout=3.0)
@@ -342,7 +341,7 @@ def identify_account(pid: int) -> dict[str, Any] | None:
     )
     if loaded.returncode:
         raise RuntimeError(
-            subprocess_failure(loaded, f"账户名称读取失败（进程 {pid}）")
+            subprocess_failure(loaded, ui_text("runtime.accountNameFailed", pid=pid))
         )
     payload = json.loads(loaded.stdout)
     cache_probe_hero_catalog(payload)

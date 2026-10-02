@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+from ui_text import ui_text
 
 
 class StrategyStoreError(ValueError):
@@ -20,31 +21,35 @@ def read_object(path: Path) -> dict[str, Any] | None:
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as error:
-        raise StrategyStoreError(f"无法读取策略文件 {path.name}；原文件已保留，请恢复备份：{error}") from error
+        raise StrategyStoreError(ui_text("storage.unreadable", pathName=path.name, error=error)) from error
     if not isinstance(value, dict):
-        raise StrategyStoreError(f"策略文件 {path.name} 的根节点必须是对象；原文件已保留")
+        raise StrategyStoreError(ui_text("storage.rootNotObject", pathName=path.name))
     if "modes" in value:
         modes = value["modes"]
         if not isinstance(modes, dict) or not modes:
-            raise StrategyStoreError("策略模式数据损坏；原文件已保留")
+            raise StrategyStoreError(ui_text("storage.modesDamaged"))
         for section in modes.values():
             if not isinstance(section, dict):
-                raise StrategyStoreError("策略组数据损坏；原文件已保留")
+                raise StrategyStoreError(ui_text("storage.groupsDamaged"))
             if "strategies" in section:
                 profiles = section["strategies"]
                 if not isinstance(profiles, dict) or not profiles or any(
                     not isinstance(item, dict) or not isinstance(item.get("rules"), list)
                     for item in profiles.values()
                 ):
-                    raise StrategyStoreError("策略规则数据损坏；原文件已保留")
+                    raise StrategyStoreError(ui_text("storage.rulesDamaged"))
             elif not isinstance(section.get("rules"), list):
-                raise StrategyStoreError("策略规则数据损坏；原文件已保留")
+                raise StrategyStoreError(ui_text("storage.rulesDamaged"))
     elif not isinstance(value.get("rules"), list):
-        raise StrategyStoreError("文件不包含有效策略；原文件已保留")
+        raise StrategyStoreError(ui_text("storage.noStrategy"))
     return value
 
 
 def revision(value: Any) -> str:
+    # Simulation inputs are derived automatically. Refreshing a captured
+    # opening must not invalidate an editor's unsaved rule changes.
+    if isinstance(value, dict) and "simulationPackage" in value:
+        value = {key: item for key, item in value.items() if key != "simulationPackage"}
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
@@ -143,7 +148,7 @@ def recover_strategy_store(path: Path) -> None:
             continue
         restore_strategy_value(path, value)
         return
-    raise StrategyStoreError("没有可恢复的有效备份；原策略文件已保留")
+    raise StrategyStoreError(ui_text("storage.noBackup"))
 
 
 def restore_strategy_value(path: Path, value: dict[str, Any]) -> None:

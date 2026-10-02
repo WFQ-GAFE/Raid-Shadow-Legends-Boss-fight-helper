@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 import chimera_controller as controller
 from test_chimera_lifecycle_flow import FakeResultIpc, SESSION, active_lifecycle
+from ui_text import render
 
 
 def replay(screen_at):
@@ -50,7 +51,7 @@ def test_retained_preparation_restarts_once_after_stability_wait():
 
 def test_unconfirmed_result_overlap_has_accurate_timeout_and_no_blind_start():
     error, started, events = replay(lambda t: 'initial' if t < .3 else 'selection' if t < 1.2 else 'unconfirmed')
-    assert not started and '曾进入准备界面' in error
+    assert not started and '曾进入准备界面' in render(error, "zh-CN")
     assert events[-1]['event'] == 'result_restart_timeout'
     assert events[-1]['sawTeamSelection'] is True
     assert events[-1]['result']['confirmed'] is False and events[-1]['screen'] == 'result'
@@ -59,7 +60,7 @@ def test_unconfirmed_result_overlap_has_accurate_timeout_and_no_blind_start():
 
 def test_never_observed_preparation_is_distinguished():
     error, started, events = replay(lambda t: 'initial')
-    assert not started and '没有进入准备界面' in error
+    assert not started and '没有进入准备界面' in render(error, "zh-CN")
     assert events[-1]['sawTeamSelection'] is False
 
 

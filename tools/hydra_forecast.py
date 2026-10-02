@@ -31,6 +31,8 @@ MAX_GAME_TURN = 1000
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 330.0
 UNSUPPORTED_ACTION_TYPES = frozenset({"executeTrialRecipe"})
+# Decision facts a report session adds (hydra_simulation.HydraSimulationSession).
+REPORT_DECISION_KEYS = ("ruleIndex", "reservationReleased", "stuck")
 # Current-damage conditions. The live value is the game's damage counter, which
 # the game fills with each head's damage rounded (about six significant digits);
 # the forecast reads the exact per-head damage. Across 868 decisions of 23 real
@@ -291,8 +293,13 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                  timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
                  on_decision: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
                  cancel: threading.Event | None = None,
+                 session_factory: Callable[..., HydraOfflinePolicySession] = HydraOfflinePolicySession,
                  ) -> dict[str, Any]:
-    """Run one isolated original-engine battle driven by the list policy."""
+    """Run one isolated original-engine battle driven by the list policy.
+
+    ``session_factory`` may add report facts to each decision
+    (hydra_simulation.HydraSimulationSession: the rule's number, a stall's report).
+    """
     started = time.monotonic()
     result: dict[str, Any] = {
         "schema": SCHEMA, "type": "hydra_devour_forecast", "status": "unknown",
@@ -315,7 +322,7 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         "strategySha256": hashlib.sha256(json.dumps(
             strategy, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
     }
-    session = HydraOfflinePolicySession(
+    session = session_factory(
         strategy, require_rng=False,
         capability_memory=capability_memory or controller.SkillCapabilityMemory(),
         team_selection=team_selection)
@@ -362,10 +369,12 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                 decision = session.decide(state)
                 battle = state.get("battle", {})
                 rng = state.get("battleRandom", {})
+                hydra = state.get("hydra") if isinstance(state.get("hydra"), dict) else {}
                 record = {
                     "sequence": sequence, "turn": battle.get("turn"),
                     "round": battle.get("round"),
                     "playerTurnCount": battle.get("playerTurnCount"),
+                    "hydraTurns": hydra.get("turnCount"),
                     "activeHeroId": state.get("activeHeroId"),
                     "activeHeroTypeId": state.get("activeHeroTypeId"),
                     "damage": battle.get("currentDamage"),
@@ -374,6 +383,7 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                     "reason": decision.get("reason"),
                     "command": decision.get("command"),
                     "rule": decision.get("rule"),
+                    **{key: decision[key] for key in REPORT_DECISION_KEYS if key in decision},
                 }
                 decisions.append(record)
                 if on_decision is not None:
@@ -425,23 +435,30 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         return result
     for key in ("battleSetupId", "seed", "stageId", "turn", "battleFinished", "stopReason",
                 "resultType", "finishCause", "commands", "policyRequests", "policyCommands",
-                "policyStop", "effectiveMaxTurnsInBattle", "playerActors",
+                "policyStop", "effectiveMaxTurnsInBattle", "playerActors", "actors",
                 "playerCooldownHypothesis", "enemyCooldownHypothesis", "hydraDamage"):
         result[key] = observation.get(key)
     result["engineTurns"] = observation.get("turns", [])
+    try:
+        marks = mark_stream(observation)
+        swallows = swallow_stream(observation, marks)
+        marks_issue = None
+    except ForecastError as error:
+        marks, swallows, marks_issue = [], None, str(error)
     stop = observation.get("stopReason")
     if stop not in ("battle_finished", "game_turn_limit"):
         policy_stop = observation.get("policyStop") or {}
         last = decisions[-1] if decisions else {}
         result["reason"] = (f"{stop}:{policy_stop.get('detail') or last.get('reason') or ''}"
                             if stop else "engine_stop_unknown")
+        # The marks so far, for the battle's report: an incomplete forecast never regroups.
+        result["marks"] = marks
         return result
-    try:
-        result["marks"] = mark_stream(observation)
-        result["swallows"] = swallow_stream(observation, result["marks"])
-    except ForecastError as error:
-        result["reason"] = str(error)
+    if marks_issue:
+        result["reason"] = marks_issue
         return result
+    result["marks"] = marks
+    result["swallows"] = swallows
     result["status"] = "complete"
     result["damageAmbiguousTurn"] = damage_ambiguous_turn(strategy, decisions)
     result["horizon"] = "battle_finished" if stop == "battle_finished" else "turn_limit"

@@ -36,6 +36,7 @@ import binascii
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -43,6 +44,7 @@ from typing import Any
 import zlib
 
 from strategy_storage import atomic_write_bytes, atomic_write_json
+from ui_text import ui_text
 
 
 PROJECT_ROOT = Path(
@@ -136,7 +138,7 @@ def relic_setup(partial: dict[str, Any], battle: dict[str, Any]) -> dict[str, An
     relic = battle.get("relic") if isinstance(battle.get("relic"), dict) else {}
     level = battle.get("skillLevel")
     if not _integer(level) or not _integer(relic.get("i")):
-        raise TeamSetupError("圣物数据不完整：请重启游戏加载新版模块后，在准备界面重新保存策略组")
+        raise TeamSetupError(ui_text("teams.relicIncomplete"))
     skills = [value for value in battle.get("skills") or [] if _integer(value)]
     for bonus in battle.get("factionSkills") or []:
         if isinstance(bonus, dict) and bonus.get("fraction") == battle.get("fraction"):
@@ -173,7 +175,7 @@ def hero_relic(parts: dict[str, Any]) -> dict[str, Any] | None:
     if "r" in relics[0] and "n" in relics[0]:
         return copy.deepcopy(relics[0])  # already complete (a server-built setup)
     if not isinstance(parts.get("relicBattle"), dict):
-        raise TeamSetupError("圣物数据不完整：请重启游戏加载新版模块后，在准备界面重新保存策略组")
+        raise TeamSetupError(ui_text("teams.relicIncomplete"))
     return relic_setup(relics[0], parts["relicBattle"])
 
 
@@ -305,7 +307,7 @@ def team_battle_setup(capture_setup: list[dict[str, Any]], heroes: list[dict[str
     setup = result[0]
     team = setup.get("f")
     if not isinstance(team, dict) or not _integer(team.get("i")) or not team.get("h"):
-        raise TeamSetupError("开局数据没有玩家队伍")
+        raise TeamSetupError(ui_text("teams.noPlayerTeam"))
     first = team["h"][0] if isinstance(team["h"][0], dict) else {}
     rounds = len(((first.get("p") or {}).get("r")) or []) or 1
     team["h"] = [hero_slot_setup(hero, slot=index + 1, owner_id=team["i"], area=area, rule=rule,
@@ -319,12 +321,12 @@ def prepare_team_input(capture: Path, heroes: list[dict[str, Any]], boss_mode: s
     """Write a converter input folder with the team swapped in; returns its provenance."""
     size = TEAM_SIZE[boss_mode]
     if not 1 <= len(heroes) <= size:
-        raise TeamSetupError(f"队伍需要 1 到 {size} 名英雄，当前为 {len(heroes)} 名")
+        raise TeamSetupError(ui_text("teams.teamSize", size=size, heroesCount=len(heroes)))
     missing = [hero["model"].get("typeId") for hero in heroes
                # Academy (`c`) is absent for heroes without academy bonuses, as in the server's setups.
                if any(hero["parts"].get(name) is None for name in ("artifacts", "sets", "building"))]
     if missing:
-        raise TeamSetupError("部分英雄缺少装备数据，请在准备界面重新读取队伍")
+        raise TeamSetupError(ui_text("teams.missingGear"))
     original = json.loads((capture / "battle-setup.json").read_text(encoding="utf-8"))
     provenance = json.loads((capture / "capture-provenance.json").read_text(encoding="utf-8"))
     data = json.dumps(team_battle_setup(original, heroes, area=area, rule=rule, powers=powers),
@@ -347,21 +349,225 @@ def preview_team(preview: dict[str, Any] | None, boss_mode: str) -> dict[str, An
     """The preparation-screen team with its battle inputs, or None when incomplete."""
     if not isinstance(preview, dict) or preview.get("status") != "captured" or preview.get("bossMode") != boss_mode:
         return None
-    heroes = [hero for hero in preview.get("heroes") or [] if isinstance(hero.get("battle"), dict)]
+    heroes = [hero for hero in preview.get("heroes") or []
+              if isinstance(hero, dict) and isinstance(hero.get("battle"), dict)]
     if not heroes or len(heroes) > TEAM_SIZE[boss_mode] or len(heroes) != len(preview.get("heroes") or []):
         return None
-    return {"heroTypeIds": [hero["typeId"] for hero in heroes],
+    team = {"heroTypeIds": [hero.get("typeId") for hero in heroes],
             "heroIds": [hero.get("heroId") for hero in heroes],
             "heroes": [hero["battle"] for hero in heroes],
             "powers": [hero.get("power") for hero in heroes],
             "observatory": preview.get("observatory") or {},
             "capturedAt": preview.get("capturedAt")}
+    return team if validate_simulation_team(team) else None
 
 
 def same_team(left: list[Any] | None, right: list[Any] | None) -> bool:
     values = [value for value in (left or []) if _integer(value) and value > 0]
     others = [value for value in (right or []) if _integer(value) and value > 0]
     return bool(values) and sorted(values) == sorted(others)
+
+
+def ordered_team_matches(left: Any, right: Any) -> bool:
+    """A strict slot-by-slot team identity; invalid slots must not disappear.
+
+    ``same_team`` intentionally remains order-free for older display lookups.
+    Saved simulation inputs need this separate check because the first slot is
+    the leader and strategy targets can refer to an ally's slot.
+    """
+    return (isinstance(left, list) and isinstance(right, list) and bool(left)
+            and len(left) == len(right)
+            and all(_integer(value) and value > 0 for value in left)
+            and all(_integer(value) and value > 0 for value in right)
+            and left == right)
+
+
+def _positive_ids(values: Any, *, allow_empty: bool = True) -> bool:
+    return (isinstance(values, list) and (allow_empty or bool(values))
+            and all(_integer(value) and value > 0 for value in values))
+
+
+def _skill_levels(skills: Any, *, allow_empty: bool = True, unique: bool = True) -> bool:
+    if not isinstance(skills, list) or (not allow_empty and not skills):
+        return False
+    ids: list[int] = []
+    for skill in skills:
+        if (not isinstance(skill, dict) or not _integer(skill.get("i")) or skill["i"] <= 0
+                or not _integer(skill.get("l")) or skill["l"] < 0):
+            return False
+        ids.append(skill["i"])
+    return not unique or len(ids) == len(set(ids))
+
+
+def _finite_power(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _relic_info_complete(info: Any, *, sockets_have_types: bool) -> bool:
+    if (not isinstance(info, dict)
+            or any(not _integer(info.get(key)) or info[key] <= 0 for key in ("i", "t"))
+            or any(not _integer(info.get(key)) or info[key] < 0 for key in ("a", "l", "e", "c"))
+            or not isinstance(info.get("k"), list)):
+        return False
+    for socket in info["k"]:
+        if not isinstance(socket, dict) or not _integer(socket.get("k")) or socket["k"] < 0:
+            return False
+        if "s" in socket:
+            if not _integer(socket["s"]) or socket["s"] <= 0:
+                return False
+            if sockets_have_types and (not _integer(socket.get("t")) or socket["t"] <= 0):
+                return False
+    return True
+
+
+def _relic_parts_complete(parts: dict[str, Any]) -> bool:
+    relics = parts.get("relics")
+    # No relic is a valid configuration. The agent emits no relic setup in that
+    # case; hero_battle_inputs records that absence as None.
+    if relics is None or relics == []:
+        return parts.get("relicBattle") is None
+    if not isinstance(relics, list):
+        return False
+    for partial in relics:
+        if (not isinstance(partial, dict) or not isinstance(partial.get("p"), dict)
+                or not isinstance(partial.get("f"), dict)):
+            return False
+        if "r" in partial or "n" in partial:
+            if (not _integer(partial.get("l")) or partial["l"] < 0
+                    or not _skill_levels(partial.get("r"), unique=False)
+                    or not _skill_levels(partial.get("s"), unique=False)
+                    or not _relic_info_complete(partial.get("n"), sockets_have_types=True)):
+                return False
+            continue
+        battle = parts.get("relicBattle")
+        if (not isinstance(battle, dict) or not _integer(battle.get("skillLevel")) or battle["skillLevel"] < 0
+                or not _relic_info_complete(battle.get("relic"), sockets_have_types=False)
+                or not _positive_ids(battle.get("skills"))
+                or not _integer(battle.get("fraction")) or battle["fraction"] < 0
+                or not isinstance(battle.get("factionSkills"), list)
+                or not isinstance(battle.get("stones"), list)):
+            return False
+        for bonus in battle["factionSkills"]:
+            if (not isinstance(bonus, dict) or not _integer(bonus.get("fraction")) or bonus["fraction"] < 0
+                    or not _positive_ids(bonus.get("skills"))):
+                return False
+        stones: dict[int, dict[str, Any]] = {}
+        for stone in battle["stones"]:
+            if (not isinstance(stone, dict) or not _integer(stone.get("id")) or stone["id"] <= 0
+                    or stone["id"] in stones or not _integer(stone.get("typeId")) or stone["typeId"] <= 0
+                    or not _positive_ids(stone.get("skills"))):
+                return False
+            stones[stone["id"]] = stone
+        if any(socket.get("s") not in stones for socket in battle["relic"]["k"] if "s" in socket):
+            return False
+    return True
+
+
+def validate_simulation_team(team: Any, boss_mode: str | None = None,
+                             strategy_team: list[Any] | None = None) -> bool:
+    """Whether every hero has usable battle inputs, in the stated slot order.
+
+    Supplying a boss requires its complete five/six slots. Without a boss this
+    also validates older partial-team snapshots used by the generic helpers.
+    Empty gear and no blessing/relic remain legitimate hero configurations.
+    """
+    if not isinstance(team, dict) or not isinstance(team.get("heroes"), list):
+        return False
+    heroes = team["heroes"]
+    if boss_mode is not None:
+        if boss_mode not in TEAM_SIZE or len(heroes) != TEAM_SIZE[boss_mode]:
+            return False
+        if team.get("bossMode") is not None and team["bossMode"] != boss_mode:
+            return False
+    elif not 1 <= len(heroes) <= max(TEAM_SIZE.values()):
+        return False
+    type_ids: list[int] = []
+    hero_ids: list[int | None] = []
+    for hero in heroes:
+        model = hero.get("model") if isinstance(hero, dict) else None
+        parts = hero.get("parts") if isinstance(hero, dict) else None
+        if (not isinstance(model, dict) or not isinstance(parts, dict)
+                or not _integer(model.get("typeId")) or model["typeId"] <= 0
+                or not _integer(model.get("grade")) or not 1 <= model["grade"] <= 6
+                or not _integer(model.get("level")) or not 1 <= model["level"] <= 60
+                or not _skill_levels(model.get("skills"), allow_empty=False)
+                or not _positive_ids(model.get("masteries"))):
+            return False
+        for key in ("experience", "empower", "awakened"):
+            if model.get(key) is not None and (not _integer(model[key]) or model[key] < 0):
+                return False
+        if "heroId" in model and (not _integer(model["heroId"]) or model["heroId"] <= 0):
+            return False
+        for name in ("artifacts", "sets"):
+            entries = parts.get(name)
+            # ArtifactSetSetup uses omitted defaults: a legitimate set bonus
+            # without any extra effects serializes as {}. An artifact itself
+            # still needs its actual configuration.
+            if not isinstance(entries, list) or any(not isinstance(entry, dict)
+                                                    or (name == "artifacts" and not entry) for entry in entries):
+                return False
+            for entry in entries:
+                for key in ("i", "k"):
+                    if key in entry and (not _integer(entry[key]) or entry[key] <= 0):
+                        return False
+        if "blessing" not in parts or "relics" not in parts:
+            return False
+        blessing = parts.get("blessing")
+        if blessing is not None and (not isinstance(blessing, dict) or not _integer(blessing.get("i"))
+                                     or blessing["i"] < 0):
+            return False
+        if not _relic_parts_complete(parts):
+            return False
+        type_ids.append(model["typeId"])
+        hero_ids.append(model.get("heroId"))
+    if "heroTypeIds" in team and not ordered_team_matches(team["heroTypeIds"], type_ids):
+        return False
+    if "heroIds" in team and not ordered_team_matches(team["heroIds"], hero_ids):
+        return False
+    present_ids = [value for value in hero_ids if value is not None]
+    if len(present_ids) != len(set(present_ids)):
+        return False
+    if strategy_team is not None and not ordered_team_matches(type_ids, strategy_team):
+        return False
+    powers = team.get("powers")
+    if powers is not None:
+        if not isinstance(powers, list) or (powers and len(powers) != len(heroes)):
+            return False
+        if any(not _finite_power(value) for value in powers):
+            return False
+    return True
+
+
+def validate_simulation_snapshot(snapshot: Any, boss_mode: str | None = None,
+                                 strategy_team: list[Any] | None = None) -> bool:
+    """A shareable display snapshot whose simulation package matches every slot."""
+    if not isinstance(snapshot, dict):
+        return False
+    if boss_mode is not None and snapshot.get("bossMode") is not None and snapshot["bossMode"] != boss_mode:
+        return False
+    decoded = unpack_simulation(snapshot.get("simulation"), boss_mode, strategy_team)
+    if decoded is None:
+        return False
+    shown = snapshot.get("display") if isinstance(snapshot.get("display"), dict) else snapshot
+    if boss_mode is not None and shown.get("bossMode") is not None and shown["bossMode"] != boss_mode:
+        return False
+    display_heroes = shown.get("heroes")
+    if not isinstance(display_heroes, list) or any(not isinstance(hero, dict) for hero in display_heroes):
+        return False
+    display_ids = [hero.get("typeId") for hero in display_heroes]
+    if not ordered_team_matches(display_ids, decoded["heroTypeIds"]):
+        return False
+    for container in (snapshot, shown):
+        if "heroTypeIds" in container and not ordered_team_matches(container["heroTypeIds"], display_ids):
+            return False
+    return True
 
 
 class StrategyTeamStore:
@@ -418,52 +624,56 @@ def simulation_package(team: dict[str, Any]) -> dict[str, Any]:
             "data": base64.b64encode(zlib.compress(body, 9)).decode("ascii")}
 
 
-def unpack_simulation(package: Any) -> dict[str, Any] | None:
+def unpack_simulation(package: Any, boss_mode: str | None = None,
+                      strategy_team: list[Any] | None = None) -> dict[str, Any] | None:
     """An exported team's battle data (simulation_package), or None when absent or invalid."""
     if (not isinstance(package, dict) or package.get("format") != SIMULATION_FORMAT
-            or package.get("schema") != 1 or not isinstance(package.get("data"), str)
+            or not _integer(package.get("schema")) or package["schema"] != 1
+            or not isinstance(package.get("data"), str)
             or len(package["data"]) > MAX_SIMULATION_TEXT):
         return None
     try:
         inflate = zlib.decompressobj()
         text = inflate.decompress(base64.b64decode(package["data"], validate=True), MAX_SIMULATION_JSON)
-        if inflate.unconsumed_tail:
+        if inflate.unconsumed_tail or inflate.unused_data or not inflate.eof:
             return None
         body = json.loads(text)
-    except (binascii.Error, zlib.error, ValueError):
+    except (binascii.Error, zlib.error, ValueError, RecursionError):
         return None
-    heroes = body.get("heroes") if isinstance(body, dict) else None
-    if not isinstance(heroes, list) or not 1 <= len(heroes) <= max(TEAM_SIZE.values()):
+    if not validate_simulation_team(body, boss_mode, strategy_team):
+        return None
+    heroes = body["heroes"]
+    if not ordered_team_matches(body.get("heroTypeIds"), [hero["model"]["typeId"] for hero in heroes]):
         return None
     result = []
     for index, hero in enumerate(heroes):
-        model = hero.get("model") if isinstance(hero, dict) else None
-        parts = hero.get("parts") if isinstance(hero, dict) else None
-        if (not isinstance(model, dict) or not isinstance(parts, dict)
-                or not all(_integer(model.get(key)) for key in ("typeId", "grade", "level"))
-                or not isinstance(model.get("skills"), list) or not isinstance(model.get("masteries"), list)):
-            return None
+        model, parts = hero["model"], hero["parts"]
         # Stand-in hero ids: the author's own ids are not exported.
-        result.append({"model": {**model, "heroId": index + 1}, "parts": parts})
+        result.append({"model": {**model, "heroId": index + 1},
+                       "parts": {name: value for name, value in parts.items() if name not in ACCOUNT_PARTS}})
     powers = body.get("powers")
     return {"heroTypeIds": [hero["model"]["typeId"] for hero in result], "heroes": result,
             "powers": powers if isinstance(powers, list) and len(powers) == len(result) else None}
 
 
-def exported_team(saved: dict[str, Any]) -> dict[str, Any] | None:
+def exported_team(saved: dict[str, Any], boss_mode: str | None = None,
+                  strategy_team: list[Any] | None = None) -> dict[str, Any] | None:
     """The team snapshot an export carries: display data plus the battle data to simulate it."""
-    display = saved.get("display")
-    if not isinstance(display, dict) or not saved.get("heroes"):
+    if not validate_simulation_team(saved, boss_mode, strategy_team):
         return None
-    return {**copy.deepcopy(display), "savedAt": saved.get("savedAt"), "simulation": simulation_package(saved)}
+    display = saved.get("display")
+    if not isinstance(display, dict):
+        return None
+    snapshot = {**copy.deepcopy(display), "savedAt": saved.get("savedAt"), "simulation": simulation_package(saved)}
+    return snapshot if validate_simulation_snapshot(snapshot, boss_mode, strategy_team) else None
 
 
 def decode_account_bonuses(raw: Any, type_ids: list[int]) -> dict[str, Any]:
     """The agent's account bonuses by hero type → {"heroes": {typeId: parts}, "observatory": {...}}."""
     if not isinstance(raw, dict) or raw.get("type") != "account_bonuses":
-        raise TeamSetupError("没有读到当前账号的加成")
+        raise TeamSetupError(ui_text("teams.noBonuses"))
     if raw.get("status") != "captured":
-        raise TeamSetupError(f"没有读到当前账号的加成（{raw.get('reason') or raw.get('status')}）")
+        raise TeamSetupError(ui_text("teams.noBonusesReason", get=raw.get('reason') or raw.get('status')))
     heroes: dict[int, dict[str, Any]] = {}
     missing: list[int] = []
     for item in raw.get("heroes") or []:
@@ -482,7 +692,7 @@ def decode_account_bonuses(raw: Any, type_ids: list[int]) -> dict[str, Any]:
         heroes[item["typeId"]] = parts
     missing.extend(type_id for type_id in type_ids if type_id not in heroes and type_id not in missing)
     if missing:
-        raise TeamSetupError(f"游戏里找不到这些英雄的类型数据：{', '.join(map(str, missing))}")
+        raise TeamSetupError(ui_text("teams.unknownChampions", missing=', '.join(map(str, missing))))
     observatory = {}
     for location, value in (raw.get("observatory") or {}).items():
         try:
@@ -503,9 +713,9 @@ def decode_roster(raw: Any) -> list[dict[str, Any]]:
     Vault (储备仓库, Hero.InBathhouse); neither = the champion list (斗士库).
     """
     if not isinstance(raw, dict) or raw.get("type") != "roster":
-        raise TeamSetupError("没有读到账号的英雄列表")
+        raise TeamSetupError(ui_text("teams.noRoster"))
     if raw.get("status") != "captured":
-        raise TeamSetupError(f"没有读到账号的英雄列表（{raw.get('reason') or raw.get('status')}）")
+        raise TeamSetupError(ui_text("teams.noRosterReason", get=raw.get('reason') or raw.get('status')))
     heroes = []
     for item in raw.get("heroes") or []:
         if not isinstance(item, dict) or not _integer(item.get("i")) or not _integer(item.get("t")):
@@ -540,12 +750,14 @@ def team_sources(boss_mode: str, strategy_team: list[Any] | None, *, bound: bool
     once on the preparation screen with the team selected.
     """
     team = [value for value in (strategy_team or []) if _integer(value) and value > 0]
-    author = reference if isinstance(reference, dict) and isinstance(reference.get("simulation"), dict) else None
+    author = reference if validate_simulation_snapshot(reference, boss_mode, strategy_team) else None
+    saved_valid = validate_simulation_team(saved, boss_mode)
     return {
         "strategyTeam": team,
         "current": {"heroTypeIds": team, "bound": bool(team) and bound},
         "strategy": ({"heroTypeIds": saved.get("heroTypeIds") or [], "savedAt": saved.get("savedAt"),
-                      "matches": same_team(saved.get("heroTypeIds"), team)} if saved else None),
+                      "matches": saved_valid and ordered_team_matches(saved.get("heroTypeIds"), strategy_team)}
+                     if isinstance(saved, dict) else None),
         "author": ({"heroTypeIds": [hero.get("typeId") for hero in author.get("heroes") or []
                                     if isinstance(hero, dict) and _integer(hero.get("typeId"))],
                     "savedAt": author.get("savedAt") or author.get("capturedAt")} if author else None),
@@ -577,33 +789,36 @@ def simulation_team(source: str, boss_mode: str, strategy_team: list[Any] | None
     if source == "battle":
         return None
     if source not in TEAM_SOURCES:
-        raise TeamSetupError("队伍来源无效")
+        raise TeamSetupError(ui_text("teams.badSource"))
     team = [value for value in (strategy_team or []) if _integer(value) and value > 0]
     if source == "author":
-        chosen = unpack_simulation((reference or {}).get("simulation"))
-        if chosen is None:
-            raise TeamSetupError("这个策略组没有作者队伍的数据（1.1.1 起导出的策略才带有）")
+        if not validate_simulation_snapshot(reference, boss_mode, strategy_team):
+            raise TeamSetupError(ui_text("teams.noAuthorTeam"))
+        chosen = unpack_simulation(reference["simulation"], boss_mode, strategy_team)
+        assert chosen is not None
         if bonuses is None:
-            raise TeamSetupError("需要打开游戏读取当前账号的学院、建筑和区域加成")
+            raise TeamSetupError(ui_text("teams.needGameForBonuses"))
         chosen = with_account_bonuses(chosen, bonuses(chosen["heroTypeIds"]))
         chosen["savedAt"] = (reference or {}).get("savedAt") or (reference or {}).get("capturedAt")
         chosen["display"] = reference
     elif not team:
-        raise TeamSetupError("当前策略组还没有设定队伍：在“策略组队伍”卡片上选择英雄")
+        raise TeamSetupError(ui_text("teams.noTeamSet"))
     elif source == "strategy":
         if saved is None:
-            raise TeamSetupError("这个策略组还没有保存时的队伍：打开游戏后保存一次策略组就会记下")
-        if not same_team(saved.get("heroTypeIds"), team):
-            raise TeamSetupError("策略组的队伍已更改：打开游戏后重新保存一次策略组")
+            raise TeamSetupError(ui_text("teams.noSavedTeam"))
+        if (not validate_simulation_team(saved, boss_mode)
+                or not ordered_team_matches(saved.get("heroTypeIds"), strategy_team)):
+            raise TeamSetupError(ui_text("teams.teamChanged"))
         if bonuses is None:
-            raise TeamSetupError("需要打开游戏读取当前账号的学院、建筑和区域加成")
+            raise TeamSetupError(ui_text("teams.needGameForBonuses"))
         chosen = with_account_bonuses(saved, bonuses([hero["model"]["typeId"] for hero in saved.get("heroes") or []]))
     else:
         if current is None:
-            raise TeamSetupError("需要打开游戏读取策略组英雄现在的装备")
+            raise TeamSetupError(ui_text("teams.needGameForGear"))
         chosen = current()
-        if chosen is None or not same_team(chosen.get("heroTypeIds"), team):
-            raise TeamSetupError("游戏里读到的英雄和策略组的队伍不一致")
+        if (not validate_simulation_team(chosen, boss_mode)
+                or not ordered_team_matches(chosen.get("heroTypeIds"), strategy_team)):
+            raise TeamSetupError(ui_text("teams.teamMismatch"))
     location = str((check or {}).get("area") or AREA_LOCATIONS[boss_mode][0])
     return {"source": source, "heroes": chosen["heroes"], "powers": chosen.get("powers"),
             "area": (chosen.get("observatory") or {}).get(location),
