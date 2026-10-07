@@ -2432,9 +2432,11 @@ function RuleEditor({
             ? <div className="target-confirm">
                 <div className="target-notes">{draftMismatches.map((mismatch) => <MismatchNote key={`${mismatch.skillTypeId}:${mismatch.target}:${mismatch.position ?? ''}`}
                   mismatch={mismatch} hero={hero} heroes={heroes} outcome={ruleKind === 'default' ? 'autoFallback' : 'neverActs'} />)}</div>
-                <div><button className="button ghost" onClick={() => setConfirmTargets(false)}>{tr('target.goBack')}</button><button className="button primary" onClick={() => commit(true)}>{tr('rules.applyAnywayToDraft' as MessageKey)}</button></div>
+                <div><button className="button ghost" onClick={() => setConfirmTargets(false)}>{tr('target.goBack')}</button><button className="button primary" onClick={() => commit(true)}>{initial ? <Check size={16} /> : <Plus size={16} />}{tr('rules.applyAnywayToDraft' as MessageKey)}</button></div>
               </div>
-            : <><span className="rule-draft-help">{tr('rules.applyDraftHelp' as MessageKey)}</span><div><Dialog.Close className="button ghost">{tr('app.cancel')}</Dialog.Close><button className="button primary" onClick={() => commit()}>{tr('rules.applyToDraft' as MessageKey)}</button></div></>}</div>
+            : <><span className="rule-draft-help">{tr('rules.applyDraftHelp' as MessageKey)}</span><div><Dialog.Close className="button ghost">{tr('app.cancel')}</Dialog.Close><button className="button primary" onClick={() => commit()}>{initial
+              ? <><Check size={16} />{tr('rules.applyToDraft' as MessageKey)}</>
+              : <><Plus size={16} />{tr('app.addRule')}</>}</button></div></>}</div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

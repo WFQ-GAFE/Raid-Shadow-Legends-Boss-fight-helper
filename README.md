@@ -25,20 +25,16 @@ Current version: **1.1.2** ([release notes / notas da versão](docs/1.1.2-releas
 4. After updating the tool, restart the game once. Your strategies are kept in `%LOCALAPPDATA%\RSL-Boss-helper` and carried over from earlier versions automatically.<br>
    更新工具后请重启一次游戏。策略保存在 `%LOCALAPPDATA%\RSL-Boss-helper`，旧版本的策略会自动带过来。
 
-## What's new in 1.1.2 / 1.1.2 新功能
+## What's new in 1.1.3 / 1.1.3 新功能
 
-- **Complete simulation packages:** **Save** packages the team setup, account bonuses and an existing Boss opening when available. Export and share them together; importing a complete package selects the author's team and opening for simulation. Missing data is clearly shown and filled in automatically when available; a compatible local game runtime is still required.<br>
-  **完整模拟包：** 数据可用时，「保存」会一起打包队伍配置、账号加成和已有 Boss 开局。导出后一并分享，导入完整包会自动选好作者队伍与开局。缺少数据会明确提示，数据可用后自动补全；仍需本机兼容游戏引擎。
-- **New champion picker and profiles:** drag champions into team slots, reorder or remove them, and filter by affinity, role, faction, damage basis, auras and skill effects. Double-click a champion for base stats, skill descriptions, readable damage formulas and book bonuses. Team slots do not determine actual turn order.<br>
-  **新英雄选择与简介：** 拖入英雄组队、调整站位或移出，按属性、定位、阵营、伤害基于、光环和技能效果筛选。双击查看基础属性、技能说明、伤害公式的文字解释与技能书加成。队伍站位不等于实际出手顺序。
-- **Full Hydra opening forecast reports:** open a generated report to inspect devour marks, damage, deaths and the rule behind each action; stalled rules show the champion, turn and reasons.<br>
-  **六头蛇开局推演完整报告：** 打开已生成的报告，查看吞噬标记、伤害、阵亡和每次出手的规则；卡住时定位英雄、回合及规则未执行的原因。
-- **Português (Brasil):** the interface, tool messages and new logs now support three languages. Game-provided names and descriptions follow the game client's language.<br>
-  **巴西葡萄牙语：** 界面、工具提示和新日志支持三种语言；游戏提供的名称与说明跟随游戏客户端语言。
-- **More reliable editing and scrolling:** explicit save and unsaved-change prompts, rules that keep matching after ascension, skill details on hover and corrected skill icons, plus consistent scrolling over cards and nested lists.<br>
-  **编辑和滚动更可靠：** 显式保存与未保存提醒、觉醒后继续匹配的规则、技能悬浮说明与图标修正，以及卡片和内嵌列表的稳定滚轮体验。
-
-[Read the full release notes in 简体中文, English or Português (Brasil) / 查看完整三语更新说明](docs/1.1.2-release-notes.md).
+- **Simulate any difficulty:** Hydra and Chimera simulations are built from the game's own stage data, so you can test your rules on a difficulty you have not fought yet. For the Chimera you can also set the Boss's starting HP. Take over one battle from the opening once; after a Boss rotation, enter one more battle to update it.<br>
+  **任意难度模拟：** 六头蛇和奇美拉的模拟按游戏自带的关卡数据生成，没打过的难度也能检验规则；奇美拉还能设置 Boss 开打血量。只需用工具从开局接管过一场战斗；Boss 轮换后再进一次战斗即可更新。
+- **Rule target checks:** the rule editor checks each skill's valid targets from the game data, marks targets the skill cannot reach and asks before saving such a rule. Rules skipped in battle or in a simulation because their target was missing are listed in reports and the run log.<br>
+  **规则目标检查：** 规则编辑器按游戏数据检查技能能选的目标，标出技能够不到的目标并在保存前确认；实战和模拟中因目标不存在而跳过的规则会写进报告和运行日志。
+- **Richer simulation reports:** filter the action log by buffs and debuffs, Chimera trials and forms or Hydra head types; see which enemy actions hit a champion, remaining shields and other absorb values, and the real targets of redirected skills; switch runs or jump to where a run stopped.<br>
+  **更详细的模拟报告：** 出手记录可按增益/减益、奇美拉试炼与形态、六头蛇蛇头类型筛选；查看英雄被哪些敌人出手打到、护盾等吸收值的剩余量、被转移技能的实际命中；可切换场次或跳到卡住的位置。
+- **Also:** a fix for a game crash when saving a team picked from the roster (restart the game after updating), rule conditions explained in plain words, a tidier main window, team picker improvements and report fixes.<br>
+  **其他：** 修复保存自选队伍时游戏崩溃（更新后请重启游戏），规则条件改用文字解释，主界面整理，选人器改进，以及报告显示修复。
 
 ## Features / 主要功能
 
