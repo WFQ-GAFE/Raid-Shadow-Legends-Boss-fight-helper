@@ -56,7 +56,9 @@ public:
         void* team = model_.get<void*>(state, "FirstTeam");
         void* heroes = team ? model_.get<void*>(team, "Heroes") : nullptr;
         for (int i = 0; i < size(heroes); ++i) players.insert(actor_id(item(heroes, i)));
-        struct Use { int actor, skill, target; const char* trigger; double damage; };
+        // target: the one the command or trigger named; hits: the actors its damage
+        // reached (a skill such as the Head of Mischief's steal picks its own target).
+        struct Use { int actor, skill, target; const char* trigger; double damage; std::vector<int> hits; };
         // One damage record: its target, the use it belongs to (-1: other damage) and its dealer.
         struct Record { int target, use, dealer; double amount; };
         std::vector<Use> uses;
@@ -70,7 +72,7 @@ public:
                 void* skill = optional(info, "Skill");
                 user = actor_id(optional(info, "Producer"));
                 uses.push_back({user, skill ? model_.get<int>(skill, "TypeId") : 0,
-                                actor_id(optional(info, "Target")), trigger(optional(info, "Source")), 0.0});
+                                actor_id(optional(info, "Target")), trigger(optional(info, "Source")), 0.0, {}});
             }
             void* actions = model_.get<void*>(result, "Results");
             for (int j = 0; j < size(actions); ++j) {
@@ -93,6 +95,8 @@ public:
                     continue;
                 }
                 const bool own = info && by == user;
+                if (own && std::find(uses.back().hits.begin(), uses.back().hits.end(), to) == uses.back().hits.end())
+                    uses.back().hits.push_back(to);
                 records.push_back({to, own ? static_cast<int>(uses.size()) - 1 : -1, by, amount});
             }
         }
@@ -104,16 +108,22 @@ public:
         }
         out << '[';
         bool first = true;
-        auto entry = [&](int actor, int skill, int target, const char* kind, double damage) {
+        auto entry = [&](int actor, int skill, int target, const char* kind, double damage, const std::vector<int>& hits) {
             out << (first ? "" : ",") << '[' << actor << ',' << skill << ',' << target << ",\"" << kind << "\","
-                << damage << ']';
+                << damage;
+            if (!hits.empty()) {
+                out << ",[";
+                for (std::size_t i = 0; i < hits.size(); ++i) out << (i ? "," : "") << hits[i];
+                out << ']';
+            }
+            out << ']';
             first = false;
         };
         for (const Use& use : uses)
             if (std::string(use.trigger) != "passive" || use.damage > 0.0)
-                entry(use.actor, use.skill, use.target, use.trigger, use.damage);
+                entry(use.actor, use.skill, use.target, use.trigger, use.damage, use.hits);
         for (const auto& [actor, damage] : other)
-            if (damage > 0.0) entry(actor, 0, -1, "other", damage);
+            if (damage > 0.0) entry(actor, 0, -1, "other", damage, {});
         out << ']';
     }
 

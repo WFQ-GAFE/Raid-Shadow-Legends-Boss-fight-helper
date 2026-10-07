@@ -1,10 +1,12 @@
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import { ArrowLeft, ArrowRight, Crown, Info, Search, Sparkles, Users, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Crown, Info, Search, Users, X } from 'lucide-react'
 import { backendText, translate, type Locale, type MessageKey, type UiLanguage, useI18n } from './i18n'
 import { championId, championTags, effectInfo, type EffectLike, type HeroData, type RosterHero } from './heroData'
 import { SCALING_KEYS, SPECIAL_KEYS, STAT_ORDER, auraApplies, auraText, labeler } from './heroLabels'
+import { EffectGlyph, EffectSearch, type SearchOption } from './EffectSearch'
 import { HeroProfile } from './HeroProfile'
+import { compactSlots } from './pickerUi'
 
 // Choosing a strategy group's team from the account's champions without the
 // preparation screen (agent roster request: basic data only; gear is read when
@@ -46,76 +48,17 @@ function PickerAvatar({ hero, heroAvatar }: { hero: RosterHero; heroAvatar: (typ
   return <span className={`picker-avatar rarity-${hero.rarity}`}>{heroAvatar(hero.typeId)}</span>
 }
 
-function EffectGlyph({ icon, ready }: { icon?: string; ready: boolean }) {
-  const [failed, setFailed] = useState(false)
-  return icon && ready && !failed
-    ? <img className="effect-glyph" src={`/api/asset/effect/${encodeURIComponent(icon)}`} alt="" loading="lazy" onError={() => setFailed(true)} />
-    : <Sparkles size={12} />
-}
-
-type SearchOption = { key: string; label: string; kind: string; icon?: string; iconReady?: boolean; glyph?: boolean }
-
-// Type to find a buff, debuff, effect, damage basis or aura; picking one adds it
-// to the conditions. Arrow keys move, Enter picks, Escape closes the list.
-function EffectSearch({ options, chosen, placeholder, empty, onPick }: {
-  options: SearchOption[]
-  chosen: string[]
-  placeholder: string
-  empty: string
-  onPick: (key: string) => void
-}) {
-  const [text, setText] = useState('')
-  const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(0)
-  const box = useRef<HTMLDivElement | null>(null)
-  // A click anywhere else closes the list (focus may not move, e.g. onto a card).
-  useEffect(() => {
-    if (!open) return
-    const close = (event: PointerEvent) => { if (!box.current?.contains(event.target as Node)) setOpen(false) }
-    document.addEventListener('pointerdown', close, true)
-    return () => document.removeEventListener('pointerdown', close, true)
-  }, [open])
-  const matches = useMemo(() => {
-    const needle = text.trim().toLowerCase()
-    return options.filter((option) => !chosen.includes(option.key)
-      && (!needle || option.label.toLowerCase().includes(needle) || option.kind.toLowerCase().includes(needle))).slice(0, 60)
-  }, [options, chosen, text])
-  const pick = (key: string) => {
-    onPick(key)
-    setText('')
-    setActive(0)
-  }
-  return (
-    <div className="effect-search" ref={box} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false) }}>
-      <label className="search-box"><Sparkles size={15} />
-        <input value={text} placeholder={placeholder} role="combobox" aria-expanded={open} aria-autocomplete="list"
-          onFocus={() => setOpen(true)} onChange={(event) => { setText(event.target.value); setOpen(true); setActive(0) }}
-          onKeyDown={(event) => {
-            if (event.key === 'ArrowDown') { event.preventDefault(); setOpen(true); setActive((index) => Math.min(index + 1, matches.length - 1)) }
-            else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((index) => Math.max(index - 1, 0)) }
-            else if (event.key === 'Enter' && open && matches[active]) { event.preventDefault(); pick(matches[active].key) }
-            else if (event.key === 'Escape') setOpen(false)
-          }} /></label>
-      {open && <div className="effect-search-menu" role="listbox">
-        {matches.length ? matches.map((option, index) => (
-          <button type="button" role="option" aria-selected={index === active} key={option.key} className={index === active ? 'active' : ''}
-            onMouseDown={(event) => event.preventDefault()} onMouseEnter={() => setActive(index)} onClick={() => pick(option.key)}>
-            {option.glyph ? <EffectGlyph icon={option.icon} ready={Boolean(option.iconReady)} /> : <span className="effect-glyph-space" />}
-            <span>{option.label}</span><small>{option.kind}</small>
-          </button>)) : <p>{empty}</p>}
-      </div>}
-    </div>
-  )
-}
-
 // Only cards whose own state changed render again when a champion is chosen.
-const RosterCard = memo(function RosterCard({ language, hero, name, element, slot, blocked, heroAvatar, onClick, onOpen, onDragStart, onDragEnd }: {
+// replaceable: not in the team, which is full (or holds another copy of the champion):
+// the card stays readable, since dragging it onto a team slot replaces that slot.
+const RosterCard = memo(function RosterCard({ language, hero, name, element, slot, replaceable, duplicatePosition, heroAvatar, onClick, onOpen, onDragStart, onDragEnd }: {
   language: UiLanguage
   hero: RosterHero
   name: string
   element?: string
   slot?: number
-  blocked: boolean
+  replaceable: boolean
+  duplicatePosition?: number
   heroAvatar: (typeId: number) => ReactNode
   onClick: (hero: RosterHero, event: MouseEvent) => void
   onOpen: (hero: RosterHero, fromDoubleClick: boolean) => void
@@ -125,12 +68,12 @@ const RosterCard = memo(function RosterCard({ language, hero, name, element, slo
   const { t } = useI18n()
   const place = placeOf(hero)
   return (
-    <div className={`picker-card${slot ? ' active' : ''}${blocked ? ' blocked' : ''}`} draggable
+    <div className={`picker-card${slot ? ' active' : ''}${replaceable ? ' replaceable' : ''}${duplicatePosition ? ' duplicate' : ''}`} draggable
       onDragStart={(event) => onDragStart(event, { kind: 'roster', hero })} onDragEnd={onDragEnd}>
       <button type="button" className={`head-type-option ${slot ? 'active' : ''}`} onClick={(event) => onClick(hero, event)}
         onDoubleClick={() => onOpen(hero, true)}
-        title={slot ? t('picker.clickToRemoveDoubleClick')
-          : t('picker.clickToAddOrDrag')}>
+        aria-pressed={Boolean(slot)}
+        title={slot ? t('picker.clickToRemoveDoubleClick') : t('picker.clickToAddOrDrag')}>
         <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
         <span><strong>{element && <i className={`element-dot element-${element}`} />}{name}</strong>
           <small>{`${hero.grade}★ · ${rarityName(language, hero.rarity)} · ${t('picker.lv', { level: hero.level })}${hero.empower ? ` · +${hero.empower}` : ''}`}</small>
@@ -138,6 +81,7 @@ const RosterCard = memo(function RosterCard({ language, hero, name, element, slo
             {place !== 'champions' && <b className="team-picker-place"> · {t(place === 'vault' ? 'picker.place.vault' : 'picker.place.reserve')}</b>}</small></span>
         {slot && <em>{slot}</em>}
       </button>
+      {duplicatePosition && <small className="picker-duplicate-note">{t('picker.duplicateConflict', { position: duplicatePosition })}</small>}
       <button type="button" className="picker-card-info" aria-label={t('picker.profile', { name })} title={t('picker.profile2')}
         onClick={() => onOpen(hero, false)}><Info size={14} /></button>
     </div>
@@ -158,8 +102,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   onClose: () => void
   onApply: (team: ChosenTeam) => void
 }) {
-  // English variant of data that comes in two languages (Portuguese uses it too for now).
-  const en = language !== 'zh-CN'
   const { t } = useI18n()
   const [roster, setRoster] = useState<RosterHero[] | null>(null)
   const [error, setError] = useState('')
@@ -186,6 +128,11 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   const dragRef = useRef<DragSource | null>(null)
   const slotsRef = useRef(slots)
   slotsRef.current = slots
+  const updateSlots = useCallback((next: Slots | ((current: Slots) => Slots)) => {
+    const compact = compactSlots(typeof next === 'function' ? next(slotsRef.current) : next, teamSize)
+    slotsRef.current = compact
+    setSlots(compact)
+  }, [teamSize])
   const clickSnapshot = useRef<{ heroId: number; slots: Slots } | null>(null)
   // Typing stays responsive; the list follows once the input has updated.
   const search = useDeferredValue(query)
@@ -200,13 +147,15 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     setQuery('')
     setProfile(null)
     setHint('')
-    setSlots(Array(teamSize).fill(null))
+    setDataState('loading')
+    setHeroData(null)
+    updateSlots(Array(teamSize).fill(null))
     loadRoster().then((heroes) => {
       if (cancelled) return
       setRoster(heroes)
       const byId = new Map(heroes.map((hero) => [hero.id, hero]))
       const chosen = initial.heroInstanceIds.map((id) => byId.get(id) ?? null).slice(0, teamSize)
-      setSlots([...chosen, ...Array(Math.max(0, teamSize - chosen.length)).fill(null)])
+      updateSlots(chosen)
     }).catch((reason) => {
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason))
     })
@@ -252,7 +201,7 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     const factions = [...new Set(Object.values(heroData.heroes).map((hero) => hero.faction))].filter(Boolean).sort()
     return { buff: sorted(groups.buff), debuff: sorted(groups.debuff),
       special: SPECIAL_KEYS.filter((name) => special.has(name)), factions }
-  }, [heroData, effectMap, en])
+  }, [heroData, effectMap, language])
 
   const conditionLabel = useCallback((condition: string) => {
     const [kind, value] = [condition.slice(0, condition.indexOf(':') < 0 ? condition.length : condition.indexOf(':')), condition.slice(condition.indexOf(':') + 1)]
@@ -262,8 +211,7 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     if (kind === 'special') return labels.special(value)
     const group = effectOptions?.[kind as 'buff' | 'debuff']?.find((item) => item.key === value)
     return group ? `${kind === 'buff' ? t('picker.buff') : t('picker.debuff')}：${group.label}` : value
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [labels, effectOptions, en])
+  }, [labels, effectOptions, t])
 
   const searchOptions = useMemo<SearchOption[]>(() => {
     if (!effectOptions) return []
@@ -275,8 +223,7 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
       ...SCALING_KEYS.map((value) => ({ key: `scaling:${value}`, label: t('picker.damageBasedOn', { value: labels.scaling(value) }), kind: t('chimeraSim.damage') })),
       ...STAT_ORDER.slice(0, 7).map((value) => ({ key: `aura:${value}`, label: t('picker.aura', { value: labels.stat(value) }), kind: t('picker.leaderAura') })),
     ]
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectOptions, labels, en])
+  }, [effectOptions, labels, t])
 
   const tests = useMemo(() => conditions.map((condition) => {
     const kind = condition.split(':')[0]
@@ -340,25 +287,24 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
       }
       next[index] = hero
     }
-    setSlots(next)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [en])
+    updateSlots(next)
+  }, [t, updateSlots])
 
   const toggle = useCallback((hero: RosterHero) => {
     const current = slotsRef.current
     const at = current.findIndex((item) => item?.id === hero.id)
     if (at >= 0) {
-      setSlots(current.map((item, index) => (index === at ? null : item)))
+      updateSlots(current.map((item, index) => (index === at ? null : item)))
       return
     }
     const empty = current.findIndex((item) => !item)
+    // A full team: dragging a champion onto a slot replaces it.
     if (empty < 0) {
       setHint(t('picker.theTeamIsFullDrag'))
       return
     }
     place(empty, hero)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [place, en])
+  }, [place, updateSlots, t])
 
   // A double click opens the profile and is not a pick: its first click is undone.
   const clickCard = useCallback((hero: RosterHero, event: MouseEvent) => {
@@ -368,10 +314,10 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   }, [toggle])
   const openProfile = useCallback((hero: RosterHero, fromDoubleClick: boolean) => {
     const snapshot = clickSnapshot.current
-    if (fromDoubleClick && snapshot?.heroId === hero.id) setSlots(snapshot.slots)
+    if (fromDoubleClick && snapshot?.heroId === hero.id) updateSlots(snapshot.slots)
     clickSnapshot.current = null
     setProfile(hero)
-  }, [])
+  }, [updateSlots])
 
   // The drag shows once it has really begun: a listener after this one may
   // still cancel it, and a cancelled drag never sends dragend.
@@ -406,15 +352,15 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     else if (source.index !== index) {
       const next = [...slotsRef.current]
       ;[next[source.index], next[index]] = [next[index], next[source.index]]
-      setSlots(next)
+      updateSlots(next)
     }
   }
   const move = (index: number, step: number) => {
     const target = index + step
-    if (target < 0 || target >= teamSize) return
+    if (target < 0 || target >= chosenCount) return
     const next = [...slots]
     ;[next[index], next[target]] = [next[target], next[index]]
-    setSlots(next)
+    updateSlots(next)
   }
 
   const leader = slots[0]
@@ -427,14 +373,27 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   const toggleCondition = (condition: string) => setConditions((current) =>
     current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition])
   const chip = (active: boolean, label: ReactNode, onClick: () => void, key: string, extra = '') =>
-    <button type="button" key={key} className={`chip ${extra} ${active ? 'active' : ''}`} onClick={onClick}>{label}</button>
+    <button type="button" key={key} aria-pressed={active} className={`chip ${extra} ${active ? 'active' : ''}`} onClick={onClick}>{label}</button>
+  const resetFilters = () => {
+    setQuery(''); setGrades(new Set()); setRarities(new Set()); setPlaces(new Set(PLACES.map(([value]) => value)))
+    setConditions([]); setElements(new Set()); setRoles(new Set()); setFactions(new Set())
+  }
+  const filterGroups = [
+    { key: 'grades', label: t('picker.stars'), all: false, entries: [...grades].map((value) => ({ key: String(value), label: `${value}★`, remove: () => setGrades((current) => toggled(current, value)) })) },
+    { key: 'rarities', label: t('picker.rarity'), all: false, entries: [...rarities].map((value) => ({ key: String(value), label: rarityName(language, value), remove: () => setRarities((current) => toggled(current, value)) })) },
+    { key: 'places', label: t('picker.location'), all: false, entries: places.size === PLACES.length ? [] : PLACES.filter(([value]) => places.has(value)).map(([value, key]) => ({ key: value, label: t(key), remove: () => setPlaces((current) => toggled(current, value)) })) },
+    { key: 'name', label: t('picker.nameFilter'), all: false, entries: query.trim() ? [{ key: 'query', label: query.trim(), remove: () => setQuery('') }] : [] },
+    { key: 'elements', label: t('picker.affinity'), all: false, entries: [...elements].map((value) => ({ key: value, label: labels.element(value), remove: () => setElements((current) => toggled(current, value)) })) },
+    { key: 'roles', label: t('picker.role'), all: false, entries: [...roles].map((value) => ({ key: value, label: labels.role(value), remove: () => setRoles((current) => toggled(current, value)) })) },
+    { key: 'factions', label: t('picker.faction'), all: false, entries: [...factions].map((value) => ({ key: value, label: labels.faction(value), remove: () => setFactions((current) => toggled(current, value)) })) },
+    { key: 'conditions', label: t('picker.skillConditions'), all: true, entries: conditions.map((value) => ({ key: value, label: conditionLabel(value), remove: () => toggleCondition(value) })) },
+  ].filter((group) => group.entries.length)
 
   return (
     <Dialog.Root open={open} onOpenChange={(value) => { if (!value) onClose() }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content team-picker-dialog" data-i18n-skip
-          onEscapeKeyDown={(event) => { if ((event.target as HTMLElement | null)?.closest?.('.effect-search')) event.preventDefault() }}>
+        <Dialog.Content className="dialog-content team-picker-dialog" data-i18n-skip>
           <div className="dialog-heading">
             <span><Dialog.Title><Users size={17} /> {t('picker.chooseTheStrategySTeam')}</Dialog.Title>
               <Dialog.Description>{t('picker.clickOrDragChampionsInto', { teamSize })}</Dialog.Description></span>
@@ -448,17 +407,20 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
                   className={`picker-slot${hero ? '' : ' empty'}${index === 0 ? ' leader' : ''}${dropIndex === index ? ' drop-target' : ''}${dragging ? ' dragging' : ''}`}
                   draggable={Boolean(hero)} onDragStart={(event) => startDrag(event, { kind: 'slot', index })} onDragEnd={endDrag}
                   onDragOver={(event) => overSlot(event, index)} onDragLeave={() => setDropIndex((current) => (current === index ? null : current))}
-                  onDrop={(event) => dropOnSlot(event, index)} onDoubleClick={() => hero && setProfile(hero)}
+                  onDrop={(event) => dropOnSlot(event, index)}
                   title={hero ? t('picker.dragToReorderDoubleClick') : t('picker.dropAChampionHere')}>
                   <span className="picker-slot-index">{index + 1}</span>
                   {index === 0 && <span className="picker-slot-leader"><Crown size={11} />{t('picker.leader')}</span>}
                   {hero ? <>
-                    <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
-                    <small>{nameOf(hero.typeId)}</small>
+                    <button type="button" className="picker-slot-profile" onClick={() => setProfile(hero)}
+                      aria-label={t('picker.openPositionProfile', { name: nameOf(hero.typeId), position: index + 1 })}>
+                      <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
+                      <small>{nameOf(hero.typeId)}</small>
+                    </button>
                     <span className="picker-slot-actions">
-                      <button type="button" title={t('picker.moveLeft')} aria-label={t('picker.moveLeft')} disabled={index === 0} onClick={() => move(index, -1)}><ArrowLeft size={13} /></button>
-                      <button type="button" title={t('picker.remove')} aria-label={t('picker.remove')} onClick={() => toggle(hero)}><X size={13} /></button>
-                      <button type="button" title={t('picker.moveRight')} aria-label={t('picker.moveRight')} disabled={index === teamSize - 1} onClick={() => move(index, 1)}><ArrowRight size={13} /></button>
+                      <button type="button" title={t('picker.moveLeft')} aria-label={t('picker.moveChampionLeft', { name: nameOf(hero.typeId), position: index + 1 })} disabled={index === 0} onClick={() => move(index, -1)}><ArrowLeft size={13} /></button>
+                      <button type="button" title={t('picker.remove')} aria-label={t('picker.removeChampion', { name: nameOf(hero.typeId), position: index + 1 })} onClick={() => toggle(hero)}><X size={13} /></button>
+                      <button type="button" title={t('picker.moveRight')} aria-label={t('picker.moveChampionRight', { name: nameOf(hero.typeId), position: index + 1 })} disabled={index === chosenCount - 1} onClick={() => move(index, 1)}><ArrowRight size={13} /></button>
                     </span>
                   </> : <span className="picker-slot-empty">{t('picker.dropHere')}</span>}
                 </div>
@@ -528,36 +490,48 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
 
             <div className="picker-main">
               <div className="picker-searches">
-                <label className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('picker.searchByName')} /></label>
+                <label className="search-box"><Search size={16} /><input aria-label={t('picker.searchByName')} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('picker.searchByName')} /></label>
                 <EffectSearch options={searchOptions} chosen={conditions} onPick={(key) => setConditions((current) => [...current, key])}
                   placeholder={needsData ? dataNote : t('picker.searchSkillEffectsBuffsDebuffs')}
                   empty={t('picker.noSuchEffect')} />
               </div>
-              {(conditions.length > 0 || elements.size > 0 || roles.size > 0 || factions.size > 0) && <div className="picker-conditions">
-                <span>{t('picker.mustHaveAllOf')}</span>
-                {conditions.map((condition) => <button type="button" key={condition} className="chip active" onClick={() => toggleCondition(condition)}>{conditionLabel(condition)}<X size={12} /></button>)}
-                {[...elements].map((value) => <button type="button" key={value} className="chip active" onClick={() => setElements((current) => toggled(current, value))}>{labels.element(value)}<X size={12} /></button>)}
-                {[...roles].map((value) => <button type="button" key={value} className="chip active" onClick={() => setRoles((current) => toggled(current, value))}>{labels.role(value)}<X size={12} /></button>)}
-                {[...factions].map((value) => <button type="button" key={value} className="chip active" onClick={() => setFactions((current) => toggled(current, value))}>{labels.faction(value)}<X size={12} /></button>)}
-                <button type="button" className="button ghost picker-clear" onClick={() => { setConditions([]); setElements(new Set()); setRoles(new Set()); setFactions(new Set()) }}>{t('picker.clear')}</button>
-              </div>}
+              <div className="picker-filter-summary">
+                <div className="picker-filter-summary-heading">
+                  <span>{t('picker.filterLogic')}</span>
+                  <button type="button" className="button ghost picker-clear" onClick={resetFilters}>{t('picker.resetAllFilters')}</button>
+                </div>
+                {filterGroups.length > 0 && <div className="picker-conditions">
+                  {filterGroups.map((group) => <span key={group.key} className="picker-filter-group">
+                    <strong>{group.label}</strong><small>{t(group.all ? 'picker.filterAll' : 'picker.filterAny')}</small>
+                    {group.entries.map((entry) => <button type="button" key={entry.key} className="chip active"
+                      aria-label={`${t('picker.remove')}: ${group.label} · ${entry.label}`} onClick={entry.remove}>{entry.label}<X size={12} /></button>)}
+                  </span>)}
+                </div>}
+                <span className="picker-match-count" role="status">{roster && t('picker.matches', { shownCount: shown.length, rosterCount: roster.length })}</span>
+              </div>
               <div className={`team-picker-list${dragging === 'slot' ? ' remove-target' : ''}`} ref={listRef}
+                aria-busy={roster === null}
                 onDragOver={(event) => { if (dragRef.current?.kind === 'slot') { event.preventDefault(); event.dataTransfer.dropEffect = 'move' } }}
                 onDrop={(event) => {
                   const source = dragRef.current
                   if (source?.kind !== 'slot') return
                   event.preventDefault()
                   endDrag()
-                  setSlots((current) => current.map((item, index) => (index === source.index ? null : item)))
+                  updateSlots((current) => current.map((item, index) => (index === source.index ? null : item)))
                 }}>
                 {error ? <p className="team-picker-note error">{backendText(error, language)}</p>
                   : roster === null ? <p className="team-picker-note">{t('picker.readingTheAccountSChampions')}</p>
-                    : shown.length === 0 ? <p className="team-picker-note">{t('picker.noChampionsMatchTheFilters')}</p>
+                    : shown.length === 0 ? <div className="picker-empty-results" role="status">
+                      <p className="team-picker-note">{roster.length === 0 ? t('picker.emptyRoster') : places.size === 0 ? t('picker.emptyLocations') : t('picker.noChampionsMatchExplanation')}</p>
+                      {roster.length > 0 && <button type="button" className="button ghost picker-clear" onClick={resetFilters}>{t('picker.resetAllFilters')}</button>}
+                    </div>
                       : <>
                         {visible.map((hero) => {
                           const slot = slotOf.get(hero.id)
+                          const duplicate = !slot ? slots.findIndex((current) => current && championId(current.typeId) === championId(hero.typeId)) : -1
                           return <RosterCard key={hero.id} language={language} hero={hero} name={nameOf(hero.typeId)} element={elementOf.get(hero.typeId)} slot={slot}
-                            blocked={!slot && (full || chosenChampions.has(championId(hero.typeId)))} heroAvatar={heroAvatar}
+                            replaceable={!slot && (full || duplicate >= 0)}
+                            duplicatePosition={duplicate >= 0 ? duplicate + 1 : undefined} heroAvatar={heroAvatar}
                             onClick={clickCard} onOpen={openProfile} onDragStart={startDrag} onDragEnd={endDrag} />
                         })}
                         {visible.length < shown.length && <div ref={moreRef} className="team-picker-more">
@@ -568,7 +542,10 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
           </div>
 
           <div className="dialog-footer">
-            <span className={hint ? 'picker-hint' : ''}>{hint || (roster ? t('picker.showingChampionsChosen', { shownCount: shown.length, rosterCount: roster.length, chosenCount, teamSize }) : '')}</span>
+            <span className="picker-apply-note">
+              <span className={hint ? 'picker-hint' : ''} role="status">{hint || (roster ? t('picker.showingChampionsChosen', { shownCount: shown.length, rosterCount: roster.length, chosenCount, teamSize }) : '')}</span>
+              <small>{t('picker.draftNotice')}</small>
+            </span>
             <div>
               <button type="button" className="button ghost" onClick={onClose}>{t('picker.cancel')}</button>
               <button type="button" className="button primary" disabled={team.length === 0}

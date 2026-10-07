@@ -19,7 +19,7 @@ def test_agent_source_and_controller_share_the_input_capture_build_id() -> None:
     source = (PROJECT_ROOT / "src" / "agent" / "agent.cpp").read_text(encoding="utf-8")
     match = re.search(r"kAgentBuildId\s*=\s*(\d+)ULL", source)
     assert match is not None
-    assert int(match.group(1)) == AGENT_BUILD_ID == 2026092902
+    assert int(match.group(1)) == AGENT_BUILD_ID == 2026100401
 
 
 def test_retired_hydra_research_capture_is_gone_and_blocked_at_package_time() -> None:
@@ -42,6 +42,13 @@ def test_il2cpp_gc_handles_keep_the_full_pointer_width() -> None:
 
 def test_previous_crash_build_requires_full_game_restart() -> None:
     previous = {"buildId": 2026092301, "compatible": False}
+    assert reload_block_reason(previous) == "incompatible_agent_restart_required"
+
+
+def test_stale_team_capture_build_requires_restart_even_with_current_layout() -> None:
+    # This build has the same shared layout but retains invalid AppModel data
+    # across account reinitialization; the new tool must never request it again.
+    previous = {"buildId": 2026092902, "compatible": True}
     assert reload_block_reason(previous) == "incompatible_agent_restart_required"
 
 

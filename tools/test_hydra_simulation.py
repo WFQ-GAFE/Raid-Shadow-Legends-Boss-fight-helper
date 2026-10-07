@@ -9,7 +9,9 @@ import tempfile
 from chimera_capture_live import HydraCaptureMonitor
 from hydra_simulation import HydraSimulationSession, aggregate, battle_report, forecast_run, run_timeline, summarize_run
 from hydra_simulation_service import HydraSimulationService, list_captures
+from simulation_common import attach_target_misses, target_misses
 from test_hydra_offline_policy import fixture
+from ui_text import render, ui_text
 
 
 def result_fixture() -> tuple[dict, dict]:
@@ -53,6 +55,66 @@ def test_session_reports_the_rule_and_where_the_rules_stall() -> None:
     assert stalled["status"] == "unknown" and stuck["reason"] == "no_matching_rule"
     assert stuck["activeHeroTypeId"] == 100 and stuck["skills"][0]["typeId"] == 1001
     assert [actor["id"] for actor in stuck["snapshot"]["actors"]] == [0, 8]
+
+
+def test_a_rule_whose_target_cannot_be_chosen_is_noted_and_explained() -> None:
+    state, strategy = fixture()
+    # The attack can only hit the head; a rule aiming it at the champion itself is skipped.
+    strategy["rules"].insert(0, {"name": "aim-self", "when": {"activeHeroTypeId": [100]},
+                                 "action": {"type": "cast", "skillTypeId": 1001, "skillSlot": 1, "target": {"type": "self"}}})
+    decision = HydraSimulationSession(strategy).decide(copy.deepcopy(state))
+    assert decision["status"] == "command" and decision["ruleIndex"] == 2
+    assert decision["targetMisses"] == [{"rule": "aim-self", "heroTypeId": 100, "skillTypeId": 1001, "target": "self", "reach": "enemy",
+                                         "ruleIndex": 1}]
+    # Alone, the rule leaves the hero without an action; the stuck report names the target problem.
+    stalled = HydraSimulationSession({**strategy, "rules": strategy["rules"][:1]}).decide(copy.deepcopy(state))
+    reason = stalled["stuck"]["rules"][0]
+    assert reason["code"] == "target_unavailable" and reason["targetMiss"]["reach"] == "enemy"
+    assert render(reason["reason"], "zh-CN") == "条件满足、技能就绪，但目标「自己」不可选（只能选敌人）"
+    assert render(reason["reason"], "en") == "conditions met and skill ready, but target “Self” unavailable (enemies only)"
+    # Per run: one count per decision; across runs: the average, how many runs, an example.
+    misses = target_misses([{"targetMisses": decision["targetMisses"] * 2}] * 3)
+    assert misses == [{"ruleIndex": 1, "rule": "aim-self", "count": 3, "heroTypeId": 100, "skillTypeId": 1001, "target": "self", "reach": "enemy"}]
+    rules = [{"ruleIndex": 1}, {"ruleIndex": 2}]
+    attach_target_misses(rules, [{"targetMisses": misses}, {"targetMisses": []}])
+    assert rules[0]["targetMisses"] == 1.5 and rules[0]["targetMissRuns"] == 1
+    assert rules[0]["targetMiss"] == {"heroTypeId": 100, "skillTypeId": 1001, "target": "self", "reach": "enemy"} and "targetMisses" not in rules[1]
+    # A target of a kind the skill takes that is not there then (no exposed neck) is "absent", not a wrong kind.
+    neck = {**strategy, "rules": [{"name": "aim-neck", "when": {"activeHeroTypeId": [100]},
+                                   "action": {"type": "cast", "skillTypeId": 1001, "skillSlot": 1, "target": {"type": "exposedNeck"}}},
+                                  *strategy["rules"][1:]]}
+    decided = HydraSimulationSession(neck).decide(copy.deepcopy(state))
+    assert decided["targetMisses"][0]["reach"] == "absent" and decided["targetMisses"][0]["target"] == "exposedNeck"
+    assert render(ui_text("target.reach.absent"), "zh-CN") == "当时没有符合的目标"
+
+
+def test_the_live_log_names_a_skipped_target_once_per_battle() -> None:
+    import contextlib
+    import io
+
+    import chimera_controller as controller
+
+    state, _ = fixture()
+    runtime: dict = {}
+    miss = {"rule": "aim-self", "ruleIndex": 1, "target": "allyPosition", "position": 3, "reach": "none"}
+    lines = io.StringIO()
+    with contextlib.redirect_stdout(lines):
+        for generation in (4, 4, 5):
+            controller.report_target_misses({**state, "battleGeneration": generation, "_targetMisses": [miss]}, runtime)
+    printed = [render(line, "zh-CN") for line in lines.getvalue().splitlines()]
+    assert len(printed) == 2 and "「3 号位队友」不可选（当时没有可选目标）" in printed[0]
+    # Who the legal targets were, as the editor says it.
+    heroes = [{"id": 0}, {"id": 1}, {"id": 2, "dead": True}]
+    reach = lambda ids: controller.target_reach({"activeHeroId": 0, "heroes": heroes}, ids)  # noqa: E731
+    assert [reach([8]), reach([0, 1]), reach([1]), reach([0]), reach([2]), reach([1, 8]), reach([])] == \
+        ["enemy", "ally", "otherAlly", "self", "deadAlly", "any", "none"]
+    # A target of the wrong kind, only when one moment's legal targets make it certain; otherwise "absent".
+    wrong = controller.wrong_target_kind
+    assert [wrong("enemy", "self"), wrong("enemy", "devouringHead"), wrong("ally", "boss"), wrong("otherAlly", "self")] == \
+        [True, False, True, True]
+    # Other allies dead: the caster alone is legal for now, a slot target is just not there.
+    assert [wrong("self", "allyPosition", False), wrong("deadAlly", "lowestHpAlly"), wrong("otherAlly", "allyPosition", True)] == \
+        [False, False, True]
 
 
 def test_summary_attributes_damage_and_counts_marks_deaths_kills_and_live_verdict() -> None:

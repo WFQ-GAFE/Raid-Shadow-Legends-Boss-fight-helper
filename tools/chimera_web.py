@@ -110,7 +110,7 @@ from strategy_storage import atomic_write_json, write_strategy_store, storage_he
 from catalog_stream import static_entity, merge_skill_catalog
 from hydra_state import hydra_devouring_head_ids
 from hydra_forecast_live import recent_forecasts as recent_hydra_forecasts
-from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService,
+from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService, chimera_difficulty_health,
                                         list_captures as list_chimera_captures,
                                         recent_simulations as recent_chimera_simulations)
 from hero_data import HeroDataService
@@ -213,12 +213,12 @@ APP_ICON = next(
 )
 HERO_CATALOG = PROJECT_ROOT / "cache" / "chimera-hero-catalog.json"
 BOSS_SKILLS = PROJECT_ROOT / "cache" / "boss-skills.json"
+# The game's status effect list (id, name) as last read from the game, so reports
+# name every buff and debuff (magma shield, golden armor...) with the game closed.
+STATUS_EFFECTS = PROJECT_ROOT / "cache" / "status-effects.json"
 UI_PREFERENCES = PROJECT_ROOT / "config" / "raid-boss-ui-preferences.user.json"
 # The interface languages: one catalog file each (ui/src/i18n/messages).
 UI_LANGUAGES = LOCALES
-def snapshot_requested(body: dict[str, Any]) -> bool:
-    """An explicit save: snapshot the strategy group's team (capturePreparedTeam: interfaces before 1.1.1)."""
-    return body.get("snapshotTeam") is True or body.get("capturePreparedTeam") is True
 
 
 def team_hero_ids(team: Any) -> list[int]:
@@ -459,6 +459,14 @@ def normalized_strategy(
     return result
 
 
+class AgentRequestNotQueued(TeamSetupError):
+    """The agent explicitly rejected dispatch; this request cannot run later."""
+
+
+class TeamDataReadRejected(TeamSetupError):
+    """A matching nonce has finished with an unusable team response."""
+
+
 class ChimeraService:
     def __init__(self) -> None:
         self.stopping = threading.Event()
@@ -481,6 +489,16 @@ class ChimeraService:
         self._store_context = threading.local()
         self.package_log = desktop_lifecycle_log
         self.package_refreshes: dict[tuple[str | None, str, str], float] = {}
+        self.package_workers: set[tuple[str | None, str, str]] = set()
+        self.package_read_attempts: set[tuple[Any, ...]] = set()
+        self.package_read_counts: dict[tuple[Any, ...], int] = {}
+        self.package_read_rejections: dict[tuple[Any, ...], int] = {}
+        self.package_read_states: dict[int, tuple[tuple[Any, ...], int]] = {}
+        self.package_reads_inflight: set[int] = set()
+        self.package_team_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.package_agent_sessions: dict[int, tuple[int | None, str | None]] = {}
+        self.package_deferred: dict[tuple[Any, ...], str] = {}
+        self.package_queued: set[tuple[Any, ...]] = set()
         self.team_previews: dict[int, dict[str, Any]] = {}
         self.catalog_epoch = 0
         self.catalog_session = secrets.token_hex(8)
@@ -495,8 +513,11 @@ class ChimeraService:
         except OSError:
             self.hero_catalog_mtime_ns = 0
         self.ui_catalog = ensure_ui_catalog_cache()
-        self.status_effect_catalog: list[dict[str, Any]] = []
-        self.effect_options = runtime_effect_options([])
+        saved_effects = read_json(STATUS_EFFECTS, [])
+        self.status_effect_catalog: list[dict[str, Any]] = [
+            effect for effect in saved_effects if isinstance(effect, dict)
+        ] if isinstance(saved_effects, list) else []
+        self.effect_options = runtime_effect_options(self.status_effect_catalog)
         installed_hydra_heads = {
             type_id: kind
             for type_id, kind in discover_game_hydra_heads()
@@ -737,14 +758,17 @@ class ChimeraService:
                 store, boss_mode, config, strategy_id=selected_id
             )
             write_strategy_store(self.store_path(), updated)
+            self._package_local_save_log(config, boss_mode, pid, selected_id)
             return self.strategy_bundle(boss_mode, updated)
 
     def _package_strategy(self, config: dict[str, Any], boss_mode: str, pid: int | None,
-                          previous: dict[str, Any], strategy_id: str) -> dict[str, Any]:
-        """Every save captures a complete portable input when the data is available.
+                          previous: dict[str, Any], strategy_id: str, *,
+                          allow_live: bool = False) -> dict[str, Any]:
+        """Build portable inputs from local data; live reads are background only.
 
-        A failed read never masquerades as a refreshed team. Existing matching
-        snapshots remain usable; a changed team cannot reuse another team's data.
+        Saving rules must not queue work inside the game. A missing snapshot
+        may be captured once by the guarded background worker. A timed-out
+        native request can still run later, so polling never queues it again.
         """
         config = copy.deepcopy(config)
         team = config.get("team") if isinstance(config.get("team"), dict) else {}
@@ -767,10 +791,15 @@ class ChimeraService:
                 if not ids:
                     ids = [hero["typeId"] for hero in reference["heroes"]]
                     config["team"] = team = {"heroTypeIds": ids}
-        issue = None
-        if hero_ids and isinstance(pid, int) and not isinstance(pid, bool):
+        issue = previous_package.get("lastReadIssue") if isinstance(previous_package, dict) and same_instances \
+            and ordered_team_matches(previous_team.get("heroTypeIds"), ids) else None
+        if hero_ids and ("team" not in package or "accountBonuses" not in package):
             try:
-                preview = self.team_data(pid, hero_ids, boss_mode, timeout=3.0)
+                preview = self._cached_package_preview(pid, hero_ids, boss_mode, read_shared=allow_live)
+                if preview is None and allow_live:
+                    preview = self._read_package_preview_once(pid, hero_ids, boss_mode, strategy_id)
+                if preview is None:
+                    raise TeamSetupError(ui_text("package.noTeamData"))
                 by_id = {hero.get("heroId"): hero for hero in preview.get("heroes") or []}
                 if any(hero_id not in by_id for hero_id in hero_ids):
                     raise TeamSetupError(ui_text("web.partOfTeamNotOnAccount"))
@@ -792,39 +821,283 @@ class ChimeraService:
                     raise TeamSetupError(ui_text("package.noAccountBonuses"))
                 package["team"] = snapshot
                 package["accountBonuses"] = bonuses
+                issue = None
+                if allow_live:
+                    self._package_log(f"strategy_package_snapshot_ready account={self.strategy_account().key} "
+                                      f"boss={boss_mode} strategy={strategy_id} pid={pid} "
+                                      f"agentInstanceId={preview.get('_agentInstanceId')} source={preview.get('_packageSource')}")
             except (TeamSetupError, OSError, ValueError) as error:
-                issue = str(error)
-                self._package_log(f"strategy_package_team_read_failed boss={boss_mode} strategy={strategy_id}: {error}")
-        elif "team" not in package and ids:
+                # A missing local cache is normal while the game is closed or
+                # the chosen team has not been observed. Only an attempted
+                # native read contributes a diagnostic warning.
+                if str(error) != ui_text("package.noTeamData"):
+                    issue = str(error)
+                    self._package_log(f"strategy_package_team_read_failed boss={boss_mode} strategy={strategy_id}: {error}")
+        if "team" not in package and ids:
             saved = self.strategy_team_store().load(boss_mode, strategy_id)
             if saved and same_instances:
                 snapshot = exported_team(saved, boss_mode=boss_mode, strategy_team=ids)
                 if snapshot:
                     package["team"] = snapshot
-        if "team" in package and "accountBonuses" not in package and isinstance(pid, int) and not isinstance(pid, bool):
-            try:
-                bonuses = self.account_bonuses(pid, ids)
-                if valid_account_bonuses(bonuses, ids, boss_mode):
-                    package["accountBonuses"] = bonuses
-            except (TeamSetupError, OSError, ValueError) as error:
-                issue = str(error)
-                self._package_log(f"strategy_package_bonuses_read_failed boss={boss_mode} strategy={strategy_id}: {error}")
         if "opening" not in package:
             service = getattr(self, "hydra_simulations" if boss_mode == "hydra" else "simulations", None)
             roots = list(service.capture_roots.values()) if boss_mode == "hydra" and service else \
                 [service.capture_root] if service else []
             capture = select_opening(roots, boss_mode, ids)
             if capture:
-                package["opening"] = pack_opening(capture, boss_mode)
+                try:
+                    package["opening"] = pack_opening(capture, boss_mode)
+                except (OSError, ValueError) as error:
+                    issue = str(error)
+                    self._package_log(f"strategy_package_opening_read_failed boss={boss_mode} strategy={strategy_id}: {error}")
         package["savedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
         if issue:
             package["lastReadIssue"] = issue
-        status = package_status({**config, "simulationPackage": package}, boss_mode)
-        self._package_log(f"strategy_package_saved boss={boss_mode} strategy={strategy_id} "
-                          f"status={status['status']} team={status['team']} opening={status['opening']} "
-                          f"accountBonuses={status['accountBonuses']}")
         config["simulationPackage"] = package
         return config
+
+    def _package_local_save_log(self, config: dict[str, Any], boss_mode: str, pid: Any, strategy_id: str) -> None:
+        status = package_status(config, boss_mode)
+        prepared = (getattr(self, "team_previews", {}).get(pid) or {}) if isinstance(pid, int) else {}
+        self._package_log(f"strategy_package_local_save account={self.strategy_account().key} "
+                          f"boss={boss_mode} strategy={strategy_id} pid={pid} "
+                          f"agentInstanceId={prepared.get('agentInstanceId')} status={status['status']} "
+                          f"team={status['team']} opening={status['opening']} accountBonuses={status['accountBonuses']}")
+
+    @staticmethod
+    def _stable_package_header(before: Any, after: Any) -> bool:
+        """Do not attach a slot copied before an agent restart to its new header."""
+        return isinstance(before, dict) and isinstance(after, dict) \
+            and bool(before.get("compatible") and before.get("ready") and after.get("compatible") and after.get("ready")) \
+            and type(before.get("instanceId")) is int and before["instanceId"] > 0 \
+            and before["instanceId"] == after.get("instanceId")
+
+    def _observe_package_agent(self, pid: int, header: Any, account: Any) -> tuple[int | None, str | None]:
+        """Bind local process caches to the agent session already observed by polling."""
+        instance = header.get("instanceId") if isinstance(header, dict) else None
+        account_key = str(account["userId"]) if isinstance(account, dict) \
+            and type(account.get("userId")) is int and account["userId"] > 0 else None
+        if not isinstance(header, dict) or not header.get("compatible") or not header.get("ready") \
+                or type(instance) is not int or instance <= 0 or account_key is None:
+            instance, account_key = None, None
+        session = (instance, account_key)
+        with self.lock:
+            if not hasattr(self, "package_agent_sessions"):
+                self.package_agent_sessions = {}
+            if self.package_agent_sessions.get(pid) != session:
+                self.package_agent_sessions[pid] = session
+                cache = getattr(self, "package_team_cache", {})
+                for key in list(cache):
+                    if key[1] == pid:
+                        del cache[key]
+                prepared = getattr(self, "team_previews", {}).get(pid)
+                if prepared and (prepared.get("agentInstanceId"), prepared.get("accountKey")) != session:
+                    self.team_previews.pop(pid, None)
+        return session
+
+    def _cached_package_preview(self, pid: Any, hero_ids: list[int], boss_mode: str,
+                                *, read_shared: bool = False) -> dict[str, Any] | None:
+        """Use an account-bound snapshot, including a late native response.
+
+        The save path only inspects Python's cache. Background polling may
+        read already-published IPC slots; it never asks the game to fill them.
+        """
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            return None
+        account_key = self.strategy_account().key
+        if not account_key:
+            return None
+        key = (account_key, pid, boss_mode, tuple(sorted(hero_ids)))
+
+        def matching(value: Any) -> dict[str, Any] | None:
+            if not isinstance(value, dict) or value.get("status") != "captured" \
+                    or value.get("bossMode") != boss_mode:
+                return None
+            heroes = value.get("heroes") or []
+            by_id = {hero.get("heroId"): hero for hero in heroes if isinstance(hero, dict)}
+            return copy.deepcopy(value) if all(hero_id in by_id for hero_id in hero_ids) else None
+
+        with self.lock:
+            instance, observed_account = getattr(self, "package_agent_sessions", {}).get(pid, (None, None))
+            cached = None
+            prepared = getattr(self, "team_previews", {}).get(pid) or {}
+            if instance is not None and observed_account == account_key \
+                    and prepared.get("accountKey") == account_key and prepared.get("agentInstanceId") == instance:
+                cached = matching(prepared.get("preview"))
+                if cached is not None:
+                    cached["_packageSource"] = "prepared_cache"
+                    cached["_agentInstanceId"] = instance
+            if cached is None and instance is not None and observed_account == account_key:
+                process_cache = getattr(self, "package_team_cache", {}).get(key)
+                if isinstance(process_cache, dict) and process_cache.get("_agentInstanceId") == instance:
+                    cached = matching(process_cache)
+                    if cached is not None:
+                        cached["_packageSource"] = "python_cache"
+        if cached is not None or not read_shared or not account_key:
+            return cached
+        with self.lock:
+            try:
+                with AgentIpc(pid) as ipc:
+                    before, account = ipc.header(), ipc.account()
+                    values = (ipc.team_data(), ipc.team_preview())
+                    header = ipc.header()
+                if not self._stable_package_header(before, header):
+                    self._observe_package_agent(pid, None, None)
+                    return None
+                instance, observed_account = self._observe_package_agent(pid, header, account)
+                if instance is None or observed_account != account_key:
+                    return None
+                for raw in values:
+                    if not isinstance(raw, dict) or str(raw.get("userId")) != account_key:
+                        continue
+                    cached = matching(decode_preview(raw))
+                    if cached is not None:
+                        cached["_packageSource"] = "late_slot" if raw.get("type") == "team_data" else "published_preview"
+                        cached["_agentInstanceId"] = instance
+                        if not hasattr(self, "package_team_cache"):
+                            self.package_team_cache = {}
+                        self.package_team_cache[key] = copy.deepcopy(cached)
+                        return cached
+            except (FileNotFoundError, OSError, ValueError):
+                self._observe_package_agent(pid, None, None)
+        return None
+
+    def _package_live_read_key(self, pid: Any, hero_ids: list[int], boss_mode: str,
+                               strategy_id: str | None = None) -> tuple[Any, ...] | None:
+        """Fail closed outside an idle, verified preparation screen."""
+        account_key = self.strategy_account().key
+        def deferred(reason: str, instance: Any = None) -> None:
+            if strategy_id is not None:
+                self._package_defer(reason, pid, hero_ids, boss_mode, strategy_id, instance)
+        if not account_key:
+            return deferred("account_unverified")
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            return deferred("pid_unavailable")
+        if self.stopping.is_set() or self.controller.snapshot().get("running"):
+            return deferred("controller_busy_or_stopping")
+        with self.lock:
+            try:
+                with AgentIpc(pid) as ipc:
+                    before, account, lifecycle = ipc.header(), ipc.account(), ipc.lifecycle()
+                    header = ipc.header()
+            except (FileNotFoundError, OSError, ValueError):
+                self._observe_package_agent(pid, None, None)
+                return deferred("agent_state_unavailable")
+            if not self._stable_package_header(before, header):
+                self._observe_package_agent(pid, None, None)
+                return deferred("agent_session_changed")
+            self._observe_package_agent(pid, header, account)
+            instance = header.get("instanceId")
+            observed_selection = lifecycle.get("selection") if isinstance(lifecycle, dict) else None
+            observed_selection = observed_selection if isinstance(observed_selection, dict) else {}
+            observed_lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+            stamp = (observed_lifecycle.get("screen"), observed_selection.get("context"),
+                     observed_lifecycle.get("battleGeneration"), observed_lifecycle.get("sessionId"),
+                     observed_lifecycle.get("takeoverState"), (account or {}).get("userId") if isinstance(account, dict) else None)
+            if not hasattr(self, "package_read_states"):
+                self.package_read_states = {}
+            previous_stamp, epoch = self.package_read_states.get(pid, (None, 0))
+            self.package_read_states[pid] = (stamp, epoch + (stamp != previous_stamp))
+        if not header.get("compatible") or not header.get("ready"):
+            return deferred("agent_incompatible_or_not_ready", instance)
+        if not isinstance(instance, int) or isinstance(instance, bool) or instance <= 0:
+            return deferred("agent_instance_unverified", instance)
+        if not isinstance(account, dict) or str(account.get("userId")) != account_key:
+            return deferred("account_mismatch", instance)
+        if not isinstance(lifecycle, dict) or lifecycle.get("screen") != "team_selection" \
+                or lifecycle.get("takeoverState") not in {"idle", "interrupted"}:
+            return deferred("screen_not_idle_preparation", instance)
+        selection = lifecycle.get("selection") or {}
+        if not isinstance(selection, dict) or selection.get("valid") is not True \
+                or selection.get("bossMode") != boss_mode \
+                or not isinstance(selection.get("context"), int) or isinstance(selection["context"], bool) \
+                or selection["context"] <= 0:
+            return deferred("selection_unverified_or_other_boss", instance)
+        return (account_key, pid, header["instanceId"], boss_mode, tuple(sorted(hero_ids)))
+
+    def _package_defer(self, reason: str, pid: Any, hero_ids: list[int], boss_mode: str,
+                       strategy_id: str, instance: Any = None) -> None:
+        key = (self.strategy_account().key, pid, boss_mode, strategy_id, tuple(sorted(hero_ids)))
+        with self.lock:
+            if not hasattr(self, "package_deferred"):
+                self.package_deferred = {}
+            if self.package_deferred.get(key) == reason:
+                return
+            self.package_deferred[key] = reason
+        self._package_log(f"strategy_package_deferred account={key[0]} boss={boss_mode} strategy={strategy_id} "
+                          f"pid={pid} agentInstanceId={instance} reason={reason}")
+
+    def _read_package_preview_once(self, pid: Any, hero_ids: list[int], boss_mode: str,
+                                   strategy_id: str = "") -> dict[str, Any] | None:
+        key = self._package_live_read_key(pid, hero_ids, boss_mode, strategy_id)
+        if key is None:
+            return None
+        with self.lock:
+            if not hasattr(self, "package_read_attempts"):
+                self.package_read_attempts = set()
+                self.package_reads_inflight = set()
+            if not hasattr(self, "package_read_counts"):
+                self.package_read_counts = {}
+                self.package_read_rejections = {}
+            epoch = self.package_read_states.get(pid, (None, 0))[1]
+            # A definitive rejection leaves no delayed work. Retry it only
+            # after a screen/context/account transition, and at most twice.
+            rejected_epoch = self.package_read_rejections.get(key)
+            if rejected_epoch is not None and rejected_epoch != epoch \
+                    and self.package_read_counts.get(key, 0) < 3:
+                self.package_read_attempts.discard(key)
+                self.package_read_rejections.pop(key, None)
+            if key in self.package_read_attempts or pid in self.package_reads_inflight:
+                reason = "request_inflight" if pid in self.package_reads_inflight else \
+                    "retry_limit_reached" if self.package_read_counts.get(key, 0) >= 3 else \
+                    "waiting_for_state_change" if key in self.package_read_rejections else "awaiting_existing_response"
+                self._package_defer(reason, pid, hero_ids, boss_mode, strategy_id, key[2])
+                return None
+            self.package_read_attempts.add(key)
+            self.package_reads_inflight.add(pid)
+            self.package_read_counts[key] = self.package_read_counts.get(key, 0) + 1
+        try:
+            # Check the screen/account again immediately before dispatch. The
+            # native handler also revalidates after the queued message arrives.
+            if self._package_live_read_key(pid, hero_ids, boss_mode) != key:
+                with self.lock:
+                    self.package_read_attempts.discard(key)
+                    self.package_read_counts[key] -= 1
+                return None
+            epoch = self.package_read_states.get(pid, (None, 0))[1]
+            self._package_log(f"strategy_package_request_begin account={key[0]} boss={boss_mode} "
+                              f"strategy={strategy_id} pid={pid} agentInstanceId={key[2]} "
+                              f"attempt={self.package_read_counts[key]} timeout=3.0")
+            preview = self.team_data(pid, hero_ids, boss_mode, timeout=3.0)
+            if self._package_live_read_key(pid, hero_ids, boss_mode) != key:
+                return None
+            if str(preview.get("_sourceUserId")) != key[0]:
+                with self.lock:
+                    self.package_read_rejections[key] = epoch
+                self._package_defer("snapshot_account_unverified", pid, hero_ids, boss_mode, strategy_id, key[2])
+                return None
+            preview["_packageSource"] = "request"
+            preview["_agentInstanceId"] = key[2]
+            with self.lock:
+                if self.package_agent_sessions.get(pid) != (key[2], key[0]):
+                    return None
+                if not hasattr(self, "package_team_cache"):
+                    self.package_team_cache = {}
+                self.package_team_cache[(key[0], pid, boss_mode, tuple(sorted(hero_ids)))] = copy.deepcopy(preview)
+            return preview
+        except (TeamSetupError, OSError, ValueError) as error:
+            if isinstance(error, (AgentRequestNotQueued, TeamDataReadRejected)):
+                with self.lock:
+                    self.package_read_rejections[key] = epoch
+                self._package_live_read_key(pid, hero_ids, boss_mode)
+            outcome = "not_queued" if isinstance(error, AgentRequestNotQueued) else \
+                "completed_rejection" if isinstance(error, TeamDataReadRejected) else "timeout_or_unknown"
+            self._package_log(f"strategy_package_request_failed account={key[0]} boss={boss_mode} "
+                              f"strategy={strategy_id} pid={pid} agentInstanceId={key[2]} outcome={outcome}: {error}")
+            raise
+        finally:
+            with self.lock:
+                self.package_reads_inflight.discard(pid)
 
     def _package_log(self, message: str) -> None:
         logger = getattr(self, "package_log", None)
@@ -889,6 +1162,7 @@ class ChimeraService:
                 store, boss_mode, config, strategy_id=strategy_id
             )
             write_strategy_store(self.store_path(), updated)
+            self._package_local_save_log(config, boss_mode, pid, strategy_id)
             return self.strategy_bundle(boss_mode, updated)
 
     def rename_strategy_profile(
@@ -1322,15 +1596,18 @@ class ChimeraService:
         status_effects = rotation.get("statusEffects")
         if isinstance(status_effects, list):
             updated_effects = runtime_effect_options(status_effects)
+            listed = [dict(effect) for effect in status_effects if isinstance(effect, dict)]
             with self.lock:
-                self.status_effect_catalog = [
-                    dict(effect)
-                    for effect in status_effects
-                    if isinstance(effect, dict)
-                ]
+                changed_list = listed != self.status_effect_catalog
+                self.status_effect_catalog = listed
                 if updated_effects != self.effect_options:
                     self.effect_options = updated_effects
                     self._catalog_changed()
+            if changed_list and listed:
+                try:
+                    atomic_write_json(STATUS_EFFECTS, listed)
+                except OSError as error:
+                    desktop_lifecycle_log(f"status_effects_save_failed {error}")
         self.update_hydra_heads(rotation.get("hydraHeads"))
         self.boss_skills.learn(listed_skills(rotation.get("hydraHeads")), static=True)
         catalog = rotation.get("catalog")
@@ -1602,9 +1879,9 @@ class ChimeraService:
         }
         health = storage_health(self.store_path())
         store = self.strategy_store() if health["ok"] else default_store()
+        prepared = self.prepared_team_preview(pid)
         if health["ok"]:
             self._refresh_pending_package(store, boss_mode, pid)
-        prepared = self.prepared_team_preview(pid)
         sources = self.team_sources(store, boss_mode, pid)
         return {
             "pid": pid, "bossMode": boss_mode,
@@ -1637,18 +1914,32 @@ class ChimeraService:
         if not isinstance(ids, list) or len(ids) != TEAM_SIZE[boss_mode]:
             return
         status = package_status(config, boss_mode)
-        if status["status"] == "complete" and not (config.get("simulationPackage") or {}).get("lastReadIssue"):
+        if status["status"] == "complete":
             return
         account = self.strategy_account()
         key = (account.key, boss_mode, strategy_id)
         with self.lock:
+            if not hasattr(self, "package_workers"):
+                self.package_workers = set()
+            if key in self.package_workers:
+                return
             if time.monotonic() - refreshes.get(key, float("-inf")) < 10:
                 return
-            if self.controller.snapshot(boss_mode).get("running"):
+            if self.controller.snapshot().get("running"):
                 return
             refreshes[key] = time.monotonic()
+            self.package_workers.add(key)
         observed_revision = revision(config)
         observed_package = revision({"package": config.get("simulationPackage")})
+        queued = (*key, observed_revision, observed_package)
+        with self.lock:
+            if not hasattr(self, "package_queued"):
+                self.package_queued = set()
+            if queued not in self.package_queued:
+                self.package_queued.add(queued)
+                prepared = getattr(self, "team_previews", {}).get(pid) or {}
+                self._package_log(f"strategy_package_refresh_queued account={account.key} boss={boss_mode} "
+                                  f"strategy={strategy_id} pid={pid} agentInstanceId={prepared.get('agentInstanceId')}")
 
         def work() -> None:
             self._store_context.account = account
@@ -1661,16 +1952,16 @@ class ChimeraService:
                     current = usable_account_state(pid, latest_account_state(pid))
                     if not isinstance(current, dict) or str(current.get("userId")) != account.key:
                         return
-                refreshed = self._package_strategy(config, boss_mode, pid, config, strategy_id)
-                before = {key: value for key, value in (config.get("simulationPackage") or {}).items() if key not in {"savedAt", "lastReadIssue"}}
-                after = {key: value for key, value in (refreshed.get("simulationPackage") or {}).items() if key not in {"savedAt", "lastReadIssue"}}
+                refreshed = self._package_strategy(config, boss_mode, pid, config, strategy_id, allow_live=True)
+                before = {key: value for key, value in (config.get("simulationPackage") or {}).items() if key != "savedAt"}
+                after = {key: value for key, value in (refreshed.get("simulationPackage") or {}).items() if key != "savedAt"}
                 if before == after or self.stopping.is_set():
                     return
                 if isinstance(pid, int) and account.key:
                     current = usable_account_state(pid, latest_account_state(pid))
                     if not isinstance(current, dict) or str(current.get("userId")) != account.key:
                         return
-                if self.controller.snapshot(boss_mode).get("running"):
+                if self.controller.snapshot().get("running"):
                     return
                 with self.lock:
                     latest = self.strategy_store()
@@ -1685,34 +1976,61 @@ class ChimeraService:
                     updated["modes"][boss_mode]["activeStrategyId"] = selected
                     updated["activeMode"] = active_mode
                     write_strategy_store(self.store_path(), updated)
-            except (OSError, ValueError) as error:
+                    status = package_status(refreshed, boss_mode)
+                    cache_key = (account.key, pid, boss_mode, tuple(sorted(team_hero_ids(config.get("team")))))
+                    cached_preview = getattr(self, "package_team_cache", {}).get(cache_key) or {}
+                    prepared = getattr(self, "team_previews", {}).get(pid) or {}
+                    instance = cached_preview.get("_agentInstanceId", prepared.get("agentInstanceId"))
+                    self._package_log(f"strategy_package_refresh_committed account={account.key} boss={boss_mode} "
+                                      f"strategy={strategy_id} pid={pid} agentInstanceId={instance} "
+                                      f"status={status['status']} missing={','.join(status['missing'])}")
+            except Exception as error:
                 self._package_log(f"strategy_package_refresh_failed boss={boss_mode} strategy={strategy_id}: {error}")
-        threading.Thread(target=work, name="strategy-package-refresh", daemon=True).start()
+            finally:
+                with self.lock:
+                    self.package_workers.discard(key)
+        try:
+            threading.Thread(target=work, name="strategy-package-refresh", daemon=True).start()
+        except Exception:
+            with self.lock:
+                self.package_workers.discard(key)
+            raise
 
     def prepared_team_preview(self, pid: int | None) -> dict[str, Any] | None:
         """The preparation-screen team with its battle-setup parts (internal; not for the interface)."""
         if not isinstance(pid, int) or isinstance(pid, bool):
             return None
-        try:
-            with AgentIpc(pid) as ipc:
-                raw = ipc.team_preview()
-        except (FileNotFoundError, ValueError, OSError):
-            raw = None
-        cached = self.team_previews.get(pid)
-        tick = raw.get("observedAtTick") if isinstance(raw, dict) else None
-        if raw is not None and (cached is None or cached.get("tick") != tick):
-            preview = decode_preview(raw)
+        with self.lock:
+            # Serialize observation and decoding: an older poll must not
+            # publish its preview after a newer session or team was observed.
+            try:
+                with AgentIpc(pid) as ipc:
+                    before, account, raw = ipc.header(), ipc.account(), ipc.team_preview()
+                    header = ipc.header()
+            except (FileNotFoundError, ValueError, OSError):
+                raw, account, header, before = None, None, {}, {}
+            if not self._stable_package_header(before, header):
+                raw, account, header = None, None, {}
+            instance, account_key = self._observe_package_agent(pid, header, account)
+            cached = self.team_previews.get(pid)
+            tick = raw.get("observedAtTick") if isinstance(raw, dict) else None
+            source_key = str(raw.get("userId")) if isinstance(raw, dict) and raw.get("userId") else None
+            trusted_account = account_key if instance is not None and source_key == account_key else None
+            if raw is None or cached is None or cached.get("tick") != tick \
+                    or cached.get("accountKey") != trusted_account or cached.get("agentInstanceId") != instance:
+                preview = decode_preview(raw) if trusted_account is not None else None
+                if preview is not None:
+                    preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    self.check_team_setups(preview)
+                cached = {"tick": tick, "preview": preview,
+                          "accountKey": trusted_account, "agentInstanceId": instance}
+                self.team_previews[pid] = cached
+            preview = cached.get("preview") if cached else None
             if preview is not None:
-                preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                self.check_team_setups(preview)
-            cached = {"tick": tick, "preview": preview}
-            self.team_previews[pid] = cached
-        preview = cached.get("preview") if cached else None
-        if preview is not None:
-            public = public_preview(preview)
-            if public is not None:
-                self.team_snapshots.remember(public)
-        return preview
+                public = public_preview(preview)
+                if public is not None:
+                    self.team_snapshots.remember(public)
+            return preview
 
     def team_preview(self, pid: int | None) -> dict[str, Any] | None:
         """The preparation-screen team of this account (hero-screen stats, sets, masteries)."""
@@ -1750,6 +2068,9 @@ class ChimeraService:
             boss_mode, team.get("heroTypeIds"), bound=bool(team_hero_ids(team)),
             saved=saved,
             reference=reference, check=latest_check(boss_mode))}
+        # The account bonuses saved with the strategy group let its team simulate with the game closed.
+        if sources.get("strategy"):
+            sources["strategy"]["offlineReady"] = bool(package.get("team") and package.get("accountBonuses"))
         if sources.get("author"):
             sources["author"]["offlineReady"] = bool(package.get("team") and package.get("accountBonuses"))
             sources["author"]["matches"] = ordered_team_matches(sources["author"]["heroTypeIds"], team.get("heroTypeIds"))
@@ -1771,7 +2092,7 @@ class ChimeraService:
         except (OSError, ValueError) as error:
             raise TeamSetupError(ui_text("web.notRead", what=what, error=error)) from error
         if not queued.get("queued"):
-            raise TeamSetupError(ui_text("web.readBusy", what=what, get=queued.get('agentResult')))
+            raise AgentRequestNotQueued(ui_text("web.readBusy", what=what, get=queued.get('agentResult')))
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -1833,12 +2154,13 @@ class ChimeraService:
         if preview is None or preview.get("status") != "captured":
             reason = (preview or {}).get("reason") or "unknown"
             if reason == "heroes_not_found":
-                raise TeamSetupError(ui_text("web.teamNotOnAccount"))
-            raise TeamSetupError(ui_text("web.teamGearNotRead", reason=reason))
+                raise TeamDataReadRejected(ui_text("web.teamNotOnAccount"))
+            raise TeamDataReadRejected(ui_text("web.teamGearNotRead", reason=reason))
         found = [hero.get("heroId") for hero in preview.get("heroes") or []]
         if sorted(found) != sorted(hero_ids):
-            raise TeamSetupError(ui_text("web.partOfTeamNotOnAccount"))
+            raise TeamDataReadRejected(ui_text("web.partOfTeamNotOnAccount"))
         preview["capturedAt"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        preview["_sourceUserId"] = raw.get("userId")
         return preview
 
     def remember_strategy_team(self, pid: Any, boss_mode: str, strategy_id: str) -> bool:
@@ -1922,7 +2244,7 @@ class ChimeraService:
 
     def simulation_overview(self) -> dict[str, Any]:
         return self._package_overview("chimera", {"captures": list_chimera_captures(8), "job": self.simulations.status(),
-                "recent": recent_chimera_simulations(8),
+                "recent": recent_chimera_simulations(8), "difficultyHealth": chimera_difficulty_health(),
                 "battleForecasts": recent_chimera_simulations(6, root=BATTLE_FORECAST_ROOT)})
 
     def hydra_simulation_overview(self) -> dict[str, Any]:
@@ -1958,13 +2280,15 @@ class ChimeraService:
         if not isinstance(runs, int) or isinstance(runs, bool):
             raise ValueError(ui_text("web.badRunCount"))
         pid = body.get("pid")
+        difficulty = body.get("difficulty")
         return self.hydra_simulations.start(
             config,
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
             team=self.simulation_team(body, config, "hydra"),
-            capture_folder=self._portable_capture(body, "hydra"))
+            capture_folder=self._portable_capture(body, "hydra"),
+            difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None)
 
     def start_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
         config = normalized_strategy(body.get("config"), {}, "chimera")
@@ -1972,13 +2296,16 @@ class ChimeraService:
         if not isinstance(runs, int) or isinstance(runs, bool):
             raise ValueError(ui_text("web.badRunCount"))
         pid = body.get("pid")
+        difficulty, health = body.get("difficulty"), body.get("bossHealth")
         return self.simulations.start(
             config,
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
             team=self.simulation_team(body, config, "chimera"),
-            capture_folder=self._portable_capture(body, "chimera"))
+            capture_folder=self._portable_capture(body, "chimera"),
+            difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None,
+            boss_health=float(health) if isinstance(health, (int, float)) and not isinstance(health, bool) else None)
 
     def bootstrap(
         self, pid: int | None = None, force: bool = False,

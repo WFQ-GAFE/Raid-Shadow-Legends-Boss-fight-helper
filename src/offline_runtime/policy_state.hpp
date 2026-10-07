@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <cstdint>
 #include <map>
@@ -547,9 +548,36 @@ private:
             void* digestion = model_.get<void*>(effect, "DigestionInfo");
             if (digestion)
                 out << ",\"devouredHeroId\":" << model_.get<int>(digestion, "DevouredHeroId");
+            append_absorb(out, effect);
             out << '}';
         }
         out << ']';
+    }
+
+    // What is left of an absorbing buff, for the reports: shield and magma shield
+    // amounts, a hit counter shield's hits, stone skin strength, a cocoon (life
+    // barrier) and golden armor. Fixed values are Q32.32; Nullable<Fixed> is
+    // HasValue, padding, value. Only the fields the effect carries are written.
+    void append_absorb(std::ostringstream& out, void* effect) const {
+        auto amount = [](std::int64_t raw) { return std::llround(static_cast<double>(raw) / 4294967296.0); };
+        auto nullable_fixed = [&](const char* field, const char* label) {
+            const auto raw = model_.get<std::array<unsigned char, 16>>(effect, field);
+            if (!raw[0]) return;
+            std::int64_t value = 0;
+            std::memcpy(&value, raw.data() + 8, 8);
+            out << ",\"" << label << "\":" << amount(value);
+        };
+        nullable_fixed("ShieldValue", "shieldValue");
+        nullable_fixed("InitializedShieldValue", "shieldInitial");
+        nullable_fixed("StoneSkinStrengthValue", "stoneSkinValue");
+        nullable_fixed("StoneSkinInitialValue", "stoneSkinInitial");
+        nullable_fixed("CocoonValue", "cocoonValue");
+        if (void* hits = model_.get<void*>(effect, "HitShieldState"))
+            out << ",\"hitShieldHits\":" << model_.get<int>(hits, "HitsLeft")
+                << ",\"hitShieldInitial\":" << model_.get<int>(hits, "InitialHitsNeeded");
+        if (void* golden = model_.get<void*>(effect, "GoldenArmorInfo"))
+            out << ",\"goldenArmorValue\":" << amount(model_.get<std::int64_t>(golden, "AbsorbValue"))
+                << ",\"goldenArmorInitial\":" << amount(model_.get<std::int64_t>(golden, "InitialAbsorbValue"));
     }
 
     // read_hydra_digestion_state: first effect with a non-negative devoured hero.

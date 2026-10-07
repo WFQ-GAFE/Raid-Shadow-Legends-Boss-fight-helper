@@ -21,8 +21,10 @@ from hydra_forecast_live import PROJECT_ROOT
 from strategy_storage import atomic_write_bytes
 from ui_text import ui_text
 
-SCHEMA = 2
-HERO_DATA_ROOT = PROJECT_ROOT / "cache" / "hero-data"
+SCHEMA = 4  # 3: skills carry their targets; 4: the skill whose level they use
+# One folder per schema: versions sharing the data folder keep their own file
+# instead of rebuilding each other's (1.1.2 reads schema 2 from cache/hero-data).
+HERO_DATA_ROOT = PROJECT_ROOT / "cache" / "hero-data" / f"schema-{SCHEMA}"
 KEEP_FILES = 2
 RECHECK_SECONDS = 600.0
 PROBE_TIMEOUT_SECONDS = 240
@@ -132,6 +134,14 @@ def compact_skill(skill: dict[str, Any], texts: dict[str, Any]) -> dict[str, Any
         out["passive"] = True
     if skill.get("Visibility") in HIDDEN_SKILLS:
         out["hidden"] = True
+    if skill.get("Targets") is not None and targets:
+        # Who the skill can be cast on (SkillTargets): "AliveEnemies", "AliveAllies", "Producer" (itself)...
+        out["targets"] = targets
+    level_of = nullable(skill.get("UseLevelOfSkillId"))
+    if isinstance(level_of, int) and level_of > 0:
+        # A hidden part of another skill: battles use that skill's level (the
+        # client keeps this one at 1; see team_setups.hero_slot_setup).
+        out["levelOf"] = level_of
     damage: list[str] = []
     damage_scopes: list[str] = []
     scaling: set[str] = set()
@@ -441,4 +451,23 @@ class HeroDataService:
             self.building = False
 
 
-__all__ = ["HeroDataError", "HeroDataService", "compact", "compact_skill", "max_level_stats", "run_probe"]
+_LEVEL_LINKS: tuple[tuple[str, int], dict[int, int]] | None = None
+
+
+def skill_level_links(root: Path = HERO_DATA_ROOT) -> dict[int, int]:
+    """Skill id -> the skill whose level it uses, from the newest saved hero data ({} before the first build)."""
+    global _LEVEL_LINKS
+    try:
+        newest = max(root.glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+        key = (str(newest), newest.stat().st_mtime_ns)
+    except (OSError, ValueError):
+        return {}
+    if _LEVEL_LINKS is None or _LEVEL_LINKS[0] != key:
+        skills = (HeroDataService._load(newest) or {}).get("skills") or {}
+        _LEVEL_LINKS = (key, {int(skill_id): skill["levelOf"] for skill_id, skill in skills.items()
+                              if isinstance(skill, dict) and isinstance(skill.get("levelOf"), int)})
+    return _LEVEL_LINKS[1]
+
+
+__all__ = ["HeroDataError", "HeroDataService", "compact", "compact_skill", "max_level_stats", "run_probe",
+           "skill_level_links"]

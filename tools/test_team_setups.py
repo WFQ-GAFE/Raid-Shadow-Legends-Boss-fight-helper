@@ -79,6 +79,29 @@ def test_assembled_setup_has_the_server_shape_and_neutral_priorities() -> None:
     assert plain["w"] == 0 and "c" not in plain and plain["z"] == BUILDING and len(plain["p"]["r"]) == 1
 
 
+def test_a_hidden_skill_part_fights_at_the_level_of_its_skill() -> None:
+    # Lydia: the client keeps 47105 (a hidden part of her A1 47101, UseLevelOfSkillId) at 1; the server sends 5.
+    lydia = hero(21597, 4716)
+    lydia["model"]["skills"] = [{"i": 47101, "l": 5}, {"i": 47103, "l": 6}, {"i": 47105, "l": 1}, {"i": 47106, "l": 1}]
+    setup = hero_slot_setup(lydia, slot=3, owner_id=77, area=None, rule="building", skill_links={47105: 47101})
+    assert setup["s"] == [{"i": 47101, "l": 5}, {"i": 47103, "l": 6}, {"i": 47105, "l": 5}, {"i": 47106, "l": 1}]
+    # The hero's own record is untouched, and a link to a skill the hero lacks changes nothing.
+    assert lydia["model"]["skills"][2] == {"i": 47105, "l": 1}
+    assert hero_slot_setup(lydia, slot=3, owner_id=77, area=None, rule="building", skill_links={47106: 99999})["s"][3]["l"] == 1
+
+
+def test_hero_data_names_the_skill_whose_level_a_skill_uses() -> None:
+    from hero_data import compact_skill, skill_level_links
+    assert compact_skill({"Id": 47105, "UseLevelOfSkillId": {"hasValue": True, "value": 47101}}, {})["levelOf"] == 47101
+    assert "levelOf" not in compact_skill({"Id": 47101}, {})
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        assert skill_level_links(root) == {}
+        (root / "a.json").write_text(json.dumps({"schema": 4, "skills": {"47105": {"levelOf": 47101}, "47101": {}}}),
+                                     encoding="utf-8")
+        assert skill_level_links(root) == {47105: 47101}
+
+
 def test_differences_names_the_paths() -> None:
     assert differences({"a": 1, "b": [1, 2]}, {"a": 1, "b": [1, 2]}) == []
     assert differences({"a": 1, "b": [1, 3], "c": 0}, {"a": 2, "b": [1, 2]}) == ["a", "b[1]", "c"]

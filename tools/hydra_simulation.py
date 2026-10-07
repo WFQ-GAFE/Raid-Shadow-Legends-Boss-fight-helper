@@ -24,7 +24,8 @@ from typing import Any, Callable
 import chimera_controller as controller
 from hydra_forecast import ForecastError, _command_line, evaluate_conditions, mark_stream, swallow_stream
 from hydra_offline_policy import HydraOfflinePolicySession
-from simulation_common import action_uses, battle_snapshot, decision_rule_index, opening_stats, stuck_report
+from simulation_common import (action_uses, attach_target_misses, battle_snapshot, decision_rule_index, opening_stats,
+                               stuck_report, target_misses)
 
 
 SCHEMA = 1
@@ -47,6 +48,8 @@ class HydraSimulationSession(HydraOfflinePolicySession):
         self.last_state = None
         decision = super().decide(supplied_state)
         state = self.last_state or (supplied_state if isinstance(supplied_state, dict) else {})
+        if state.get("_targetMisses"):
+            decision["targetMisses"] = state["_targetMisses"]
         if decision.get("status") == "command":
             decision["ruleIndex"] = decision_rule_index(self.strategy, state, decision.get("rule"))
             if any(isinstance(entry, dict) and entry.get("outcome") == "reservation_released"
@@ -149,6 +152,7 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                 "skillTypeId": command.get("skillTypeId"), "targetId": command.get("targetId"),
                 "rule": decision.get("rule"), "ruleIndex": decision.get("ruleIndex"),
                 **({"reservationReleased": True} if decision.get("reservationReleased") else {}),
+                **({"targetMisses": decision["targetMisses"]} if decision.get("targetMisses") else {}),
                 **({"stuck": decision["stuck"]} if isinstance(decision.get("stuck"), dict) else {})})
             if on_progress is not None and len(decisions) % 20 == 1:
                 on_progress({"decisions": len(decisions), "turn": battle.get("turn")})
@@ -350,6 +354,7 @@ def summarize_run(result: dict[str, Any], strategy: dict[str, Any]) -> dict[str,
         "damage": engine.get("hydraDamage"), "commands": engine.get("commands"),
         "stuck": result.get("stuck"),
         "reservationReleases": sum(1 for decision in decisions if decision.get("reservationReleased")),
+        "targetMisses": target_misses(decisions),
         "marks": [{"markIndex": mark.get("markIndex"), "heroTypeId": mark.get("heroTypeId"),
                    "applyTurn": mark.get("applyTurn"),
                    # Whether this mark ended in a swallow (None: no swallow data).
@@ -420,6 +425,7 @@ def aggregate(summaries: list[dict[str, Any]], strategy: dict[str, Any]) -> dict
         entry["damageShare"] = round(entry["damage"] / total_damage, 4) if total_damage else 0.0
         entry["trialGains"] = {}
         entry.pop("damage", None)
+    attach_target_misses(rule_list, finished)
     stuck_runs = [{"index": item.get("index"), "seed": item.get("seed"), "exact": item.get("exact"),
                    **{key: item["stuck"].get(key) for key in ("reason", "turn", "hydraTurns", "activeHeroTypeId", "rule")}}
                   for item in finished if item.get("status") == "stuck" and isinstance(item.get("stuck"), dict)]
@@ -470,6 +476,7 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
             "uses": action_uses(row.get("uses")), "marked": marks_by_command.get(index, []),
             "rule": decision.get("rule"), "ruleIndex": decision.get("ruleIndex"),
             "reservationReleased": decision.get("reservationReleased") is True,
+            **({"targetMisses": decision["targetMisses"]} if decision.get("targetMisses") else {}),
             **({"state": decision["snapshot"]} if isinstance(decision.get("snapshot"), dict) else {}),
         })
     return rows

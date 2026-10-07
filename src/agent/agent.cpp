@@ -3,6 +3,7 @@
 #include "result_confirmation.hpp"
 #include "event_history.hpp"
 #include "battle_random_observation.hpp"
+#include "managed_capture_roots.hpp"
 
 #include <Windows.h>
 #include <MinHook.h>
@@ -62,7 +63,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 7;
-constexpr std::uint64_t kAgentBuildId = 2026092902ULL;
+constexpr std::uint64_t kAgentBuildId = 2026100401ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -201,6 +202,39 @@ struct QueueCommandRequest {
 static_assert(sizeof(QueueCommandRequest) == 104);
 
 Il2CppApi g_api{};
+
+std::uintptr_t capture_root_new(void* object) {
+    __try {
+        return g_api.gchandle_new ? g_api.gchandle_new(object, false) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+void* capture_root_target(std::uintptr_t handle) {
+    __try {
+        return g_api.gchandle_get_target ? g_api.gchandle_get_target(handle) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+void capture_root_free(std::uintptr_t handle) {
+    __try {
+        if (g_api.gchandle_free) g_api.gchandle_free(handle);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+raid::capture::RootApi capture_root_api() {
+    return g_api.gchandle_new && g_api.gchandle_get_target && g_api.gchandle_free
+        ? raid::capture::RootApi{capture_root_new, capture_root_target, capture_root_free}
+        : raid::capture::RootApi{};
+}
+
+bool retain_capture_object(void* object) {
+    return raid::capture::ScopedManagedRoots::keep_current(object);
+}
 std::atomic<void*> g_battle_context{};
 std::atomic<void*> g_command_generator{};
 std::atomic<void*> g_battle_processor{};
@@ -227,6 +261,7 @@ InstanceIntGetter g_get_region_type{};
 InstanceBoolGetter g_get_chimera_enabled{};
 InstanceBoolGetter g_get_enemy_boss_current{};
 std::atomic<void*> g_localizer{};
+FieldInfo* g_localizer_static_field{};
 const MethodInfo* g_localize_method{};
 std::atomic<void*> g_static_data{};
 std::array<std::string, 7> g_chimera_catalog_by_difficulty{};
@@ -394,6 +429,7 @@ struct BonusRequest {
 };
 static_assert(sizeof(BonusRequest) == 56);
 std::atomic<bool> g_bonus_pending{};
+std::atomic<bool> g_bonus_processing{};
 BonusRequest g_pending_bonus{};
 SRWLOCK g_bonus_lock = SRWLOCK_INIT;
 void capture_account_bonuses(const BonusRequest& request);
@@ -414,6 +450,7 @@ SRWLOCK g_takeover_lock = SRWLOCK_INIT;
 std::atomic<LONG> g_internal_action_depth{};
 std::atomic<void*> g_app_model_instance{};
 const MethodInfo* g_app_model_instance_method{};
+const MethodInfo* g_app_model_static_data_method{};
 const MethodInfo* g_app_model_read_user_method{};
 const MethodInfo* g_user_read_guard_dispose_method{};
 
@@ -881,6 +918,17 @@ bool safe_static_field_value(FieldInfo* field, void*& value) {
     }
 }
 
+void* refresh_localizer_instance() {
+    void* value = nullptr;
+    if (!g_localizer_static_field || !safe_static_field_value(g_localizer_static_field, value) ||
+        !value || !retain_capture_object(value)) {
+        g_localizer.store(nullptr, std::memory_order_release);
+        return nullptr;
+    }
+    g_localizer.store(value, std::memory_order_release);
+    return value;
+}
+
 bool safe_static_field_int32(FieldInfo* field, std::int32_t& value) {
     if (!field || !g_api.field_static_get_value) {
         return false;
@@ -982,19 +1030,36 @@ std::string il2cpp_string_utf8(void* value) {
 
 bool find_field_offset(Il2CppClass* klass, const char* primary,
                        const char* fallback, std::size_t& offset) {
-    for (int depth = 0; klass && depth < 8; ++depth) {
-        void* iterator = nullptr;
-        while (FieldInfo* field = g_api.class_get_fields(klass, &iterator)) {
-            const char* name = g_api.field_get_name(field);
-            if (name && (std::strcmp(name, primary) == 0 ||
-                         (fallback && std::strcmp(name, fallback) == 0))) {
-                offset = g_api.field_get_offset(field);
-                return true;
+    if (!primary || !g_api.class_get_fields || !g_api.field_get_name ||
+        !g_api.field_get_offset || !g_api.class_get_parent) return false;
+    // A readable object header can still contain a recycled, invalid class
+    // pointer. The metadata API calls must be inside the same SEH boundary.
+    __try {
+        for (int depth = 0; klass && depth < 8; ++depth) {
+            void* iterator = nullptr;
+            while (FieldInfo* field = g_api.class_get_fields(klass, &iterator)) {
+                const char* name = g_api.field_get_name(field);
+                if (name && (std::strcmp(name, primary) == 0 ||
+                             (fallback && std::strcmp(name, fallback) == 0))) {
+                    offset = g_api.field_get_offset(field);
+                    return true;
+                }
             }
+            klass = g_api.class_get_parent(klass);
         }
-        klass = g_api.class_get_parent(klass);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
     return false;
+}
+
+const MethodInfo* safe_class_method(Il2CppClass* klass, const char* name, int arguments) {
+    if (!klass || !name || !g_api.class_get_method_from_name) return nullptr;
+    __try {
+        return g_api.class_get_method_from_name(klass, name, arguments);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
 }
 
 template <typename T>
@@ -1016,7 +1081,11 @@ bool safe_invoke_localize(void* localizer, const MethodInfo* method,
         void* parameters[2] = {key, &priority};
         void* exception = nullptr;
         *result = g_api.runtime_invoke(method, localizer, parameters, &exception);
-        return !exception && *result;
+        if (exception || !*result || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -1048,7 +1117,7 @@ ResolvedText resolve_shared_text(void* shared_text_key) {
     resolved.key = il2cpp_string_utf8(key);
     resolved.default_value = il2cpp_string_utf8(default_value);
 
-    void* localizer = g_localizer.load(std::memory_order_acquire);
+    void* localizer = refresh_localizer_instance();
     for (std::int32_t priority = 0;
          localizer && g_localize_method && priority < 2; ++priority) {
         void* result = nullptr;
@@ -1631,7 +1700,11 @@ bool safe_runtime_invoke_object(const MethodInfo* method, void* instance,
     __try {
         void* exception = nullptr;
         *result = g_api.runtime_invoke(method, instance, nullptr, &exception);
-        return !exception && *result;
+        if (exception || !*result || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -1645,7 +1718,10 @@ void* refresh_app_model_instance() {
         g_app_model_instance.store(latest, std::memory_order_release);
         return latest;
     }
-    return g_app_model_instance.load(std::memory_order_acquire);
+    // AppModel is destroyed and recreated during scene/account transitions.
+    // A failed singleton lookup must never revive an earlier native pointer.
+    g_app_model_instance.store(nullptr, std::memory_order_release);
+    return nullptr;
 }
 
 bool safe_runtime_lookup_by_id(const MethodInfo* method, void* instance,
@@ -1658,7 +1734,11 @@ bool safe_runtime_lookup_by_id(const MethodInfo* method, void* instance,
         void* parameters[2] = {&type_id, &throw_if_missing};
         void* exception = nullptr;
         *result = g_api.runtime_invoke(method, instance, parameters, &exception);
-        return !exception && *result;
+        if (exception || !*result || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -1686,7 +1766,16 @@ bool safe_runtime_invoke_avatar_url(const MethodInfo* method, void* instance,
 }
 
 void* static_data_section(const char* field_name) {
-    void* static_data = g_static_data.load(std::memory_order_acquire);
+    void* static_data = nullptr;
+    void* app_model = refresh_app_model_instance();
+    if (!app_model || !safe_runtime_invoke_object(
+            g_app_model_static_data_method, app_model, &static_data)) {
+        g_static_data.store(nullptr, std::memory_order_release);
+        return nullptr;
+    }
+    // Read the current owner's StaticData, retained by the enclosing capture.
+    // The probe-time snapshot may already have been collected after a reload.
+    g_static_data.store(static_data, std::memory_order_release);
     Il2CppClass* static_data_class = nullptr;
     std::size_t field_offset = 0;
     void* section = nullptr;
@@ -2372,7 +2461,7 @@ ResolvedText resolve_static_type_name(const char* section_field,
         return {};
     }
     const MethodInfo* method =
-        g_api.class_get_method_from_name(section_class, getter, 2);
+        safe_class_method(section_class, getter, 2);
     void* type_object = nullptr;
     if (!safe_runtime_lookup_by_id(method, section, type_id, &type_object)) {
         return {};
@@ -2403,7 +2492,7 @@ void* find_static_hero_type(std::int32_t hero_type_id) {
     }
 
     const MethodInfo* method =
-        g_api.class_get_method_from_name(section_class, "GetHeroType", 2);
+        safe_class_method(section_class, "GetHeroType", 2);
     void* hero_type = nullptr;
     return safe_runtime_lookup_by_id(method, section, hero_type_id, &hero_type)
                ? hero_type
@@ -2417,7 +2506,7 @@ std::string resolve_hero_avatar(void* hero_type,
         return {};
     }
     const MethodInfo* method =
-        g_api.class_get_method_from_name(hero_class, "AvatarUrl", 2);
+        safe_class_method(hero_class, "AvatarUrl", 2);
     void* value = nullptr;
     if (!safe_runtime_invoke_avatar_url(method, hero_type, form_index, &value)) {
         return {};
@@ -2447,7 +2536,7 @@ void* find_static_skill_type(std::int32_t skill_type_id) {
         return nullptr;
     }
     const MethodInfo* method =
-        g_api.class_get_method_from_name(section_class, "GetSkillType", 2);
+        safe_class_method(section_class, "GetSkillType", 2);
     void* skill_type = nullptr;
     return safe_runtime_lookup_by_id(method, section, skill_type_id,
                                      &skill_type)
@@ -3012,7 +3101,19 @@ bool safe_runtime_invoke_nullable_int_none(const MethodInfo* method,
         void* exception = nullptr;
         *result = g_api.runtime_invoke(method, instance, parameters,
                                        &exception);
-        return !exception && *result;
+        if (exception || !*result) {
+            *result = nullptr;
+            return false;
+        }
+        if (!retain_capture_object(*result)) {
+            // All callers acquire AppModel.ReadUser. Even when a root cannot
+            // be created, the acquired guard must release its managed read lock.
+            void* dispose_exception = nullptr;
+            raw_runtime_invoke_void(g_user_read_guard_dispose_method, *result, &dispose_exception);
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -4042,16 +4143,42 @@ void drain_pending_lifecycle_command() {
 void drain_pending_bonus_request() {
     BonusRequest request{};
     AcquireSRWLockExclusive(&g_bonus_lock);
-    if (!g_bonus_pending.exchange(false, std::memory_order_acq_rel)) {
+    if (g_bonus_processing.load(std::memory_order_acquire) ||
+        !g_bonus_pending.exchange(false, std::memory_order_acq_rel)) {
         ReleaseSRWLockExclusive(&g_bonus_lock);
         return;
     }
     request = g_pending_bonus;
+    g_bonus_processing.store(true, std::memory_order_release);
     ReleaseSRWLockExclusive(&g_bonus_lock);
-    if ((request.kind & 0xFF) == kRequestTeamData) capture_team_data(request);
-    else if ((request.kind & 0xFF) == kRequestRoster) capture_roster(request);
-    else if ((request.kind & 0xFF) == kRequestSkillTypes) capture_skill_types(request);
-    else capture_account_bonuses(request);
+    struct ProcessingRelease {
+        ~ProcessingRelease() { g_bonus_processing.store(false, std::memory_order_release); }
+    } processing_release;
+    try {
+        if ((request.kind & 0xFF) == kRequestTeamData) capture_team_data(request);
+        else if ((request.kind & 0xFF) == kRequestRoster) capture_roster(request);
+        else if ((request.kind & 0xFF) == kRequestSkillTypes) capture_skill_types(request);
+        else capture_account_bonuses(request);
+    } catch (...) {
+        // Optional reads must not unwind through the game's window procedure.
+        try {
+            if (!g_shared_state) return;
+            const auto kind = request.kind & 0xFF;
+            const char* type = kind == kRequestTeamData ? "team_data"
+                : kind == kRequestRoster ? "roster"
+                : kind == kRequestSkillTypes ? "skill_types" : "account_bonuses";
+            std::ostringstream failure;
+            failure << "{\"schema\":" << (kind == kRequestTeamData ? 2 : 1)
+                    << ",\"type\":\"" << type << "\",\"nonce\":" << request.nonce
+                    << ",\"status\":\"unavailable\",\"reason\":\"native_capture_exception\"}";
+            if (kind <= kRequestBonusesByType)
+                publish_shared_json(g_shared_state->account_bonuses, failure.str());
+            else
+                publish_shared_json(g_shared_state->team_data, failure.str());
+            diagnostic("bonus_request_native_exception nonce=" + std::to_string(request.nonce));
+        } catch (...) {
+        }
+    }
 }
 
 LRESULT CALLBACK agent_window_proc(HWND window, UINT message, WPARAM wparam,
@@ -6642,10 +6769,16 @@ TeamPreviewMethods& team_preview_methods() {
 }
 
 bool raw_invoke(const MethodInfo* method, void* instance, void** parameters, void** result) {
+    if (!method || !result || !g_api.runtime_invoke) return false;
+    *result = nullptr;
     __try {
         void* exception = nullptr;
         *result = g_api.runtime_invoke(method, instance, parameters, &exception);
-        return !exception;
+        if (exception || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -6654,12 +6787,21 @@ bool raw_invoke(const MethodInfo* method, void* instance, void** parameters, voi
 
 // A new managed object, constructed with its .ctor.
 bool raw_construct(Il2CppClass* klass, const MethodInfo* constructor, void** parameters, void** result) {
+    if (!klass || !constructor || !result || !g_api.object_new || !g_api.runtime_invoke) return false;
+    *result = nullptr;
     __try {
         *result = g_api.object_new(klass);
-        if (!*result) return false;
+        if (!*result || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
         void* exception = nullptr;
         g_api.runtime_invoke(constructor, *result, parameters, &exception);
-        return !exception;
+        if (exception) {
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -6669,7 +6811,10 @@ bool raw_construct(Il2CppClass* klass, const MethodInfo* constructor, void** par
 bool raw_new_object_array(Il2CppClass* element, void* const* values, std::size_t count, void** result) {
     __try {
         *result = g_api.array_new(element, count);
-        if (!*result) return false;
+        if (!*result || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
         auto** vector = reinterpret_cast<void**>(static_cast<unsigned char*>(*result) + 32);
         for (std::size_t index = 0; index < count; ++index) {
             if (g_api.gc_wbarrier_set_field) g_api.gc_wbarrier_set_field(*result, &vector[index], values[index]);
@@ -6729,7 +6874,11 @@ void* find_list_object_by_int_field(void* list, const char* field, std::int32_t 
 bool raw_new_string(const char* value, Il2CppString** result) {
     __try {
         *result = g_api.string_new(value);
-        return *result != nullptr;
+        if (!*result || !retain_capture_object(*result)) {
+            *result = nullptr;
+            return false;
+        }
+        return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *result = nullptr;
         return false;
@@ -6737,7 +6886,7 @@ bool raw_new_string(const char* value, Il2CppString** result) {
 }
 
 std::string localize_static_key(const std::string& key_text) {
-    void* localizer = g_localizer.load(std::memory_order_acquire);
+    void* localizer = refresh_localizer_instance();
     Il2CppString* key = nullptr;
     if (!localizer || !g_localize_method || !g_api.string_new ||
         !raw_new_string(key_text.c_str(), &key)) return {};
@@ -6985,6 +7134,7 @@ struct TeamJson {
 // Hero-screen data and battle-setup parts of these heroes, read from the
 // account (the preparation screen or a tool request); `head` opens the object.
 TeamJson team_json(void* user, const std::vector<std::int32_t>& hero_ids, const std::string& head) {
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
     TeamJson result;
     std::ostringstream output;
     output << head << ",\"heroIds\":[";
@@ -6995,7 +7145,8 @@ TeamJson team_json(void* user, const std::vector<std::int32_t>& hero_ids, const 
     void* heroes = nullptr;
     void* equipment = nullptr;
     void* relics = nullptr;
-    const char* reason = hero_ids.empty() ? "no_heroes_selected"
+    const char* reason = !roots.ready() || !roots.keep(user) ? "capture_gc_roots_unavailable"
+        : hero_ids.empty() ? "no_heroes_selected"
         : !methods.resolved ? "preview_methods_unavailable"
         : !safe_runtime_invoke_object(methods.get_heroes, user, &heroes) ? "heroes_unavailable"
         : !safe_runtime_invoke_object(methods.get_equipment, user, &equipment) ? "equipment_unavailable"
@@ -7230,9 +7381,30 @@ bool publish_team_json(SharedJsonSlot<524288>& slot, const TeamJson& team, const
     return true;
 }
 
+std::int64_t capture_account_user_id(void* app_model) {
+    void* wrapper = nullptr;
+    void* user = nullptr;
+    std::int64_t user_id = 0;
+    return app_model && safe_read_field(app_model, "_userWrapper", nullptr, wrapper) && wrapper &&
+        safe_read_field(wrapper, "User", nullptr, user) && user &&
+        safe_read_field(user, "Id", nullptr, user_id) && user_id > 0 ? user_id : 0;
+}
+
+struct ScopedUserReadGuard {
+    void*& user;
+    ~ScopedUserReadGuard() noexcept {
+        try {
+            if (user) safe_runtime_invoke_void(g_user_read_guard_dispose_method, user);
+        } catch (...) {
+        }
+    }
+};
+
 void capture_team_preview(void* user, const SelectionSnapshot& snapshot) {
     if (!g_shared_state || !user || !g_game_window ||
         GetWindowThreadProcessId(g_game_window, nullptr) != GetCurrentThreadId()) return;
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
+    if (!roots.ready() || !roots.keep(user)) return;
     std::vector<std::int32_t> hero_ids;
     for (std::size_t index = 0; index < snapshot.hero_count; ++index)
         if (snapshot.hero_ids[index] > 0) hero_ids.push_back(snapshot.hero_ids[index]);
@@ -7244,7 +7416,8 @@ void capture_team_preview(void* user, const SelectionSnapshot& snapshot) {
     g_team_preview_ok = false;
     std::ostringstream head;
     head << "{\"schema\":2,\"type\":\"team_preview\",\"bossMode\":\""
-         << (snapshot.hydra ? "hydra" : "chimera") << "\",\"observedAtTick\":" << now;
+         << (snapshot.hydra ? "hydra" : "chimera") << "\",\"observedAtTick\":" << now
+         << ",\"userId\":" << capture_account_user_id(refresh_app_model_instance());
     g_team_preview_ok = publish_team_json(g_shared_state->team_preview, team_json(user, hero_ids, head.str()),
                                           head.str(), "team_preview", hero_ids.size());
 }
@@ -7253,22 +7426,24 @@ void capture_team_preview(void* user, const SelectionSnapshot& snapshot) {
 // answered on the game thread into the team_data slot. Read only.
 void capture_team_data(const BonusRequest& request) {
     if (!g_shared_state) return;
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
+    void* app_model = roots.ready() ? refresh_app_model_instance() : nullptr;
     std::ostringstream head;
     head << "{\"schema\":2,\"type\":\"team_data\",\"nonce\":" << request.nonce << ",\"bossMode\":\""
-         << ((request.kind & kRequestHydra) ? "hydra" : "chimera") << "\",\"observedAtTick\":" << GetTickCount64();
+         << ((request.kind & kRequestHydra) ? "hydra" : "chimera") << "\",\"observedAtTick\":" << GetTickCount64()
+         << ",\"userId\":" << capture_account_user_id(app_model);
     std::vector<std::int32_t> hero_ids;
     const std::size_t count = (std::min)(static_cast<std::size_t>(request.count), kBonusRequestHeroes);
     for (std::size_t index = 0; index < count; ++index)
         if (request.hero_ids[index] > 0) hero_ids.push_back(request.hero_ids[index]);
     void* user = nullptr;
+    ScopedUserReadGuard guard{user};
     const bool acquired = g_app_model_read_user_method &&
-        safe_runtime_invoke_nullable_int_none(g_app_model_read_user_method, refresh_app_model_instance(), &user) &&
+        safe_runtime_invoke_nullable_int_none(g_app_model_read_user_method, app_model, &user) &&
         user;
     TeamJson team;
     if (acquired) {
         team = team_json(user, hero_ids, head.str());
-        if (!safe_runtime_invoke_void(g_user_read_guard_dispose_method, user))
-            diagnostic("team_data_guard_dispose_failed");
     } else {
         team.payload = head.str() + ",\"status\":\"unavailable\",\"reason\":\"user_unavailable\"}";
         team.reason = "user_unavailable";
@@ -7283,12 +7458,14 @@ void capture_team_data(const BonusRequest& request) {
 // (InBathhouse). Read only.
 void capture_roster(const BonusRequest& request) {
     if (!g_shared_state) return;
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
     std::ostringstream head;
     head << "{\"schema\":1,\"type\":\"roster\",\"nonce\":" << request.nonce
          << ",\"observedAtTick\":" << GetTickCount64();
     TeamPreviewMethods& methods = team_preview_methods();
     void* user = nullptr;
-    const bool acquired = g_app_model_read_user_method &&
+    ScopedUserReadGuard guard{user};
+    const bool acquired = roots.ready() && g_app_model_read_user_method &&
         safe_runtime_invoke_nullable_int_none(g_app_model_read_user_method, refresh_app_model_instance(), &user) &&
         user;
     void* heroes = nullptr;
@@ -7308,6 +7485,7 @@ void capture_roster(const BonusRequest& request) {
         } else {
             output << ",\"status\":\"captured\",\"heroes\":[";
             for (std::size_t index = 0; index < items.count; ++index) {
+                raid::capture::ScopedManagedRoots hero_roots(capture_root_api());
                 void* hero = items.objects[index];
                 if (!hero) continue;
                 std::int32_t type_id = 0, grade = 0, level = 0, empower = 0;
@@ -7341,8 +7519,6 @@ void capture_roster(const BonusRequest& request) {
             output << "]}";
         }
     }
-    if (acquired && !safe_runtime_invoke_void(g_user_read_guard_dispose_method, user))
-        diagnostic("roster_guard_dispose_failed");
     std::string payload = reason
         ? head.str() + ",\"status\":\"unavailable\",\"reason\":\"" + reason + "\"}"
         : output.str();
@@ -7359,6 +7535,13 @@ void capture_roster(const BonusRequest& request) {
 // including hidden and passive ones. Read only.
 void capture_skill_types(const BonusRequest& request) {
     if (!g_shared_state) return;
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
+    if (!roots.ready()) {
+        publish_shared_json(g_shared_state->team_data,
+            "{\"schema\":1,\"type\":\"skill_types\",\"nonce\":" + std::to_string(request.nonce) +
+            ",\"status\":\"unavailable\",\"reason\":\"capture_gc_roots_unavailable\"}");
+        return;
+    }
     std::ostringstream output;
     output << "{\"schema\":1,\"type\":\"skill_types\",\"nonce\":" << request.nonce
            << ",\"observedAtTick\":" << GetTickCount64() << ",\"status\":\"captured\",\"skills\":[";
@@ -7391,12 +7574,14 @@ void capture_skill_types(const BonusRequest& request) {
 // area: what a battle adds to a saved team's own gear (tools/team_setups.py).
 void capture_account_bonuses(const BonusRequest& request) {
     if (!g_shared_state) return;
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
     std::ostringstream output;
     output << "{\"schema\":1,\"type\":\"account_bonuses\",\"nonce\":" << request.nonce
            << ",\"observedAtTick\":" << GetTickCount64();
     TeamPreviewMethods& methods = team_preview_methods();
     void* user = nullptr;
-    const bool acquired = g_app_model_read_user_method &&
+    ScopedUserReadGuard guard{user};
+    const bool acquired = roots.ready() && g_app_model_read_user_method &&
         safe_runtime_invoke_nullable_int_none(g_app_model_read_user_method, refresh_app_model_instance(), &user) &&
         user;
     void* heroes = nullptr;
@@ -7452,8 +7637,6 @@ void capture_account_bonuses(const BonusRequest& request) {
         append_observatory(output, methods, village);
     }
     output << '}';
-    if (acquired && !safe_runtime_invoke_void(g_user_read_guard_dispose_method, user))
-        diagnostic("account_bonuses_guard_dispose_failed");
     const std::string payload = output.str();
     if (payload.size() >= sizeof(g_shared_state->account_bonuses.data)) {
         publish_shared_json(g_shared_state->account_bonuses,
@@ -7476,7 +7659,10 @@ void capture_selection_state(void* self, const char* reason,
     if (!is_chimera && !is_hydra) {
         return;
     }
+    raid::capture::ScopedManagedRoots roots(capture_root_api());
+    if (!roots.ready() || !roots.keep(self) || !roots.keep(selection_user)) return;
     void* acquired_selection_user = nullptr;
+    ScopedUserReadGuard acquired_guard{acquired_selection_user};
     if (selection_user) {
         g_selection_user.store(selection_user, std::memory_order_release);
     } else if (safe_runtime_invoke_nullable_int_none(
@@ -7558,7 +7744,12 @@ void capture_selection_state(void* self, const char* reason,
         }
     }
     if (selection_user && heroes_read && heroes.valid) {
-        capture_team_preview(selection_user, snapshot);
+        try {
+            capture_team_preview(selection_user, snapshot);
+        } catch (...) {
+            // Preview is optional; leave the game's selection callback intact.
+            try { diagnostic("team_preview_native_exception"); } catch (...) {}
+        }
     }
     if (acquired_selection_user) {
         if (!safe_runtime_invoke_void(g_user_read_guard_dispose_method,
@@ -9181,6 +9372,7 @@ void* read_service_locator_localizer(Il2CppApi& api,
     while (FieldInfo* field = api.class_get_fields(service_locator.klass, &iterator)) {
         const char* name = api.field_get_name(field);
         if (name && std::strcmp(name, "<Localizer>k__BackingField") == 0) {
+            g_localizer_static_field = field;
             void* value = nullptr;
             return safe_static_field_value(field, value) ? value : nullptr;
         }
@@ -9533,6 +9725,7 @@ DWORD WINAPI probe_thread(void*) {
         find_method_by_name(api, chimera_extensions.klass,
                             "GetPrizeOffset").method;
     g_app_model_instance_method = app_model_instance_method.method;
+    g_app_model_static_data_method = app_model_static_data_method.method;
     void* app_model_instance = nullptr;
     void* static_data_instance = nullptr;
     if (safe_runtime_invoke_object(app_model_instance_method.method, nullptr,
@@ -10268,6 +10461,29 @@ RaidChimeraAgentQueueCommand(LPVOID parameter) {
     return 1;
 }
 
+DWORD queue_bonus_request(const BonusRequest& request,
+                         decltype(&PostMessageW) post_message) {
+    AcquireSRWLockExclusive(&g_bonus_lock);
+    if (g_bonus_pending.load(std::memory_order_acquire) ||
+        g_bonus_processing.load(std::memory_order_acquire)) {
+        ReleaseSRWLockExclusive(&g_bonus_lock);
+        return 4;
+    }
+    g_pending_bonus = request;
+    g_bonus_pending.store(true, std::memory_order_release);
+    // Dispatch cannot consume this request before posting succeeds, and a
+    // failed post cannot retract a later request with a different nonce.
+    if (!post_message(g_game_window, g_command_message, 0, 0)) {
+        const DWORD error = GetLastError();
+        g_bonus_pending.store(false, std::memory_order_release);
+        ReleaseSRWLockExclusive(&g_bonus_lock);
+        diagnostic("bonus_request_post_failed error=" + std::to_string(error));
+        return 5;
+    }
+    ReleaseSRWLockExclusive(&g_bonus_lock);
+    return 1;
+}
+
 // Read only: queue the current account's bonuses for up to eight heroes
 // (answered by capture_account_bonuses on the game thread).
 extern "C" __declspec(dllexport) DWORD WINAPI
@@ -10285,16 +10501,7 @@ RaidChimeraAgentQueueBonusRequest(LPVOID parameter) {
         request.count == 0 || request.count > kBonusRequestHeroes) {
         return 2;
     }
-    AcquireSRWLockExclusive(&g_bonus_lock);
-    g_pending_bonus = request;
-    g_bonus_pending.store(true, std::memory_order_release);
-    ReleaseSRWLockExclusive(&g_bonus_lock);
-    if (!PostMessageW(g_game_window, g_command_message, 0, 0)) {
-        g_bonus_pending.store(false, std::memory_order_release);
-        diagnostic("bonus_request_post_failed error=" + std::to_string(GetLastError()));
-        return 5;
-    }
-    return 1;
+    return queue_bonus_request(request, PostMessageW);
 }
 
 extern "C" __declspec(dllexport) DWORD WINAPI
@@ -10485,6 +10692,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RaidChimeraAgentShutdown(LPVOID) {
     g_selection_user.store(nullptr, std::memory_order_release);
     g_app_model_instance.store(nullptr, std::memory_order_release);
     g_app_model_instance_method = nullptr;
+    g_app_model_static_data_method = nullptr;
     g_app_model_read_user_method = nullptr;
     g_user_read_guard_dispose_method = nullptr;
     g_result_context.store(nullptr, std::memory_order_release);
@@ -10508,6 +10716,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI RaidChimeraAgentShutdown(LPVOID) {
     g_get_chimera_enabled = nullptr;
     g_get_enemy_boss_current = nullptr;
     g_localizer.store(nullptr, std::memory_order_release);
+    g_localizer_static_field = nullptr;
     g_localize_method = nullptr;
     g_static_data.store(nullptr, std::memory_order_release);
     AcquireSRWLockExclusive(&g_chimera_catalog_lock);

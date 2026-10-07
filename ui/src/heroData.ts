@@ -20,6 +20,8 @@ export type HeroDataSkill = {
   debuffs?: AppliedEffect[]
   special?: string[]
   books?: Record<string, number>
+  // Who the skill can be cast on, the game's SkillTargets: "AliveEnemies", "AliveAllies", "Producer" (itself)...
+  targets?: string
 }
 export type HeroDataForm = { element: string; role: string; stats: number[]; skills: number[] }
 export type HeroAura = { stat: string; value: number; absolute: boolean; area?: string; element?: string; faction?: string }
