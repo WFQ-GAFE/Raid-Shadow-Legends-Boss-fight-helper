@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import App from './App'
 import './styles.css'
 import './rulePanelScroll.css'
+import './uiRefinements.css'
 import { UiErrorBoundary, reportUiError } from './UiErrorBoundary'
 
 window.addEventListener('error', (event) => {

@@ -6660,6 +6660,104 @@ def first_turn_default_decision(
     return None
 
 
+# A rule's target as the editor names it (catalog keys), for "target unavailable" notes.
+TARGET_LABEL_KEYS = {
+    "auto": "app.automaticLegalTarget", "self": "app.self", "lowestHpAlly": "app.lowestHpAlly", "allyPosition": "app.allyInSlot",
+    "allyHeroTypeId": "app.specifiedAlly", "boss": "app.chimeraBoss", "lowestHpBoss": "app.lowestHpHead",
+    "lowestDefenseBoss": "app.lowestDefHead", "hydraHeadPriority": "app.headTypePriorityLowestHp",
+    "hydraHeadSlot": "app.lowestHpHeadOldSlot", "devouringHead": "app.devouringHead", "exposedNeck": "app.exposedNeck",
+}
+
+
+def target_reach(state: dict[str, Any], target_ids: Any) -> str:
+    """Who a skill could be cast on at that moment (the target.reach.* messages)."""
+    heroes = {hero.get("id"): hero for hero in state_entities(state, "heroes")}
+    kinds: set[str] = set()
+    for target_id in target_ids if isinstance(target_ids, list) else []:
+        if target_id == state.get("activeHeroId"):
+            kinds.add("self")
+        elif target_id in heroes:
+            kinds.add("deadAlly" if heroes[target_id].get("dead") is True else "ally")
+        elif isinstance(target_id, int):
+            kinds.add("enemy")
+    if not kinds:
+        return "none"
+    if kinds == {"enemy"}:
+        return "enemy"
+    if "enemy" in kinds:
+        return "any"
+    if kinds == {"deadAlly"}:
+        return "deadAlly"
+    if kinds == {"self"}:
+        return "self"
+    return "ally" if "self" in kinds else "otherAlly"
+
+
+def target_label_text(selector: Any) -> str:
+    """A rule target's name as a message token (the editor's wording)."""
+    selector = {"type": selector} if isinstance(selector, str) else selector if isinstance(selector, dict) else {}
+    key = TARGET_LABEL_KEYS.get(str(selector.get("type")))
+    if key is None:
+        return str(selector.get("type") or "?")
+    return ui_text(key, position=selector.get("position", "?")) if key == "app.allyInSlot" else ui_text(key)
+
+
+def note_target_miss(state: dict[str, Any], rule_name: str, skill: dict[str, Any], selector: Any) -> None:
+    """A cast rule whose skill was ready but whose target could not be chosen (reports and the log)."""
+    misses = state.get("_targetMisses")
+    if not isinstance(misses, list):
+        return
+    misses.append({"rule": rule_name, **target_miss(state, skill, selector)})
+
+
+ENEMY_TARGET_TYPES = frozenset({"boss", "lowestHpBoss", "lowestDefenseBoss", "hydraHeadPriority", "hydraHeadSlot",
+                                "devouringHead", "exposedNeck"})
+
+
+def wrong_target_kind(reach: str, selector_type: Any, at_caster: bool | None = None) -> bool:
+    """Whether one moment's legal targets show the skill can never take this rule target.
+
+    Only certain cases: an ally target for a skill on enemies, an enemy target
+    for one on allies, the caster for one on other or dead allies. A skill on
+    allies whose other allies are dead reaches only the caster for now, so an
+    ally target there is just not available then. at_caster: the named ally
+    (slot or champion) is the caster itself; None when unknown.
+    """
+    if selector_type == "auto" or reach in ("any", "none") or selector_type not in TARGET_LABEL_KEYS:
+        return False
+    if reach == "enemy":
+        return selector_type not in ENEMY_TARGET_TYPES
+    if selector_type in ENEMY_TARGET_TYPES:
+        return True
+    return reach in ("otherAlly", "deadAlly") and (selector_type == "self" or at_caster is True)
+
+
+def selector_at_caster(state: dict[str, Any], selector: Any) -> bool | None:
+    if not isinstance(selector, dict):
+        return None
+    if selector.get("type") == "allyPosition":
+        hero = next((item for item in state_entities(state, "heroes") if item.get("teamPosition") == selector.get("position")), None)
+        return None if hero is None else hero.get("id") == state.get("activeHeroId")
+    if selector.get("type") == "allyHeroTypeId":
+        return selector.get("heroTypeId") == state.get("activeHeroTypeId")
+    return None
+
+
+def target_miss(state: dict[str, Any], skill: dict[str, Any], selector: Any) -> dict[str, Any]:
+    """The skill, the rule's target and who the skill could reach: what the target warnings show.
+
+    Unless the target is of a kind the skill never takes, none was there then
+    (no devouring head, the slot's ally dead): the reach is "absent".
+    """
+    selector_type = selector.get("type") if isinstance(selector, dict) else selector
+    reach = target_reach(state, skill.get("validTargetIds"))
+    if reach != "none" and not wrong_target_kind(reach, selector_type, selector_at_caster(state, selector)):
+        reach = "absent"
+    return {"heroTypeId": state.get("activeHeroTypeId"), "skillTypeId": skill.get("typeId"), "target": selector_type,
+            **({"position": selector["position"]} if isinstance(selector, dict) and "position" in selector else {}),
+            "reach": reach}
+
+
 def decision_from_action(
     name: str,
     action: dict[str, Any],
@@ -6716,6 +6814,7 @@ def decision_from_action(
         return None
     target = select_target(action.get("target", "boss"), skill, state)
     if target is None:
+        note_target_miss(state, name, skill, action.get("target", "boss"))
         return None
     return Decision(
         rule=name,
@@ -6911,6 +7010,8 @@ def evaluate(
         action_type = action.get("type") if isinstance(action, dict) else None
         if action_type in {"defaultSkillPriority", "executeTrialRecipe"}:
             continue
+        misses = state.get("_targetMisses")
+        noted = len(misses) if isinstance(misses, list) else 0
         decision = evaluate_strategy_node(
             rule,
             state,
@@ -6920,6 +7021,9 @@ def evaluate(
             preferred_skill_type_ids=preferred_skill_type_ids,
             planner_state=planner_state,
         )
+        if isinstance(misses, list):
+            for miss in misses[noted:]:
+                miss.setdefault("ruleIndex", rule_index + 1)
         record_rule(state, rule, rule_index, decision, matches, states_for_rule_targets, effect_count_checks)
         if decision is not None:
             return decision
@@ -7020,8 +7124,27 @@ def reserved_skill_fallback_decision(
 # Why a rule did not act (ctl.noDecision.<code>, with expected / actual where the code has them).
 NO_DECISION_REASON_ARGUMENTS = {
     "hero_form_mismatch": ("expected", "actual"), "chimera_form_mismatch": ("actual",), "conditions_not_met": (),
-    "default_no_ready_skill": (), "trial_no_action": (), "skill_unavailable": (),
+    "default_no_ready_skill": (), "trial_no_action": (), "skill_unavailable": (), "target_unavailable": ("target", "reach"),
 }
+
+
+def report_target_misses(state: dict[str, Any], runtime_state: dict[str, Any] | None) -> None:
+    """Log, once per rule and battle, a rule skipped because its target could not be chosen."""
+    misses = state.get("_targetMisses")
+    if not isinstance(misses, list) or not misses:
+        return
+    reported = runtime_state.setdefault("targetMissesReported", {}) if isinstance(runtime_state, dict) else {}
+    if reported.get("battleGeneration") != state.get("battleGeneration"):
+        reported.clear()
+        reported.update(battleGeneration=state.get("battleGeneration"), rules=[])
+    for miss in misses:
+        key = miss.get("ruleIndex") or miss.get("rule")
+        if key in reported["rules"]:
+            continue
+        reported["rules"].append(key)
+        print(ui_text("ctl.targetUnavailable", rule=miss.get("rule"),
+                      target=target_label_text({"type": miss.get("target"), **({"position": miss["position"]} if "position" in miss else {})}),
+                      reach=ui_text(f"target.reach.{miss.get('reach')}")), flush=True)
 
 
 def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -7071,6 +7194,13 @@ def no_decision_report(config: dict[str, Any], state: dict[str, Any]) -> list[di
             entry["code"] = "trial_no_action"
         else:
             entry["code"] = "skill_unavailable"
+            if action.get("type", "cast") == "cast" and "target" in action:
+                scoped = next((candidate for candidate in scoped_states if matches(when, candidate)), state)
+                skill = select_skill(action, scoped)
+                if skill is not None and select_target(action["target"], skill, scoped) is None:
+                    miss = target_miss(scoped, skill, action["target"])
+                    entry.update(code="target_unavailable", target=target_label_text(action["target"]),
+                                 reach=ui_text(f"target.reach.{miss['reach']}"), targetMiss=miss)
         entry["reason"] = ui_text(f"ctl.noDecision.{entry['code']}",
                                   **{name: entry.get(name) for name in NO_DECISION_REASON_ARGUMENTS[entry["code"]]})
         report.append(entry)
@@ -7549,6 +7679,7 @@ def process_state(
         )
     state["_decisionTrace"] = []
     state["_reservedStrictSkillTypeIds"] = []
+    state["_targetMisses"] = []
     decision = (
         pending_mythic_followup_decision(runtime_state, state)
         if runtime_state is not None
@@ -7556,6 +7687,7 @@ def process_state(
     )
     if decision is None:
         decision = evaluate(config, state, capability_memory, runtime_state)
+    report_target_misses(state, runtime_state)
     emit_telemetry(decision=decision_details(state, decision), command=None)
     active_hero_label = str(
         state.get("activeHeroName")

@@ -32,7 +32,7 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 330.0
 UNSUPPORTED_ACTION_TYPES = frozenset({"executeTrialRecipe"})
 # Decision facts a report session adds (hydra_simulation.HydraSimulationSession).
-REPORT_DECISION_KEYS = ("ruleIndex", "reservationReleased", "stuck")
+REPORT_DECISION_KEYS = ("ruleIndex", "reservationReleased", "targetMisses", "stuck")
 # Current-damage conditions. The live value is the game's damage counter, which
 # the game fills with each head's damage rounded (about six significant digits);
 # the forecast reads the exact per-head damage. Across 868 decisions of 23 real

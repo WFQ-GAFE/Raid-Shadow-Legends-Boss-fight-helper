@@ -1,0 +1,132 @@
+/* 1.1.3 */
+/* Boss row: the Chimera / Hydra tabs on the left, the strategy group of that boss on the
+   right, built like the account picker; copy, import, export, rename and delete are in its menu. */
+.mode-bar { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 460px); align-items: center; gap: 16px; padding: 0 16px; border-bottom: 1px solid var(--line); background: rgba(8, 18, 30, .78); }
+.mode-bar .mode-switcher { grid-template-columns: repeat(2, minmax(150px, 240px)); justify-content: start; height: 100%; padding: 7px 0; border: 0; background: none; }
+.strategy-picker { position: relative; min-width: 0; height: 44px; display: flex; align-items: center; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); padding-left: 13px; font-size: 14px; }
+.strategy-picker-icon { flex: 0 0 auto; color: var(--teal); }
+@media (max-height: 720px) { .mode-bar { gap: 11px; padding: 0 11px; } }
+.strategy-picker-label { flex: 0 0 auto; margin-left: 8px; padding-right: 10px; border-right: 1px solid var(--line); color: var(--muted); font-size: 12px; white-space: nowrap; }
+.strategy-picker select { flex: 1; min-width: 0; height: 100%; border: 0; background: transparent; color: var(--text); outline: none; padding: 0 8px; cursor: pointer; text-overflow: ellipsis; }
+.strategy-picker select:disabled { cursor: default; }
+.strategy-picker .icon-button { flex: 0 0 auto; width: 40px; height: 100%; border: 0; border-left: 1px solid var(--line); border-radius: 0; background: transparent; }
+.strategy-picker .icon-button:last-of-type { border-radius: 0 10px 10px 0; }
+.strategy-unsaved { flex: 0 0 auto; margin-right: 8px; padding: 2px 8px; border: 1px solid rgba(228, 189, 105, .4); border-radius: 20px; color: var(--gold); background: rgba(228, 189, 105, .08); font-size: 11px; white-space: nowrap; }
+.strategy-picker.dirty .strategy-save:not(:disabled) { color: var(--gold); }
+.strategy-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; min-width: 210px; display: grid; gap: 2px; padding: 6px; border: 1px solid #31516a; border-radius: 10px; background: #0a1724; box-shadow: 0 14px 35px rgba(0, 0, 0, .5); }
+.strategy-menu button { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.strategy-menu button:hover:not(:disabled), .strategy-menu button:focus-visible { background: var(--surface-3); outline: none; }
+.strategy-menu button:disabled { opacity: .4; cursor: default; }
+.strategy-menu svg { flex: 0 0 auto; color: var(--muted); }
+.strategy-menu .danger, .strategy-menu .danger svg { color: var(--danger); }
+.start-disabled-reason { margin: 9px 0 0; color: var(--gold); font-size: 12px; line-height: 1.45; }
+/* Start and pause stay in view at the bottom of the left column while it scrolls. */
+.control-column > .collapsible-card:has(.run-card) { position: sticky; bottom: 0; z-index: 3; margin-top: auto; box-shadow: 0 -10px 18px rgba(4, 11, 19, .55); }
+/* Rules: the count and the execution order under the search row. */
+.rule-results-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; padding: 0 16px 6px; color: var(--muted); font-size: 11px; }
+.rule-search-empty { display: grid; place-items: center; gap: 9px; padding: 28px 12px; color: var(--muted); text-align: center; }
+/* The form chips take only their own width; the text columns get the rest. */
+@media (min-width: 1181px) {
+  .rule-row { grid-template-columns: 30px 42px minmax(120px, 1.3fr) max-content minmax(130px, 1fr) minmax(120px, .8fr) minmax(130px, 1.1fr) auto; }
+}
+/* The condition cell shows its full logic on hover; it stays a label-over-text cell. */
+div.rule-condition.hover-anchor { display: grid; align-items: initial; }
+/* Rule editor: the whole condition in words, closing the condition section. */
+.rule-logic-preview { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .35); }
+.rule-logic-preview > span { color: var(--muted); font-size: 12px; }
+.rule-logic-preview p { margin: 0; color: #c3d2dc; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+/* Action kinds fill the row like the rule kinds above them. */
+.action-mode { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.rule-draft-help { color: var(--gold); font-size: 11px; }
+.acting-hero-summary { display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: rgba(6, 16, 27, .48); }
+.acting-hero-summary .button { margin-left: auto; }
+.hero-chooser-done { margin: 7px 0; }
+.rule-discard-confirm { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; border: 1px solid rgba(228,189,105,.4); border-radius: 9px; padding: 10px; color: var(--gold); }
+.dialog-content.rule-dialog { grid-template-rows: auto minmax(0, 1fr) auto; }
+.rule-dialog > .simulation-warning { grid-row: 2; }
+.rule-dialog .dialog-footer { flex-wrap: wrap; gap: 8px; }
+.log-view { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.log-read-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 9px; padding: 7px 11px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.log-read-toolbar > span { flex: 1 1 180px; }
+.log-read-toolbar strong { color: var(--gold); }
+.log-read-toolbar .button { min-height: 27px; padding: 3px 8px; font-size: 11px; }
+.log-view pre { min-height: 0; flex: 1; }
+.log-dialog .log-view { overflow: hidden; }
+.simulation-report-heading { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.simulation-report-title { display: flex; align-items: start; justify-content: space-between; gap: 12px; min-width: 0; }
+.simulation-report-title > span { min-width: 0; flex: 1; }
+.simulation-report-title h2 { overflow-wrap: anywhere; margin: 0; }
+.simulation-report-title > .icon-button { flex-shrink: 0; }
+.simulation-report-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 12px; min-width: 0; }
+.simulation-report-meta .team-source-tag { margin-left: 0; white-space: normal; }
+.simulation-report-meta .inline-heroes { margin: 0; }
+.simulation-request-status, .simulation-result-source, .simulation-filter-warning { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.simulation-request-status.error, .simulation-filter-warning { color: var(--gold); }
+.simulation-result-source { display: flex; flex-wrap: wrap; gap: 5px 12px; }
+.simulation-scroll { max-width: 100%; overflow: auto; min-width: 0; scrollbar-gutter: stable; }
+/* Reports: the whole body scrolls, both ways. A table is never its own small scroll box,
+   which the fixed-height grid would squeeze under the findings above it (its rows took
+   a scroll box's minimum height, 0); table headers stick to the top of the body instead. */
+.simulation-report-body { grid-template-columns: minmax(0, 1fr); grid-auto-rows: max-content; }
+.simulation-report-body .simulation-scroll { overflow: visible; }
+.simulation-controls .field > .field-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.simulation-controls .field > .field-heading .link-button { font-size: 11px; }
+.simulation-controls .field > .percent-input { margin-bottom: 0; color: inherit; font-size: inherit; }
+/* Opening battle simulation history (both bosses): one line each. */
+.simulation-history-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.simulation-history-row.static { cursor: default; }
+.simulation-history-row.static:hover { border-color: transparent; background: transparent; }
+.run-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.run-picker select { min-width: 150px; max-width: 100%; }
+.simulation-log-jump { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.log-row { grid-template-columns: 55px 30px 96px minmax(120px, 1.6fr) 70px minmax(90px, 1.4fr) 44px; }
+.log-turn { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.log-state-label { color: var(--muted); font-size: 10px; }
+.hover-card { pointer-events: auto; max-height: min(60vh, 520px); overflow: auto; overscroll-behavior: contain; }
+.picker-slot-actions { opacity: 1; }
+.picker-slot-actions button, .picker-card-info { min-width: 28px; min-height: 28px; }
+.picker-card-info { opacity: 1; }
+.picker-card.blocked > .head-type-option { opacity: .7; }
+.picker-card.replaceable > .head-type-option { opacity: 1; }
+.picker-slot-profile { display: grid; justify-items: center; gap: 4px; border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0; min-width: 0; max-width: 100%; }
+.picker-slot-profile small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-replacement { border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px; background: rgba(85,211,192,.06); }
+.picker-card select { min-width: 0; max-width: 100%; }
+/* Team picker: replacing a member of a full team, duplicates, filter logic (UI-17, UI-12). */
+.picker-slot-profile:focus-visible, .picker-slot-replace:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; border-radius: 8px; }
+.picker-slot-profile small { font-size: 12px; }
+.picker-slot:has(.picker-slot-replace) { padding-bottom: 38px; }
+.picker-slot-replace { width: 100%; min-height: 26px; padding: 2px 6px; border: 1px solid rgba(228, 189, 105, .55); border-radius: 7px; color: var(--gold); background: rgba(228, 189, 105, .1); font-size: 11px; cursor: pointer; }
+.picker-slot-replace:hover { background: rgba(228, 189, 105, .18); }
+.picker-card.duplicate > .head-type-option { border-color: rgba(228, 189, 105, .55); }
+.picker-duplicate-note { padding: 4px 8px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.picker-card-replace, .profile-replace-select { min-height: 30px; margin: 4px 0 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: #0a1522; font-size: 12px; }
+.picker-card:has(.picker-card-replace) .picker-card-info { bottom: 40px; }
+.picker-card:focus-within .picker-card-info { opacity: 1; }
+.picker-replacement { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; border-color: rgba(228, 189, 105, .45); background: rgba(228, 189, 105, .06); color: var(--text); font-size: 12px; }
+.picker-filter-summary { display: grid; gap: 6px; max-height: 160px; overflow: auto; font-size: 11px; color: var(--muted); }
+.picker-filter-summary-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.picker-filter-summary-heading > span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.picker-filter-summary-heading .button { flex-shrink: 0; }
+.picker-filter-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 8px; }
+.picker-filter-group strong { color: var(--text); font-size: 12px; }
+.picker-filter-group small { color: var(--muted); font-size: 11px; }
+.picker-match-count { color: var(--muted); font-size: 12px; }
+.picker-empty-results { grid-column: 1 / -1; display: grid; justify-items: start; gap: 12px; padding: 20px; }
+.picker-empty-results .team-picker-note { white-space: normal; }
+.picker-apply-note { display: grid; gap: 3px; min-width: 0; }
+.picker-apply-note small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.team-picker-dialog .dialog-footer { flex-wrap: wrap; gap: 8px 16px; }
+.dialog-footer > div { flex-wrap: wrap; }
+@media (max-width: 1180px) {
+  .mode-bar { grid-template-columns: minmax(0, 1fr) minmax(280px, 1.1fr); gap: 11px; padding: 0 11px; }
+  .strategy-picker-label { display: none; }
+  /* Narrow rows keep the condition, on a second line under the champion, action and target. */
+  .rule-row .rule-condition { display: grid; grid-column: 3 / -2; grid-row: 2; }
+  .rule-row .rule-buttons { grid-column: -2; grid-row: 1 / span 2; }
+  .log-row { grid-template-columns: 48px 28px minmax(0, 1fr) 65px; }
+  .log-row .what { grid-column: 3; }
+  .log-row .why, .log-row .trials { grid-column: 3 / -1; }
+  .log-row .dmg { grid-column: 4; grid-row: 1; }
+  .log-row .log-state-label { grid-column: 3 / -1; }
+}

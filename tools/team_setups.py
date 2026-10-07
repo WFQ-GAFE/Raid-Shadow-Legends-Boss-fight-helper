@@ -179,19 +179,38 @@ def hero_relic(parts: dict[str, Any]) -> dict[str, Any] | None:
     return relic_setup(relics[0], parts["relicBattle"])
 
 
+def linked_skill_levels(skills: list[dict[str, Any]], links: dict[int, int]) -> list[dict[str, Any]]:
+    """The hero's skills with the levels the server sends.
+
+    A hidden part of a skill (SkillType.UseLevelOfSkillId, e.g. Lydia's 47105 of
+    her A1 47101) fights at that skill's level; the client keeps it at 1.
+    """
+    levels = {skill["i"]: skill["l"] for skill in skills}
+    return [{**skill, "l": levels[links[skill["i"]]]} if links.get(skill["i"]) in levels else dict(skill)
+            for skill in skills]
+
+
+def default_skill_links() -> dict[int, int]:
+    # The game's static data as the offline probe read it (empty before its first read).
+    from hero_data import skill_level_links
+    return skill_level_links()
+
+
 def hero_slot_setup(hero: dict[str, Any], *, slot: int, owner_id: int, area: dict[str, Any] | None,
-                    rule: str = BUILDING_RULES[0], power: float | None = None, rounds: int = 1) -> dict[str, Any]:
+                    rule: str = BUILDING_RULES[0], power: float | None = None, rounds: int = 1,
+                    skill_links: dict[int, int] | None = None) -> dict[str, Any]:
     """One HeroSlotSetup, keys as the game serializes a battle's hero setups."""
     model, parts = hero["model"], hero["parts"]
     relic = hero_relic(parts)
     neutral = {str(skill["i"]): 0 for skill in model["skills"]}
+    skills = linked_skill_levels(model["skills"], default_skill_links() if skill_links is None else skill_links)
     setup: dict[str, Any] = {
         "d": 1, "t": slot, "u": owner_id, "i": model["typeId"], "h": model["heroId"], "g": model["grade"],
         "w": model.get("awakened") or 0,
         "l": model["level"], "x": model.get("experience") or 0, "m": 0, "hb": 0, "mb": 0,
         "r": model.get("empower") or 0, "v": 0,
         "z": building_bonus(parts, area, rule),
-        "s": copy.deepcopy(model["skills"]),
+        "s": skills,
         "b": copy.deepcopy(parts.get("artifacts") or []),
         "e": copy.deepcopy(parts.get("sets") or []),
         "y": list(model["masteries"]),

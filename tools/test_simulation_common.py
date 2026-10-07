@@ -25,6 +25,26 @@ def test_snapshot_folds_stacks_and_keeps_what_the_turn_log_shows() -> None:
     assert actors[2] == {"id": 8, "t": 26040, "s": "e", "hp": 80.0, "fx": [], "dv": 1, "neck": 1}
 
 
+def test_snapshot_keeps_what_is_left_of_absorbing_buffs() -> None:
+    health = str(69680 * 2**32)
+    state = {"heroes": [{"id": 0, "typeId": 100, "healthPct": 90.0,
+                         "numericObservation": {"statsRaw": {"Health": health}},
+                         "effects": [{"effectTypeId": 280, "turnsLeft": 2, "shieldValue": 30123, "shieldInitial": 37478},
+                                     {"effectTypeId": 450, "turnsLeft": 3, "hitShieldHits": 2, "hitShieldInitial": 3},
+                                     {"effectTypeId": 1050, "turnsLeft": 2, "goldenArmorValue": 9000, "goldenArmorInitial": 12000},
+                                     {"effectTypeId": 600, "turnsLeft": 1, "cocoonValue": 5000},
+                                     {"effectTypeId": 620, "turnsLeft": 2, "stoneSkinValue": 800, "stoneSkinInitial": 1000},
+                                     {"effectTypeId": 150, "turnsLeft": 1}]},
+                        {"id": 1, "typeId": 200, "healthPct": 50.0, "numericObservation": {"statsRaw": {"Health": health}},
+                         "effects": [{"effectTypeId": 150, "turnsLeft": 1}]}]}
+    actors = battle_snapshot(state)["actors"]
+    assert actors[0]["fx"] == [[280, 2, 1, {"v": 30123, "i": 37478}], [450, 3, 1, {"n": 2, "i": 3}],
+                               [1050, 2, 1, {"v": 9000, "i": 12000}], [600, 1, 1, {"v": 5000}],
+                               [620, 2, 1, {"v": 800, "i": 1000}], [150, 1, 1]]
+    # Max health only next to an absorbing buff.
+    assert actors[0]["mh"] == 69680 and "mh" not in actors[1]
+
+
 def test_run_files_are_compressed_and_older_reports_still_read() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         folder = Path(temporary)
@@ -52,3 +72,6 @@ def test_action_uses_name_what_an_action_set_off() -> None:
         {"actorId": -1, "skillTypeId": 0, "targetId": -1, "trigger": "other", "damage": 3686},
     ]
     assert action_uses(None) == [] and action_uses([]) == []
+    # The Head of Mischief's steal names one hero and hits the one with the most buffs.
+    assert action_uses([[11, 262001, 5, "input", 2346.0, [4]]]) == [
+        {"actorId": 11, "skillTypeId": 262001, "targetId": 5, "trigger": "input", "damage": 2346, "hits": [4]}]

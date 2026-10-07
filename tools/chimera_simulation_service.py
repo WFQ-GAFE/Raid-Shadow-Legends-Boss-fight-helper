@@ -22,11 +22,14 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
 import chimera_controller as controller
+from boss_stages import (DIFFICULTIES, StageSetupError, chimera_health_lost, chimera_trial_catalog, difficulty_of,
+                         load_stages, prepare_stage_input, stage_with_difficulty, strategy_on_difficulty)
+from chimera_catalog_cache import ensure_ui_catalog_cache
 from chimera_simulation import action_window, form_window, run_simulation, summarize_run
 from convert_hydra_replay_source import ConversionError, convert
 from hydra_forecast_live import (ForecastSetupError, RUNTIME_ROOT, ensure_runtime_bundle, game_build_directory,
                                  newest_static_data, probe_source)
-from simulation_common import action_uses, read_run, write_run
+from simulation_common import action_uses, attach_target_misses, read_run, write_run
 from forecast_advice import advice, failure_advice
 from capture_identity import unique_first
 from team_preview import TeamSnapshotStore
@@ -108,6 +111,16 @@ def _verdict_with_advice(verdict: dict[str, Any]) -> dict[str, Any]:
     return {**verdict, "advice": advice("chimera", verdict.get("reason"))}
 
 
+def chimera_difficulty_health() -> dict[int, int]:
+    """Each Chimera difficulty's full HP from the game's stage data (empty without static data)."""
+    try:
+        configs = load_stages(newest_static_data()).get("chimera") or {}
+    except (ForecastSetupError, StageSetupError, OSError, ValueError):
+        return {}
+    return {int(key): int(value["health"]) for key, value in configs.items()
+            if isinstance(value, dict) and isinstance(value.get("health"), int)}
+
+
 def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, Any]]:
     """Saved Chimera captures that a simulation can use, newest first."""
     base = root or CAPTURE_ROOT
@@ -122,6 +135,7 @@ def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, A
         if not isinstance(provenance, dict) or provenance.get("type") != "verified_chimera_replay_source":
             continue
         strategy = _read_json(folder / "strategy.json")
+        setup = _read_json(folder / "battle-setup.json")
         result.append({
             "id": folder.name,
             "capturedAt": time.strftime("%Y-%m-%d %H:%M", time.localtime(folder.stat().st_mtime)),
@@ -131,6 +145,8 @@ def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, A
             "teamHeroTypeIds": provenance.get("teamHeroTypeIds") or [],
             "teamHeroIds": provenance.get("teamHeroIds") or [],
             "bossHeroTypeId": provenance.get("bossHeroTypeId"),
+            # The alliance Chimera's HP lost before this battle (it carries over).
+            **({"bossHealthLost": chimera_health_lost(setup)} if isinstance(setup, list) else {}),
             "strategyName": strategy.get("name") if isinstance(strategy, dict) else None,
         })
         if len(result) >= limit:
@@ -199,7 +215,7 @@ def aggregate(summaries: list[dict[str, Any]], strategy: dict[str, Any]) -> dict
             "trialId": trial_id, "mandatory": trial_id in mandatory,
             "completedRuns": len(completed_turns), "runs": len(finished),
             "completedBossTurnMedian": _median([float(turn) for turn in completed_turns]),
-            "bestRatioMedian": _median(best), "bestRatioMax": max(best, default=0.0),
+            "bestRatioMax": max(best, default=0.0),
             "windows": {window: {"median": _median(values), "max": max(values)}
                         for window, values in sorted(windows.items(), key=lambda pair: int(pair[0]))},
         })
@@ -238,6 +254,7 @@ def aggregate(summaries: list[dict[str, Any]], strategy: dict[str, Any]) -> dict
         entry["damageShare"] = round(entry["damage"] / total_player_damage, 4) if total_player_damage else 0.0
         entry["trialGains"] = {trial: round(gain / count, 4) for trial, gain in entry["trialGains"].items()}
         entry.pop("damage", None)
+    attach_target_misses(rule_list, finished)
     stuck_runs = [{"index": item.get("index"), "seed": item.get("seed"), "exact": item.get("exact"),
                    **{key: item["stuck"].get(key) for key in ("reason", "turn", "bossTurns", "form",
                                                               "activeHeroTypeId", "rule")}}
@@ -303,6 +320,7 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
             "deaths": action.get("deaths") or [], "uses": action_uses(action.get("uses")),
             "rule": decision.get("rule"), "ruleIndex": decision.get("ruleIndex"),
             "reservationReleased": decision.get("reservationReleased") is True,
+            **({"targetMisses": decision["targetMisses"]} if decision.get("targetMisses") else {}),
             **({"state": decision["snapshot"]} if isinstance(decision.get("snapshot"), dict) else {}),
         })
     return rows
@@ -400,16 +418,22 @@ class SimulationService:
     """
 
     boss_mode = "chimera"
+    # Difficulties an opening can be simulated on besides its own (boss_stages).
+    other_difficulties: tuple[int, ...] = DIFFICULTIES["chimera"]
+    # The alliance Chimera's HP carries over between battles: a simulation may start it lower.
+    sets_boss_health = True
 
     def __init__(self, capture_root: Path = CAPTURE_ROOT, simulation_root: Path = SIMULATION_ROOT,
                  runner: Callable[..., dict[str, Any]] = run_simulation,
                  bundle_provider: Callable[[int | None], Path] | None = None,
-                 battle_forecast_root: Path = BATTLE_FORECAST_ROOT):
+                 battle_forecast_root: Path = BATTLE_FORECAST_ROOT,
+                 stage_provider: Callable[[], dict[str, Any]] | None = None):
         self.capture_root = capture_root
         self.simulation_root = simulation_root
         self.battle_forecast_root = battle_forecast_root
         self.runner = runner
         self.bundle_provider = bundle_provider or self._bundle
+        self.stage_provider = stage_provider or (lambda: load_stages(newest_static_data()))
         self.lock = threading.Lock()
         self.job: dict[str, Any] | None = None
         self.cancel = threading.Event()
@@ -424,11 +448,19 @@ class SimulationService:
 
     def start(self, strategy: dict[str, Any], strategy_meta: dict[str, Any], capture_id: str, runs: int,
               pid: int | None = None, team: dict[str, Any] | None = None,
-              capture_folder: Path | None = None) -> dict[str, Any]:
-        """``team``: another team to put into the saved opening (team_setups), or None for its own."""
+              capture_folder: Path | None = None, difficulty: int | None = None,
+              boss_health: float | None = None) -> dict[str, Any]:
+        """``team``: another team to put into the saved opening (team_setups), or None for its own.
+        ``difficulty``: the opening's rotation on another difficulty (boss_stages), or None for its own.
+        ``boss_health``: the Chimera's HP at the start in percent, or None (the opening's own;
+        full on another difficulty)."""
         if not isinstance(strategy, dict):
             raise ValueError(ui_text("simService.missingStrategy"))
         controller.require_list_execution(strategy)
+        if difficulty is not None and difficulty not in self.other_difficulties:
+            raise ValueError(ui_text("stages.difficultyUnavailable"))
+        if boss_health is not None and (not self.sets_boss_health or not 0 < boss_health <= 100):
+            raise ValueError(ui_text("stages.bossHealthInvalid"))
         runs = max(1, min(MAX_RUNS, int(runs)))
         folder = capture_folder if capture_folder is not None else self._capture_folder(str(capture_id))
         with self.lock:
@@ -441,7 +473,7 @@ class SimulationService:
             self.cancel.clear()
         thread = threading.Thread(target=self._work, name=f"{self.boss_mode}-simulation", daemon=True,
                                   args=(simulation_id, copy.deepcopy(strategy), dict(strategy_meta), folder, runs, pid,
-                                        copy.deepcopy(team) if team else None))
+                                        copy.deepcopy(team) if team else None, difficulty, boss_health))
         thread.start()
         return self.status() or {}
 
@@ -487,6 +519,33 @@ class SimulationService:
         return updated
 
     @staticmethod
+    def _stage_arguments(arguments: dict[str, Any], stage: dict[str, Any], stages: dict[str, Any]) -> dict[str, Any]:
+        """Runner inputs for the opening on another difficulty: that difficulty's trial catalog
+        (the editor's, else the opening's renumbered) and the start on its stage."""
+        difficulty = stage["difficulty"]
+        static_state = copy.deepcopy(arguments.get("static_state") or {})
+        config = (stages.get("chimera") or {}).get(str(difficulty)) or {}
+        known = next((item for item in ensure_ui_catalog_cache().get("difficulties") or []
+                      if isinstance(item, dict) and item.get("difficultyId") == difficulty and item.get("trials")), None)
+        if known is None:
+            opening = next(iter((static_state.get("trialCatalog") or {}).get("difficulties") or []), None)
+            known = chimera_trial_catalog(opening, difficulty, config) if isinstance(opening, dict) else None
+        if known is not None:
+            # The shipped catalog may lack the HP and stages (only live catalogs carry them): the stage data has them.
+            known = {**copy.deepcopy(known), **{key: config[value] for key, value in (("health", "health"),
+                                                                                        ("stageIds", "stageIds"))
+                                                if config.get(value)}}
+            static_state["trialCatalog"] = {"available": True, "difficulties": [known]}
+        selection = arguments.get("start_selection")
+        return {**arguments, "static_state": static_state,
+                "start_selection": {**selection, "stageId": stage["stageId"]} if isinstance(selection, dict) else None}
+
+    @staticmethod
+    def _stage_strategy(strategy: dict[str, Any], difficulty: int) -> dict[str, Any]:
+        """The strategy on another difficulty: its trials become the same slots' trials there."""
+        return strategy_on_difficulty(strategy, difficulty)
+
+    @staticmethod
     def _progress(values: dict[str, Any]) -> tuple[str, int]:
         return "currentBossTurn", int(values.get("bossTurns") or 0)
 
@@ -510,11 +569,13 @@ class SimulationService:
                 self.job.update(values)
 
     def _work(self, simulation_id: str, strategy: dict[str, Any], meta: dict[str, Any], capture: Path,
-              runs: int, pid: int | None, team: dict[str, Any] | None = None) -> None:
+              runs: int, pid: int | None, team: dict[str, Any] | None = None, difficulty: int | None = None,
+              boss_health: float | None = None) -> None:
         output = self.simulation_root / simulation_id
         summary: dict[str, Any] = {"schema": 1, "id": simulation_id, "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                                    "status": "running", "strategy": {**meta, "rules": len(strategy.get("rules", []))},
                                    "capture": {"id": capture.name}}
+        final: dict[str, Any] = {}  # the job's end state, published after summary.json is written
         try:
             output.mkdir(parents=True, exist_ok=False)
             atomic_write_json(output / "strategy.json", strategy)
@@ -544,6 +605,37 @@ class SimulationService:
                 arguments = self._team_arguments(arguments, provenance)
                 summary["capture"].update(teamHeroTypeIds=provenance["teamHeroTypeIds"],
                                           teamSavedAt=team.get("savedAt"), teamCheck=team.get("check"))
+            opening_stage = provenance.get("stageId")
+            other = (difficulty is not None and isinstance(opening_stage, int)
+                     and difficulty != difficulty_of(opening_stage))
+            if isinstance(opening_stage, int) and (other or boss_health is not None):
+                # The same opening (team, seed) on another difficulty or with another starting HP:
+                # the boss side from the game's stage data.
+                self._update(message=ui_text("simService.buildingDifficulty"))
+                target = difficulty if other else difficulty_of(opening_stage)
+                stages = self.stage_provider()
+                stage = (stages.get("stages") or {}).get(str(stage_with_difficulty(opening_stage, target)))
+                if not isinstance(stage, dict) or stage.get("boss") != self.boss_mode:
+                    raise StageSetupError(ui_text("stages.notFound"))
+                health = (stages.get("chimera") or {}).get(str(target), {}).get("health") or 0
+                # Another difficulty starts at full HP unless asked otherwise.
+                percent = boss_health if boss_health is not None else 100.0
+                lost = round(health * (100 - percent) / 100) if self.sets_boss_health else 0
+                stage_input = output / "stage-input"
+                provenance = prepare_stage_input(battle_setup.parent, stage, stages, stage_input, health_lost=lost)
+                convert(stage_input, probe)
+                packed = stage_input / "packed"
+                battle_setup = stage_input / "battle-setup.json"
+                arguments = self._stage_arguments(arguments, stage, stages)
+                if other:
+                    strategy = self._stage_strategy(strategy, target)
+                    atomic_write_json(output / "strategy.json", strategy)
+                summary["capture"].update({key: value for key, value in self._capture_facts(provenance).items()
+                                           if key != "teamHeroTypeIds"})
+                summary["capture"].update(
+                    openingStageId=opening_stage,
+                    openingDifficulty=self._capture_facts({"stageId": opening_stage}).get("difficulty"),
+                    **({"bossHealthPercent": percent} if self.sets_boss_health else {}))
             # The memory the live controller would start the next battle with.
             memory = controller.SkillCapabilityMemory.load(controller.DEFAULT_CAPABILITY_CACHE,
                                                            controller.DEFAULT_CAPABILITY_SEED)
@@ -584,25 +676,28 @@ class SimulationService:
             summary["runs"] = done
             summary["aggregate"] = self._aggregate(done, strategy)
             summary["status"] = "cancelled" if self.cancel.is_set() else "complete"
-            self._update(status=summary["status"], phase=summary["status"],
-                         message=ui_text("simService.complete") if summary["status"] == "complete" else ui_text("simService.stopped"))
+            final = {"status": summary["status"], "phase": summary["status"],
+                     "message": ui_text("simService.complete") if summary["status"] == "complete" else ui_text("simService.stopped")}
         except (ForecastSetupError, ConversionError, ValueError, OSError) as error:
             summary["status"] = "failed"
             summary["reason"] = str(error)
             note = failure_advice(self.boss_mode, error)
-            self._update(status="failed", phase="failed", reason=str(error), message=ui_text("simService.cannotRun", error=error),
-                         **({"advice": note} if note else {}))
+            final = {"status": "failed", "phase": "failed", "reason": str(error), "message": ui_text("simService.cannotRun", error=error),
+                     **({"advice": note} if note else {})}
         except Exception as error:  # Never let a simulation take down the app.
             summary["status"] = "failed"
             summary["reason"] = f"{type(error).__name__}: {error}"
-            self._update(status="failed", phase="failed", reason=type(error).__name__,
-                         message=ui_text("simService.failed", name=type(error).__name__), advice=failure_advice(self.boss_mode, error))
+            final = {"status": "failed", "phase": "failed", "reason": type(error).__name__,
+                     "message": ui_text("simService.failed", name=type(error).__name__), "advice": failure_advice(self.boss_mode, error)}
         finally:
             try:
                 if output.is_dir():
                     atomic_write_json(output / "summary.json", summary)
             except OSError:
                 pass
+            # Only now say the job ended: whoever sees "complete" can read its summary.
+            if final:
+                self._update(**final)
             _prune(self.simulation_root)
 
     @staticmethod

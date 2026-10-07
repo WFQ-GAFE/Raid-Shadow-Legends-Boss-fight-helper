@@ -58,7 +58,7 @@ def records() -> tuple[dict, dict, dict]:
 
 class ReplaySourceTests(unittest.TestCase):
     def test_shared_slot_layout_and_version(self):
-        self.assertEqual((SHARED_STATE_VERSION, AGENT_BUILD_ID), (7, 2026092902))
+        self.assertEqual((SHARED_STATE_VERSION, AGENT_BUILD_ID), (7, 2026100401))
         self.assertEqual(ctypes.sizeof(ReplayInputJsonSlot), 2_097_168)
         self.assertEqual(AgentSharedState.replay_input.offset,
                          AgentSharedState.diagnostic.offset + ctypes.sizeof(DiagnosticJsonSlot))

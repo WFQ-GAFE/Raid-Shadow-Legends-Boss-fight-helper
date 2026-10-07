@@ -198,6 +198,7 @@ class HydraOfflinePolicySession:
             state["_decisionTrace"] = []
             state["_decisionTraceLite"] = True
             state["_reservedStrictSkillTypeIds"] = []
+            state["_targetMisses"] = []
             decision = controller.pending_mythic_followup_decision(self.runtime_state, state)
             if decision is None:
                 decision = controller.evaluate(

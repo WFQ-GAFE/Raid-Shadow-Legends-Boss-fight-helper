@@ -8,6 +8,10 @@ import { CollapsiblePanel } from './CollapsiblePanel'
 import { TeamPreviewDialog, TeamPreviewSummary, type TeamPreviewSummaryState, type TeamSnapshot } from './TeamPreview'
 import { TeamPicker, type ChosenTeam, type RosterHero } from './TeamPicker'
 import { loadHeroData, withoutStrength, type HeroData } from './heroData'
+import { ruleTargetMismatches, skillReach, targetFits, type TargetMismatch } from './ruleTargets'
+import { describeRuleConditions, type RuleDescriptionContext } from './ruleDescriptions'
+import { canMoveRule, logDrawerPreference, revealRuleAfterRender } from './ruleNavigation'
+import { TargetNote, TargetTag } from './TargetNote'
 import { effectName } from './effectNames'
 import { BattleForecastPanel, ChimeraSimulationPanel, SimulationReport, ruleUsageByIndex, type BattleForecastTelemetry, type SimulationOverview, type SimulationSummary } from './ChimeraSimulation'
 import { HydraSimulationPanel, HydraSimulationReport, type HydraSimulationOverview } from './HydraSimulation'
@@ -31,6 +35,7 @@ import {
   Layers3,
   ListOrdered,
   Maximize2,
+  MoreHorizontal,
   Plus,
   RefreshCw,
   Save,
@@ -45,10 +50,10 @@ import {
   X,
   Zap,
 } from 'lucide-react'
-import { backendText, dataName, gameText, getInitialLocale, hasMessage, I18nProvider, isLocale, saveLocale, setActiveLocale, tr, type MessageKey, type UiLanguage } from './i18n'
+import { activeLanguage, backendText, dataName, gameText, getInitialLocale, hasMessage, I18nProvider, isLocale, saveLocale, setActiveLocale, tr, type MessageKey, type UiLanguage } from './i18n'
 import { installDocumentLocalization } from './i18n/dom'
 import { LanguagePicker } from './LanguagePicker'
-import { AdviceNote, damageText, HeroIcon, SimProvider, simulationSaveText, stuckReasonText, type FailureAdvice, type SimulationPackageStatus } from './SimulationShared'
+import { AdviceNote, damageText, HeroIcon, SimProvider, simulationSaveText, stuckReasonText, trialShortLabel, type FailureAdvice, type SimulationPackageStatus } from './SimulationShared'
 import { HoverCard } from './HoverCard'
 
 type JsonObject = Record<string, unknown>
@@ -337,14 +342,15 @@ type HydraForecastTelemetry = {
 // A saved battle forecast read from the data directory, newest first.
 type HydraForecastSummary = HydraForecastTelemetry & { id: string; startedAt?: string }
 
+// The same words as the Chimera's opening battle simulation: both are one feature.
 function hydraForecastStatusLabel(forecast: HydraForecastTelemetry) {
-  if (forecast.status === 'waiting_input') return tr('app.waitingForThisBattleS')
-  if (forecast.status === 'running') return tr('app.forecastingInTheBackgroundThe')
-  if (forecast.status === 'not_opening') return tr('app.notTakenOverFromThe')
+  if (forecast.status === 'waiting_input') return tr('chimeraSim.waitingForTheOpeningData')
+  if (forecast.status === 'running') return tr('chimeraSim.simulatingInTheBackgroundThe')
+  if (forecast.status === 'not_opening') return tr('chimeraSim.notTakenOverFromThe')
   if (forecast.status === 'unavailable' && forecast.reason === 'damage_threshold_too_close') return tr('app.damageIsCloseToA')
-  if (forecast.status === 'unavailable') return tr('app.undeterminedNoRegroupBasedOn')
+  if (forecast.status === 'unavailable') return tr('chimeraSim.undeterminedNoRegroupBasedOn')
   if (forecast.status === 'unrecorded') return tr('app.noConclusionRecordedOlderVersion')
-  return forecast.verdict === 'retry' ? tr('app.predictedToViolateTheConditions') : tr('app.conditionsMetTheBattleContinues')
+  return forecast.verdict === 'retry' ? tr('chimeraSim.goalsPredictedToFailFree') : tr('chimeraSim.goalsPredictedToBeMet')
 }
 
 function HydraForecastEntry({ title, forecast, observed, heroes, language, onOpenReport }: { title: string; forecast: HydraForecastTelemetry; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[]; language: UiLanguage; onOpenReport: (id: string) => void }) {
@@ -365,16 +371,25 @@ function HydraForecastEntry({ title, forecast, observed, heroes, language, onOpe
   )
 }
 
-function HydraForecastPanel({ forecast, history, observed, heroes, language, onOpenReport }: { forecast?: HydraForecastTelemetry; history: HydraForecastSummary[]; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[]; language: UiLanguage; onOpenReport: (id: string) => void }) {
+// Laid out like the Chimera's BattleForecastPanel: this battle in full, earlier battles as rows
+// that open their report.
+function HydraForecastPanel({ enabled, forecast, history, observed, heroes, language, onOpenReport }: { enabled: boolean; forecast?: HydraForecastTelemetry; history: HydraForecastSummary[]; observed?: { name: string; heroTypeId: number }[]; heroes: Hero[]; language: UiLanguage; onOpenReport: (id: string) => void }) {
   const previous = history.filter((entry) => !forecast || entry.battleSetupId !== forecast.battleSetupId)
   const latest = forecast ?? history[0]
+  const hint = !enabled ? tr('chimeraSim.off') : latest ? hydraForecastStatusLabel(latest) : tr('chimeraSim.noRecordsYet')
   return (
     <SimProvider lang={language} boss="hydra" heroes={heroes}>
-      <CollapsiblePanel id="hydra:forecast" title={tr('app.battleStartDevourForecast')} hint={toolText(latest ? hydraForecastStatusLabel(latest) : tr('app.noRecordsYet'))}>
+      <CollapsiblePanel id="hydra:forecast" title={tr('chimeraSim.openingBattleSimulation')} hint={toolText(hint)}>
         <div className="hydra-forecast-body">
-          {forecast && <HydraForecastEntry title={tr('app.thisBattle')} forecast={forecast} observed={observed} heroes={heroes} language={language} onOpenReport={onOpenReport} />}
-          {previous.map((entry) => <HydraForecastEntry key={entry.id} title={tr('app.openingAt', { startedAt: entry.startedAt ?? '' })} forecast={entry} heroes={heroes} language={language} onOpenReport={onOpenReport} />)}
-          {!forecast && !previous.length && <p className="hydra-forecast-empty">{tr('app.withTheForecastOnEach')}</p>}
+          {forecast && <HydraForecastEntry title={tr('chimeraSim.thisBattle')} forecast={forecast} observed={observed} heroes={heroes} language={language} onOpenReport={onOpenReport} />}
+          {previous.slice(0, 5).map((entry) => {
+            const status = hydraForecastStatusLabel(entry)
+            const row = <><span>{entry.startedAt}</span><strong>{entry.conclusion || status}</strong><em className={entry.verdict === 'retry' ? 'bad' : ''}>{entry.conclusion ? status : ''}</em></>
+            return entry.recordId
+              ? <button key={entry.id} className="simulation-history-row" title={entry.conclusion ?? undefined} onClick={() => onOpenReport(entry.recordId!)}>{row}</button>
+              : <div key={entry.id} className="simulation-history-row static" title={entry.conclusion ?? undefined}>{row}</div>
+          })}
+          {!forecast && !previous.length && <p className="hydra-forecast-empty">{enabled ? tr('hydraSim.whenAHydraTakeoverStarts') : tr('chimeraSim.theOpeningBattleSimulationIs')}</p>}
         </div>
       </CollapsiblePanel>
     </SimProvider>
@@ -996,104 +1011,52 @@ function targetLabel(rule: Rule, heroes: Hero[], hydraHeads: HydraHead[] = []): 
   return tr('app.chimeraBoss')
 }
 
-function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[] = [], trials: Trial[] = []) {
-  const when = rule.when ?? {}
-  const ignored = new Set(['activeHeroTypeId', 'form', 'activeHeroFormIndex', 'activeHeroIsMetamorph'])
-  const summarized = new Set<string>()
-  const turn = when.chimeraTurnAtLeast ?? when.chimeraTurnCount
-  const next = typeof when.nextForm === 'string' ? formLabel(when.nextForm) : undefined
-  const parts = [turn !== undefined ? tr('app.bossTurn', { turn: String(turn) }) : '', next ? tr('app.nextForm', { next }) : ''].filter(Boolean)
-  if (turn !== undefined) summarized.add(when.chimeraTurnAtLeast !== undefined ? 'chimeraTurnAtLeast' : 'chimeraTurnCount')
-  if (next) summarized.add('nextForm')
-  const eligibleTrialIds = asNumberArray(when.eligibleTrialsAny)
-  if (eligibleTrialIds.length) {
-    const selectedTrial = trials.find((trial) => trial.id === eligibleTrialIds[0])
-    const description = gameDescription(selectedTrial?.description) || tr('app.trial', { eligibleTrialIds: eligibleTrialIds[0] })
-    parts.push(tr('app.trialActive', { description }))
-    summarized.add('eligibleTrialsAny')
-  }
-  const bossHas = Array.isArray(when.bossHasEffects) ? when.bossHasEffects : []
-  if (bossHas.length) {
-    const names = bossHas.slice(0, 2).map((token) => {
-      const effect = effects.find((item) => item.token === String(token))
-      return effect ? effectDisplay(effect).label : String(token)
-    })
-    parts.push(tr('app.bossHas', { join: names.join(tr('app.listComma')), value: bossHas.length > 2 ? '…' : '' }))
-    summarized.add('bossHasEffects')
-  }
-  const unifiedEffects = Array.isArray(when.effectConditions) ? when.effectConditions : []
-  if (unifiedEffects.length) {
-    const joiner = when.effectConditionsMode === 'any' ? tr('app.or') : tr('app.listComma')
-    const descriptions = unifiedEffects.slice(0, 2).flatMap((raw) => {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
-      const condition = raw as JsonObject
-      const selector = condition.effect && typeof condition.effect === 'object' && !Array.isArray(condition.effect) ? condition.effect as JsonObject : {}
-      const token = selector.effectTypeId == null ? String(selector.kind ?? '') : String(selector.effectTypeId)
+// The rule's targets its skills can never take (ruleTargets.ts).
+function ruleMismatches(heroData: HeroData | null, rule: Rule, heroes: Hero[], team: number[], hero?: Hero) {
+  const caster = hero ?? heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
+  if (!caster || !heroData) return []
+  return ruleTargetMismatches(heroData, rule, team, (typeId) => heroByRuntimeId(heroes, typeId)?.typeId === caster.typeId, caster.typeId)
+}
+
+// A strict rule with such a target never acts; a default skill order uses the automatic target instead.
+function MismatchNote({ mismatch, hero, heroes, outcome }: { mismatch: TargetMismatch; hero?: Hero; heroes: Hero[]; outcome: 'neverActs' | 'autoFallback' }) {
+  const skill = hero?.skills.find((item) => item.typeId === mismatch.skillTypeId)
+  return <TargetNote kind="never" reach={mismatch.reach} target={mismatch.target} position={mismatch.position}
+    targetName={mismatch.target === 'allyHeroTypeId' ? heroByRuntimeId(heroes, mismatch.targetHeroTypeId)?.name : undefined}
+    skill={<SkillIcon hero={hero} skill={skill} slot={skill?.slot} />} outcome={outcome} />
+}
+
+// A saved effect kind (any strength, e.g. "StatusReduceAttack", or an older
+// GUI alias such as "DecreaseAttack") read as the kind's own name.
+function effectKindName(effects: EffectOption[], kind: string) {
+  const sprite = kind.startsWith('Status') ? kind : `Status${kind.replace(/^Decrease/, 'Reduce').replace('Defense', 'Defence')}`
+  const effect = effects.find((item) => item.icon === kind || item.nativeName === kind)
+    ?? effects.find((item) => item.icon === sprite)
+  return effect ? withoutStrength(effectDisplay(effect).label) : undefined
+}
+
+function descriptionContext(effects: EffectOption[], heroes: Hero[], trials: Trial[]): RuleDescriptionContext {
+  return {
+    text: (key, params) => tr(key as MessageKey, params),
+    heroName: (id) => heroByRuntimeId(heroes, id)?.name,
+    skillName: (heroId, skillId) => heroByRuntimeId(heroes, heroId)?.skills.find((skill) => skill.typeId === skillId)?.name,
+    effectName: (token) => {
       const effect = effects.find((item) => item.token === token)
-      const effectName = effect ? effectDisplay(effect).label : (token || tr('app.effect'))
-      const heroTypeId = asNumberArray(condition.heroTypeId)[0]
-      const subject = condition.target === 'ally'
-        ? heroByRuntimeId(heroes, heroTypeId)?.name ?? tr('app.specifiedChampion')
-        : condition.target === 'bossAll'
-          ? tr('app.allHeads')
-          : condition.target === 'bossAny'
-            ? tr('app.anyHead')
-            : condition.target === 'bossPriority'
-              ? tr('app.priorityHead')
-              : 'Boss'
-      return [`${subject}${condition.presence === 'missing' ? tr('app.lacks') : tr('app.has')}${effectName}`]
-    })
-    if (descriptions.length) parts.push(`${descriptions.join(joiner)}${unifiedEffects.length > 2 ? '…' : ''}`)
-    summarized.add('effectConditions')
-    summarized.add('effectConditionsMode')
+      return effect ? effectDisplay(effect).label : /^\d+$/.test(token) ? undefined : effectKindName(effects, token)
+    },
+    // Form, part and level name a trial; its game text is too long for a sentence.
+    trialName: (id) => trialShortLabel(activeLanguage(), trials.find((trial) => trial.id === id), id),
+    formName: (form) => formLabel(form),
+    allForms: ALL_FORMS,
   }
-  const cooldownConditions = Array.isArray(when.skillCooldownConditions) ? when.skillCooldownConditions : []
-  if (cooldownConditions.length) {
-    const joiner = when.skillCooldownConditionsMode === 'any' ? tr('app.or') : tr('app.listComma')
-    const descriptions = cooldownConditions.slice(0, 2).flatMap((raw) => {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return []
-      const condition = raw as JsonObject
-      const hero = heroByRuntimeId(heroes, typeof condition.heroTypeId === 'number' ? condition.heroTypeId : undefined)
-      const skill = hero?.skills.find((item) => item.typeId === condition.skillTypeId)
-      const range = condition.turnsAtLeast !== undefined && condition.turnsAtMost !== undefined
-        ? `${condition.turnsAtLeast}–${condition.turnsAtMost}`
-        : condition.turnsAtLeast !== undefined ? `≥${condition.turnsAtLeast}` : `≤${condition.turnsAtMost}`
-      return [tr('app.skillCooldownCondition', { name: hero?.name ?? tr('app.specifiedChampion'), name2: skill?.name ?? tr('app.specifiedSkill'), range })]
-    })
-    if (descriptions.length) parts.push(`${descriptions.join(joiner)}${cooldownConditions.length > 2 ? '…' : ''}`)
-    summarized.add('skillCooldownConditions')
-    summarized.add('skillCooldownConditionsMode')
-  }
-  if (when.conditionTree && typeof when.conditionTree === 'object' && !Array.isArray(when.conditionTree)) {
-    const describeTree = (raw: unknown): { leaves: number; text: string } => {
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { leaves: 0, text: '?' }
-      const node = raw as JsonObject
-      const negated = node.negate === true ? 'NOT ' : ''
-      if (node.type === 'group') {
-        const children = Array.isArray(node.children) ? node.children.map(describeTree).filter((child) => child.leaves > 0) : []
-        const joiner = node.operator === 'any' ? ' OR ' : ' AND '
-        return { leaves: children.reduce((sum, child) => sum + child.leaves, 0), text: `${negated}(${children.slice(0, 3).map((child) => child.text).join(joiner)}${children.length > 3 ? '…' : ''})` }
-      }
-      if (node.type === 'effectCount') {
-        const category = node.polarity === 'buff' ? tr('app.buffCount') : node.polarity === 'debuff' ? tr('app.debuffCount') : tr('app.totalEffects')
-        const range = node.countAtLeast === node.countAtMost ? `=${node.countAtLeast}`
-          : `${node.countAtLeast == null ? '' : `≥${node.countAtLeast}`}${node.countAtMost == null ? '' : ` ≤${node.countAtMost}`}`
-        return { leaves: 1, text: `${negated}${category}${range}` }
-      }
-      const leafLabel = node.type === 'skillCooldown'
-        ? tr('app.cooldown')
-        : node.type === 'heroState'
-          ? tr('app.championAlive')
-          : tr('app.effect')
-      return { leaves: 1, text: `${negated}${leafLabel}` }
-    }
-    const described = describeTree(when.conditionTree)
-    if (described.leaves) parts.push(tr('app.logicOther', { text: described.text, leaves: described.leaves }))
-    summarized.add('conditionTree')
-  }
-  const remaining = Object.keys(when).filter((key) => !ignored.has(key) && !summarized.has(key)).length
-  if (remaining) parts.push(tr('app.moreConditions', { remaining }))
-  return parts.join(' · ') || tr('app.wheneverTheActionWindowMatches')
+}
+
+function conditionDescription(rule: Rule, effects: EffectOption[] = [], heroes: Hero[] = [], trials: Trial[] = [], includeScope = false) {
+  return describeRuleConditions(rule.when ?? {}, descriptionContext(effects, heroes, trials), includeScope)
+}
+
+function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[] = [], trials: Trial[] = []) {
+  return conditionDescription(rule, effects, heroes, trials).full
 }
 
 function HeroAvatar({ hero, size = 'md' }: { hero?: Hero; size?: 'sm' | 'md' | 'lg' }) {
@@ -1388,7 +1351,6 @@ function HydraDevourRetryPicker({
   heroes,
   team,
   conditions,
-  forecast,
   onApply,
 }: {
   open: boolean
@@ -1396,18 +1358,15 @@ function HydraDevourRetryPicker({
   heroes: Hero[]
   team: number[]
   conditions: HydraDevourRetryCondition[]
-  forecast: boolean
-  onApply: (conditions: HydraDevourRetryCondition[], forecast: boolean) => void
+  onApply: (conditions: HydraDevourRetryCondition[]) => void
 }) {
   const [draft, setDraft] = useState<HydraDevourRetryCondition[]>(conditions)
-  const [draftForecast, setDraftForecast] = useState(forecast)
   const teamHeroTypeIds = [...new Set(team.filter((value) => Number.isInteger(value) && value > 0))]
 
   useEffect(() => {
     if (!open) return
     setDraft(conditions)
-    setDraftForecast(forecast)
-  }, [open, conditions, forecast])
+  }, [open, conditions])
 
   function updateCondition(index: number, changes: Partial<HydraDevourRetryCondition>) {
     setDraft((current) => current.map((condition, itemIndex) => itemIndex === index ? { ...condition, ...changes } : condition))
@@ -1432,10 +1391,6 @@ function HydraDevourRetryPicker({
             <Dialog.Close className="icon-button" aria-label={tr('app.close')}><X size={19} /></Dialog.Close>
           </div>
           <div className="early-retry-list">
-            <button type="button" className={`devour-forecast-toggle ${draftForecast ? 'selected' : ''}`} aria-pressed={draftForecast} onClick={() => setDraftForecast((current) => !current)}>
-              <span className="check-box">{draftForecast && <Check size={14} />}</span>
-              <span><strong>{tr('app.forecastTheDevourOrderAt')}</strong><small>{tr('app.afterTheBattleStartsThe')}</small></span>
-            </button>
             {!teamHeroTypeIds.length && <div className="effect-condition-empty"><Waves size={22} /><span><strong>{tr('app.preparedTeamNotReadYet')}</strong><small>{tr('app.openTheHydraPreparationScreen')}</small></span></div>}
             {teamHeroTypeIds.length > 0 && !draft.length && <div className="effect-condition-empty"><Activity size={22} /><span><strong>{tr('app.noDevourOrderConditionsYet')}</strong><small>{tr('app.withoutConditionsDevourTargetsNever')}</small></span></div>}
             {draft.map((condition, index) => (
@@ -1463,7 +1418,7 @@ function HydraDevourRetryPicker({
           </div>
           <div className="dialog-footer">
             <button className="button ghost" disabled={!teamHeroTypeIds.length || draft.length >= 20} onClick={addCondition}><Plus size={15} />{tr('app.addOrderCondition')}</button>
-            <div><Dialog.Close className="button ghost">{tr('app.cancel')}</Dialog.Close><button className="button primary" onClick={() => { onApply(draft.filter((condition) => condition.heroTypeIds.length).map(normalizedDevourRetryCondition), draftForecast); onOpenChange(false) }}>{tr('app.applyConditions')}</button></div>
+            <div><Dialog.Close className="button ghost">{tr('app.cancel')}</Dialog.Close><button className="button primary" onClick={() => { onApply(draft.filter((condition) => condition.heroTypeIds.length).map(normalizedDevourRetryCondition)); onOpenChange(false) }}>{tr('app.applyConditions')}</button></div>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
@@ -1482,6 +1437,7 @@ function RuleEditor({
   effects,
   trials,
   bossMode,
+  heroData,
   onSave,
 }: {
   open: boolean
@@ -1494,6 +1450,7 @@ function RuleEditor({
   effects: EffectOption[]
   trials: Trial[]
   bossMode: BossMode
+  heroData: HeroData | null
   onSave: (rule: Rule) => void
 }) {
   const firstTeamHero = team
@@ -1505,6 +1462,7 @@ function RuleEditor({
   const [heroId, setHeroId] = useState(firstHero)
   const [allHeroes, setAllHeroes] = useState(false)
   const [heroSearch, setHeroSearch] = useState('')
+  const [heroChooserExpanded, setHeroChooserExpanded] = useState(!initial)
   const [forms, setForms] = useState<string[]>(ALL_FORMS)
   const [heroForm, setHeroForm] = useState('any')
   const [actionType, setActionType] = useState('cast')
@@ -1524,6 +1482,18 @@ function RuleEditor({
   const [damageMin, setDamageMin] = useState('')
   const [conditionTree, setConditionTree] = useState<ConditionGroupNode>(() => createConditionGroup())
   const [error, setError] = useState('')
+  // Saving was asked for with a target the skill can never take.
+  const [confirmTargets, setConfirmTargets] = useState(false)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [editorVersion, setEditorVersion] = useState(0)
+  const editorBaseline = useRef('')
+  const editorSnapshot = JSON.stringify({ name, ruleKind, heroId, allHeroes, forms, heroForm, actionType, slot, skillTypeId,
+    defaultPolicies, target, targetPosition, headPriorityIds, advanced, turnMin, turnMax, switchWithin, nextForm, eligibleTrialId, damageMin, conditionTree })
+  useLayoutEffect(() => { if (open && editorVersion > 0) editorBaseline.current = editorSnapshot }, [editorVersion, open])
+  function requestEditorOpenChange(next: boolean) {
+    if (!next && editorBaseline.current && editorSnapshot !== editorBaseline.current) { setConfirmDiscard(true); return }
+    onOpenChange(next)
+  }
 
   useEffect(() => {
     if (!open) return
@@ -1534,6 +1504,7 @@ function RuleEditor({
     setHeroId(initialHero?.typeId ?? firstHero)
     setAllHeroes(ids.length > 1 && heroes.length > 0 && heroes.every((hero) => heroRuntimeIds(hero).some((id) => ids.includes(id))))
     setHeroSearch('')
+    setHeroChooserExpanded(!initial)
     setForms(ruleForms(initial ?? {}))
     setHeroForm(when.activeHeroFormIndex === 0 ? 'original' : when.activeHeroFormIndex === 1 ? 'transformed' : 'any')
     const action = initial?.action ?? {}
@@ -1733,6 +1704,9 @@ function RuleEditor({
     }
     setAdvanced(JSON.stringify(when, null, 2))
     setError('')
+    setConfirmTargets(false)
+    setConfirmDiscard(false)
+    setEditorVersion((version) => version + 1)
   }, [open, initial, firstHero, bossMode])
 
   const hero = heroes.find((item) => item.typeId === heroId)
@@ -1827,6 +1801,22 @@ function RuleEditor({
       ? asNumberArray(action.skillTypeId)
       : []
   }))
+  // Targets the chosen skills can never take: marked on the choices, explained
+  // under them, and confirmed on saving.
+  const isCaster = (typeId: number | undefined) => typeId ? Boolean(hero) && heroByRuntimeId(heroes, typeId)?.typeId === hero?.typeId : undefined
+  const slotIsCaster = (position: unknown) => typeof position === 'number' ? isCaster(team[position - 1]) : undefined
+  const selectedReach = ruleKind === 'strict' && actionType === 'cast' && !allHeroes ? skillReach(heroData, selectedSkill?.typeId) : undefined
+  const fitsTarget = (type: string, position?: number) => !selectedReach || targetFits(selectedReach, type, slotIsCaster(position))
+  const targetClass = (type: string) => [target === type ? 'active' : '', fitsTarget(type) ? '' : 'illegal'].filter(Boolean).join(' ')
+  const draftTarget: JsonObject = target === 'allyHeroTypeId' && initial?.action?.target && typeof initial.action.target === 'object'
+    ? initial.action.target as JsonObject
+    : target === 'allyPosition' ? { type: target, position: targetPosition } : { type: target }
+  const draftMismatches: TargetMismatch[] = ruleKind === 'default'
+    ? ruleMismatches(heroData, { action: { type: 'defaultSkillPriority', formPolicies: Object.fromEntries(Object.entries(defaultPolicies)
+        .map(([form, policy]) => [form, serializeDefaultSkillPolicy(policy)])) } }, heroes, team, hero)
+    : actionType === 'cast' && !allHeroes && selectedSkill?.typeId
+      ? ruleMismatches(heroData, { action: { type: 'cast', skillTypeId: selectedSkill.typeId, target: draftTarget } }, heroes, team, hero)
+      : []
   const defaultHydraTargetSkill = hero?.skills.find((skill) => skill.typeId === defaultHydraTargetSkillId)
   const defaultHydraHeadPriorityIds = asNumberArray(
     defaultHydraTargetSkillId === undefined ? undefined : defaultSkillTargets[defaultHydraTargetSkillId]?.headTypeIds,
@@ -2009,7 +1999,41 @@ function RuleEditor({
     return condition
   }
 
-  function commit() {
+  function previewConditionNode(node: ConditionTreeNode): JsonObject {
+    if (node.type === 'group') return { type: 'group', operator: node.operator, negate: node.negate, children: node.children.map(previewConditionNode) }
+    const numeric = (value: string) => value.trim() ? Number(value) : undefined
+    const base = { type: node.type, negate: node.negate, heroTypeId: numeric(node.heroTypeId),
+      ...('teamPosition' in node ? { teamPosition: numeric(node.teamPosition) } : {}) }
+    if (node.type === 'heroState') return { ...base, state: node.state }
+    if (node.type === 'effectCount') return { ...base, target: node.target, polarity: node.polarity,
+      countAtLeast: numeric(node.countAtLeast), countAtMost: numeric(node.countAtMost) }
+    if (node.type === 'skillCooldown') return { ...base, skillTypeId: numeric(node.skillTypeId),
+      turnsAtLeast: numeric(node.turnsAtLeast), turnsAtMost: numeric(node.turnsAtMost) }
+    return { ...base, target: node.target, presence: node.presence, effect: {
+      ...(node.token ? /^\d+$/.test(node.token) ? { effectTypeId: Number(node.token) } : { kind: node.token } : {}),
+      ...(node.presence === 'has' ? { turnsAtLeast: numeric(node.turnsAtLeast), turnsAtMost: numeric(node.turnsAtMost) } : {}),
+    } }
+  }
+  const rulePreviewWhen: JsonObject = { activeHeroTypeId: allHeroes ? Array.from(new Set(heroes.flatMap(heroRuntimeIds))) : heroRuntimeIds(hero),
+    ...(bossMode === 'chimera' ? { form: forms } : {}),
+    ...(heroForm !== 'any' ? { activeHeroFormIndex: heroForm === 'original' ? 0 : 1 } : {}) }
+  if (ruleKind === 'strict') {
+    try { Object.assign(rulePreviewWhen, JSON.parse(advanced || '{}')) } catch { rulePreviewWhen.advancedDraft = advanced }
+    if (conditionTree.children.length) rulePreviewWhen.conditionTree = previewConditionNode(conditionTree)
+    for (const [key, value] of [
+      ...(bossMode === 'chimera' ? [['chimeraTurnAtLeast', turnMin], ['chimeraTurnAtMost', turnMax], ['turnsUntilFormChangeAtMost', switchWithin]] : []),
+      ['currentDamageAtLeast', damageMin],
+    ]) if (value.trim()) rulePreviewWhen[key] = Number(value) * (key === 'currentDamageAtLeast' ? 1_000_000 : 1)
+    if (bossMode === 'chimera' && nextForm) rulePreviewWhen.nextForm = nextForm
+    if (bossMode === 'chimera' && eligibleTrialId > 0) rulePreviewWhen.eligibleTrialsAny = [eligibleTrialId]
+  }
+  const rulePreview = describeRuleConditions(rulePreviewWhen, descriptionContext(effects, heroes, trials), true).full
+
+  function commit(anyway = false) {
+    if (!anyway && draftMismatches.length) {
+      setConfirmTargets(true)
+      return
+    }
     try {
       const extra = JSON.parse(advanced || '{}')
       if (!extra || Array.isArray(extra) || typeof extra !== 'object') throw new Error(tr('app.advancedConditionsMustBeAn'))
@@ -2261,7 +2285,7 @@ function RuleEditor({
   }
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root open={open} onOpenChange={requestEditorOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content rule-dialog">
@@ -2273,6 +2297,8 @@ function RuleEditor({
             <label className="field span-2"><span>{tr('app.ruleName')}</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={tr('app.leaveBlankToGenerateOne')} /></label>
             <div className="field span-2">
               <span>{tr('app.actingChampion')}</span>
+              {initial && !heroChooserExpanded && <div className="acting-hero-summary"><HeroAvatar hero={allHeroes ? undefined : hero} size="sm" /><strong>{allHeroes ? tr('app.anyActingChampion') : hero?.name ?? tr('app.noChampionSet')}</strong><button type="button" className="button ghost" onClick={() => setHeroChooserExpanded(true)}><Edit3 size={15} />{tr('rules.changeActingHero' as MessageKey)}</button></div>}
+              {(!initial || heroChooserExpanded) && <>
               <div className="hero-chooser">
                 <label className="hero-search"><Search size={15} /><input value={heroSearch} onChange={(event) => setHeroSearch(event.target.value)} placeholder={tr('app.searchChampionName')} /></label>
                 {ruleKind === 'strict' && <button type="button" aria-pressed={allHeroes} className={allHeroes ? 'all-heroes active' : 'all-heroes'} onClick={() => { const next = !allHeroes; setAllHeroes(next); setActionType(next && bossMode === 'chimera' ? 'executeTrialRecipe' : 'cast') }}><Users size={15} />{allHeroes ? tr('app.stopUsingAnyChampion') : tr('app.anyActingChampion')}</button>}
@@ -2281,6 +2307,8 @@ function RuleEditor({
                 {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); resetDefaultPoliciesForHero(item); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item.isMetamorph ? tr('app.mythicalTwoForms') : tr('app.activeSkillCount', { skillsCount: item.skills.length })}</small></span></button>)}
                 {!visibleHeroes.length && <span className="library-empty">{tr('app.noChampionFound')}</span>}
               </div>}
+              {initial && <button type="button" className="button ghost hero-chooser-done" onClick={() => setHeroChooserExpanded(false)}>{tr('rules.doneChoosingHero' as MessageKey)}</button>}
+              </>}
             </div>
             <div className="rule-kind span-2">
               <span className="mode-heading">{tr('app.ruleType')}</span>
@@ -2308,6 +2336,9 @@ function RuleEditor({
                 const allowedRank = prioritySkillIds.slice(0, index + 1).filter((value) => !blockedSkillIds.includes(value)).length
                 const skillTarget = skill.isTransform ? { type: 'self' } : (defaultSkillTargets[id] ?? { type: 'auto' })
                 const skillTargetType = typeof skillTarget.type === 'string' ? skillTarget.type : 'auto'
+                // Blocked skills and form switches take no target from here.
+                const rowReach = (blocked && !firstTurnSelected) || skill.isTransform ? undefined : skillReach(heroData, id)
+                const rowFits = (type: string, position?: unknown) => !rowReach || targetFits(rowReach, type, slotIsCaster(position))
                 return <div className={`skill-policy-row${blocked ? ' blocked' : ''}`} key={id}>
                   <span className="skill-rank">{blocked ? '—' : allowedRank}</span>
                   <HoverCard className="skill-policy-skill" inline={false} focusable={false} content={<SkillDetailCard hero={hero} skill={skill} />}>
@@ -2322,16 +2353,18 @@ function RuleEditor({
                     <select aria-label={tr('app.targetOf', { name: skill.name || tr('app.skill', { slot: skill.slot }) })} value={skillTargetType} disabled={(blocked && !firstTurnSelected) || Boolean(skill.isTransform)} onChange={(event) => setDefaultSkillTargetType(id, event.target.value)}>
                       <option value="auto">{tr('app.automaticLegalTarget')}</option>
                       {bossMode === 'chimera'
-                        ? <option value="boss">{tr('app.chimeraBoss')}</option>
-                        : <><option value="hydraHeadPriority">{tr('app.byHeadTypePriority')}</option><option value="devouringHead">{tr('app.devouringHead')}</option><option value="exposedNeck">{tr('app.exposedNeck')}</option><option value="lowestDefenseBoss">{tr('app.lowestDefHead')}</option><option value="lowestHpBoss">{tr('app.lowestHpHead')}</option></>}
-                      <option value="self">{tr('app.self')}</option>
-                      <option value="lowestHpAlly">{tr('app.lowestHpAlly2')}</option>
-                      <option value="allyPosition">{tr('app.preparedTeamSlot')}</option>
+                        ? <option value="boss">{tr('app.chimeraBoss')}{rowFits('boss') ? '' : ' ⚠'}</option>
+                        : <><option value="hydraHeadPriority">{tr('app.byHeadTypePriority')}{rowFits('hydraHeadPriority') ? '' : ' ⚠'}</option><option value="devouringHead">{tr('app.devouringHead')}{rowFits('devouringHead') ? '' : ' ⚠'}</option><option value="exposedNeck">{tr('app.exposedNeck')}{rowFits('exposedNeck') ? '' : ' ⚠'}</option><option value="lowestDefenseBoss">{tr('app.lowestDefHead')}{rowFits('lowestDefenseBoss') ? '' : ' ⚠'}</option><option value="lowestHpBoss">{tr('app.lowestHpHead')}{rowFits('lowestHpBoss') ? '' : ' ⚠'}</option></>}
+                      <option value="self">{tr('app.self')}{rowFits('self') ? '' : ' ⚠'}</option>
+                      <option value="lowestHpAlly">{tr('app.lowestHpAlly2')}{rowFits('lowestHpAlly') ? '' : ' ⚠'}</option>
+                      <option value="allyPosition">{tr('app.preparedTeamSlot')}{rowFits('allyPosition') ? '' : ' ⚠'}</option>
                     </select>
-                    {skillTargetType === 'allyPosition' && <select aria-label={tr('app.teamTargetOf', { name: skill.name || tr('app.skill', { slot: skill.slot }) })} value={typeof skillTarget.position === 'number' ? skillTarget.position : 1} disabled={blocked && !firstTurnSelected} onChange={(event) => setDefaultSkillTargetPosition(id, Number(event.target.value))}>{Array.from({ length: teamSize }, (_, teamIndex) => <option key={teamIndex + 1} value={teamIndex + 1}>{teamIndex + 1}. {teamHeroes[teamIndex]?.name ?? tr('app.notRead')}</option>)}</select>}
+                    {skillTargetType === 'allyPosition' && <select aria-label={tr('app.teamTargetOf', { name: skill.name || tr('app.skill', { slot: skill.slot }) })} value={typeof skillTarget.position === 'number' ? skillTarget.position : 1} disabled={blocked && !firstTurnSelected} onChange={(event) => setDefaultSkillTargetPosition(id, Number(event.target.value))}>{Array.from({ length: teamSize }, (_, teamIndex) => <option key={teamIndex + 1} value={teamIndex + 1}>{teamIndex + 1}. {teamHeroes[teamIndex]?.name ?? tr('app.notRead')}{rowFits('allyPosition', teamIndex + 1) ? '' : ' ⚠'}</option>)}</select>}
                     {bossMode === 'hydra' && skillTargetType === 'hydraHeadPriority' && <button type="button" className={defaultHydraTargetSkillId === id ? 'active' : ''} disabled={blocked && !firstTurnSelected} onClick={() => setDefaultHydraTargetSkillId(id)}>{tr('app.headOrder', { headTypeIdsCount: asNumberArray(skillTarget.headTypeIds).length || '' })}</button>}
                   </div>
                   <div className="skill-policy-actions"><button type="button" title={tr('app.raiseSkillPriority')} disabled={index === 0} onClick={() => setPrioritySkillIds((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title={tr('app.lowerSkillPriority')} disabled={index === prioritySkillIds.length - 1} onClick={() => setPrioritySkillIds((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" className={blocked ? 'blocked-toggle active' : 'blocked-toggle'} onClick={() => setBlockedSkillIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])}>{blocked ? tr('app.allowInTheDefaultRule') : tr('app.blockInTheDefaultRule')}</button></div>
+                  {rowReach && !rowFits(skillTargetType, skillTarget.position) && <div className="skill-policy-warning"><TargetNote kind="never" reach={rowReach}
+                    target={skillTargetType} position={typeof skillTarget.position === 'number' ? skillTarget.position : undefined} outcome="autoFallback" /></div>}
                 </div>
               })}</div>
               {bossMode === 'hydra' && defaultHydraTargetSkillId !== undefined && defaultSkillTargets[defaultHydraTargetSkillId]?.type === 'hydraHeadPriority' && <div className="head-priority-builder default-skill-head-priority">
@@ -2355,9 +2388,9 @@ function RuleEditor({
                 <legend>{tr('app.skillTarget')}</legend>
                 <div className="target-quick">
                   {bossMode === 'chimera'
-                    ? <button type="button" className={target === 'boss' ? 'active' : ''} onClick={() => setTarget('boss')}><Crosshair size={16} />{tr('app.chimeraBoss')}</button>
-                    : <><button type="button" className={target === 'hydraHeadPriority' ? 'active' : ''} onClick={() => setTarget('hydraHeadPriority')}><Waves size={16} />{tr('app.byHeadTypePriority')}</button><button type="button" className={target === 'devouringHead' ? 'active' : ''} onClick={() => setTarget('devouringHead')}><Crosshair size={16} />{tr('app.devouringHead')}</button><button type="button" className={target === 'exposedNeck' ? 'active' : ''} title={tr('app.withSeveralExposedNecksThe')} onClick={() => setTarget('exposedNeck')}><Zap size={16} />{tr('app.exposedNeck')}</button><button type="button" className={target === 'lowestDefenseBoss' ? 'active' : ''} title={tr('app.theHeadWithTheLowest')} onClick={() => setTarget('lowestDefenseBoss')}><ShieldCheck size={16} />{tr('app.lowestDefHead')}</button><button type="button" className={target === 'lowestHpBoss' ? 'active' : ''} onClick={() => setTarget('lowestHpBoss')}><Activity size={16} />{tr('app.lowestHpHead')}</button></>}
-                  <button type="button" className={target === 'self' ? 'active' : ''} onClick={() => setTarget('self')}><HeroAvatar hero={hero} size="sm" />{tr('app.self')}</button><button type="button" className={target === 'lowestHpAlly' ? 'active' : ''} onClick={() => setTarget('lowestHpAlly')}><Activity size={16} />{tr('app.lowestHpAlly2')}</button>
+                    ? <button type="button" className={targetClass('boss')} onClick={() => setTarget('boss')}><Crosshair size={16} />{tr('app.chimeraBoss')}</button>
+                    : <><button type="button" className={targetClass('hydraHeadPriority')} onClick={() => setTarget('hydraHeadPriority')}><Waves size={16} />{tr('app.byHeadTypePriority')}</button><button type="button" className={targetClass('devouringHead')} onClick={() => setTarget('devouringHead')}><Crosshair size={16} />{tr('app.devouringHead')}</button><button type="button" className={targetClass('exposedNeck')} title={tr('app.withSeveralExposedNecksThe')} onClick={() => setTarget('exposedNeck')}><Zap size={16} />{tr('app.exposedNeck')}</button><button type="button" className={targetClass('lowestDefenseBoss')} title={tr('app.theHeadWithTheLowest')} onClick={() => setTarget('lowestDefenseBoss')}><ShieldCheck size={16} />{tr('app.lowestDefHead')}</button><button type="button" className={targetClass('lowestHpBoss')} onClick={() => setTarget('lowestHpBoss')}><Activity size={16} />{tr('app.lowestHpHead')}</button></>}
+                  <button type="button" className={targetClass('self')} onClick={() => setTarget('self')}><HeroAvatar hero={hero} size="sm" />{tr('app.self')}</button><button type="button" className={targetClass('lowestHpAlly')} onClick={() => setTarget('lowestHpAlly')}><Activity size={16} />{tr('app.lowestHpAlly2')}</button>
                 </div>
                 {bossMode === 'hydra' && target === 'hydraHeadPriority' && <div className="head-priority-builder">
                   <div className="head-priority-heading"><strong>{tr('app.headPriority')}</strong><em>{headPriorityIds.length ? tr('app.headTypeCount', { headPriorityIdsCount: headPriorityIds.length }) : tr('app.automaticFallback')}</em></div>
@@ -2365,7 +2398,8 @@ function RuleEditor({
                   {headPriorityIds.length > 0 && <div className="head-priority-list">{headPriorityIds.map((typeId, index) => { const head = hydraHeads.find((item) => item.typeId === typeId); return <div className="head-priority-row" key={typeId}><span className="skill-rank">{index + 1}</span><HydraHeadIcon head={head ?? { typeId, name: tr('app.hydraHead', { typeId }) }} size="sm" /><span><strong>{head ? hydraHeadDisplayName(head) : tr('app.hydraHead', { typeId })}</strong></span><div><button type="button" title={tr('app.raisePriority')} disabled={index === 0} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next })}><ArrowUp size={15} /></button><button type="button" title={tr('app.lowerPriority')} disabled={index === headPriorityIds.length - 1} onClick={() => setHeadPriorityIds((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next })}><ArrowDown size={15} /></button><button type="button" title={tr('app.remove')} onClick={() => setHeadPriorityIds((current) => current.filter((value) => value !== typeId))}><Trash2 size={15} /></button></div></div> })}</div>}
                 </div>}
                 <div className="ally-target-heading"><Users size={15} /><span><strong>{tr('app.allyTarget')}</strong></span></div>
-                <div className={`position-targets position-targets-${teamSize}`}>{Array.from({ length: teamSize }, (_, index) => { const member = teamHeroes[index]; const position = index + 1; return <button type="button" key={position} className={target === 'allyPosition' && targetPosition === position ? 'position-target active' : 'position-target'} onClick={() => { setTarget('allyPosition'); setTargetPosition(position) }}><span className="position-number">{position}</span><HeroAvatar hero={member} size="md" /><span><strong>{member?.name ?? tr('app.notRead')}</strong></span></button> })}</div>
+                <div className={`position-targets position-targets-${teamSize}`}>{Array.from({ length: teamSize }, (_, index) => { const member = teamHeroes[index]; const position = index + 1; return <button type="button" key={position} className={`position-target${target === 'allyPosition' && targetPosition === position ? ' active' : ''}${fitsTarget('allyPosition', position) ? '' : ' illegal'}`} onClick={() => { setTarget('allyPosition'); setTargetPosition(position) }}><span className="position-number">{position}</span><HeroAvatar hero={member} size="md" /><span><strong>{member?.name ?? tr('app.notRead')}</strong></span></button> })}</div>
+                {draftMismatches.length > 0 && <div className="target-warning">{draftMismatches.map((mismatch) => <MismatchNote key={`${mismatch.target}:${mismatch.position ?? ''}`} mismatch={mismatch} hero={hero} heroes={heroes} outcome="neverActs" />)}</div>}
               </fieldset>}
               <div className="skill-detail span-2"><SkillIcon hero={hero} skill={selectedSkill} slot={slot} /><span><strong>{selectedSkill?.name || tr('app.skill', { slot })}{selectedSkill?.isTransform ? tr('app.formSwitchSkillSuffix') : ''}</strong><em>{gameDescription(selectedSkill?.description) || selectedSkill?.effectSummary || tr('app.skillDescriptionNotReadYet')}</em></span></div>
             </>}
@@ -2387,11 +2421,20 @@ function RuleEditor({
               </div>
               {renderConditionNode(conditionTree, 0, '')}
             </fieldset>
+            <div className="rule-logic-preview span-2"><span>{tr('rules.fullLogicPreview' as MessageKey)}</span><p data-i18n-skip>{rulePreview}</p></div>
             <details className="advanced-conditions span-2"><summary>{tr('app.fullConditionData')}</summary><label className="field"><textarea rows={7} value={advanced} onChange={(event) => setAdvanced(event.target.value)} spellCheck={false} /></label></details>
             </>}
           </div>
           {error && <div className="inline-error">{error}</div>}
-          <div className="dialog-footer actions-only"><div><Dialog.Close className="button ghost">{tr('app.cancel')}</Dialog.Close><button className="button primary" onClick={commit}>{tr('app.saveRule')}</button></div></div>
+          <div className="dialog-footer actions-only">{confirmDiscard
+            ? <div className="rule-discard-confirm" role="alert"><span>{tr('rules.unappliedRuleChanges' as MessageKey)}</span><div><button className="button ghost" onClick={() => setConfirmDiscard(false)}>{tr('rules.keepEditing' as MessageKey)}</button><button className="button danger" onClick={() => onOpenChange(false)}>{tr('rules.discardRuleChanges' as MessageKey)}</button></div></div>
+            : confirmTargets && draftMismatches.length > 0
+            ? <div className="target-confirm">
+                <div className="target-notes">{draftMismatches.map((mismatch) => <MismatchNote key={`${mismatch.skillTypeId}:${mismatch.target}:${mismatch.position ?? ''}`}
+                  mismatch={mismatch} hero={hero} heroes={heroes} outcome={ruleKind === 'default' ? 'autoFallback' : 'neverActs'} />)}</div>
+                <div><button className="button ghost" onClick={() => setConfirmTargets(false)}>{tr('target.goBack')}</button><button className="button primary" onClick={() => commit(true)}>{tr('rules.applyAnywayToDraft' as MessageKey)}</button></div>
+              </div>
+            : <><span className="rule-draft-help">{tr('rules.applyDraftHelp' as MessageKey)}</span><div><Dialog.Close className="button ghost">{tr('app.cancel')}</Dialog.Close><button className="button primary" onClick={() => commit()}>{tr('rules.applyToDraft' as MessageKey)}</button></div></>}</div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -2459,7 +2502,16 @@ function App() {
   }, [])
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
-  const [showLogs, setShowLogs] = useState(false)
+  const [logDrawerByMode, setLogDrawerByMode] = useState<Record<BossMode, boolean>>(() => {
+    try { return { chimera: logDrawerPreference(window.localStorage, 'chimera'), hydra: logDrawerPreference(window.localStorage, 'hydra') } }
+    catch { return { chimera: false, hydra: false } }
+  })
+  const showLogs = logDrawerByMode[bossMode]
+  function setShowLogs(update: SetStateAction<boolean>) {
+    const next = typeof update === 'function' ? update(logDrawerByMode[bossMode]) : update
+    setLogDrawerByMode((current) => ({ ...current, [bossMode]: next }))
+    try { window.localStorage.setItem(`studio:logs:${bossMode}`, next ? 'open' : 'closed') } catch { /* optional preference */ }
+  }
   const [logsExpanded, setLogsExpanded] = useState(false)
   const [ruleSearch, setRuleSearch] = useState('')
   const strategyImportRef = useRef<HTMLInputElement | null>(null)
@@ -2477,6 +2529,24 @@ function App() {
   const [simulationSummary, setSimulationSummary] = useState<SimulationSummary | null>(null)
   const [simulationReportId, setSimulationReportId] = useState<string | null>(null)
   const [highlightRule, setHighlightRule] = useState<number | null>(null)
+  const [ruleRevealVersion, setRuleRevealVersion] = useState(0)
+  const [strategyMenuOpen, setStrategyMenuOpen] = useState(false)
+  const strategyMenuRef = useRef<HTMLDivElement | null>(null)
+  // The strategy group menu closes on a click elsewhere or Escape.
+  useEffect(() => {
+    if (!strategyMenuOpen) return
+    const closeOutside = (event: PointerEvent) => {
+      if (!strategyMenuRef.current?.contains(event.target as Node)) setStrategyMenuOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setStrategyMenuOpen(false) }
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [strategyMenuOpen])
+  const [pendingRuleJump, setPendingRuleJump] = useState<{ index: number; version: number } | null>(null)
   const [ruleOpen, setRuleOpen] = useState(false)
   const [editIndex, setEditIndex] = useState<number | null>(null)
   const [trialSearchDifficulty, setTrialSearchDifficulty] = useState<number>(5)
@@ -2631,9 +2701,21 @@ function App() {
   const trials = difficulty?.trials ?? []
   const selectedTrials = objectives.mandatoryTrialIds ?? []
   const hydraDevourRetryConditions = objectives.devourOrderRetryConditions ?? EMPTY_HYDRA_DEVOUR_RETRY_CONDITIONS
+  // One opening battle simulation for both bosses. Each keeps its saved setting and its
+  // default: the Chimera's is on unless turned off, the Hydra's off unless turned on.
+  const openingForecastKey = bossMode === 'chimera' ? 'battleForecast' : 'devourOrderForecast'
+  const openingForecastOn = bossMode === 'chimera' ? objectives.battleForecast !== false : objectives.devourOrderForecast === true
   const selectedProcess = data?.processes.find((process) => process.pid === selectedPid)
   const strategyTeamIds = config.team?.heroTypeIds ?? config.team?.heroIds ?? []
   const team = strategyTeamIds.length ? strategyTeamIds : live.teamHeroIds ?? []
+  // Who each skill can target, for the rule target warnings.
+  const [heroData, setHeroData] = useState<HeroData | null>(null)
+  useEffect(() => {
+    let current = true
+    void loadPickerHeroData().then((value) => { if (current && value) setHeroData(value) })
+    return () => { current = false }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPid])
   const activeModeSpec = data?.modes.find((mode) => mode.id === bossMode)
   const teamSize = activeModeSpec?.teamSize ?? (bossMode === 'hydra' ? 6 : 5)
   // The full team on the preparation screen now, to set as the strategy's team.
@@ -2649,10 +2731,17 @@ function App() {
   const selectedStrategyProfile = strategyProfiles.find((profile) => profile.id === activeStrategyId)
   const selectedStrategyName = dataName(selectedStrategyProfile?.name || config.name || '') || tr('app.defaultStrategy')
   const configuredTeam = config.team?.heroTypeIds ?? config.team?.heroIds
-  const hasSavedStrategyTeam = Array.isArray(configuredTeam)
   const savedStrategyTeam = (selectedStrategyProfile?.teamHeroIds ?? configuredTeam ?? [])
     .filter((typeId) => Number.isInteger(typeId) && typeId > 0)
   const draftDirty = drafts.dirty(editorRef.current.key)
+  const startDisabledReason = controller.running ? tr('rules.alreadyRunning' as MessageKey)
+    : saving ? tr('rules.waitForSave' as MessageKey)
+    : profileBusy ? tr('rules.waitForStrategyAction' as MessageKey)
+    : loadingContext || loading ? tr('rules.waitForContext' as MessageKey)
+    : data?.storageHealth?.ok === false ? tr('rules.recoverBeforeStart' as MessageKey)
+    : connectionError ? tr('rules.reconnectBeforeStart' as MessageKey, { reason: backendText(connectionError) })
+    : !selectedProcess?.accountName ? tr('app.selectADetectedGameAccount')
+    : bossMode === 'hydra' && !live.modeReady ? tr('rules.hydraNotReady' as MessageKey) : ''
   // The team being edited is not the saved one yet.
   const teamUnsaved = draftDirty && (configuredTeam ?? []).join(',') !== (selectedStrategyProfile?.teamHeroIds ?? configuredTeam ?? []).join(',')
 
@@ -2667,10 +2756,30 @@ function App() {
   ), [simulationSummary, activeStrategyId])
   const onSimulationSummary = useCallback((value: SimulationSummary | null) => setSimulationSummary(value), [])
   const jumpToRule = useCallback((index: number) => {
+    if (!Number.isInteger(index) || index < 1 || index > rules.length) return
+    setRuleSearch('')
+    setRuleRevealVersion((version) => version + 1)
     setHighlightRule(index)
-    window.setTimeout(() => document.getElementById(`rule-row-${index}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 150)
-    window.setTimeout(() => setHighlightRule((current) => (current === index ? null : current)), 2800)
-  }, [])
+    setPendingRuleJump((current) => ({ index, version: (current?.version ?? 0) + 1 }))
+  }, [rules.length])
+  useLayoutEffect(() => {
+    if (!pendingRuleJump) return
+    return revealRuleAfterRender(pendingRuleJump.index, (id) => document.getElementById(id),
+      (callback) => window.requestAnimationFrame(callback), (id) => window.cancelAnimationFrame(id))
+  }, [pendingRuleJump, ruleRevealVersion, ruleSearch])
+  useEffect(() => {
+    if (!pendingRuleJump) return
+    const timer = window.setTimeout(() => setHighlightRule(null), 2800)
+    return () => window.clearTimeout(timer)
+  }, [pendingRuleJump])
+  useEffect(() => { setPendingRuleJump(null); setHighlightRule(null) }, [bossMode, activeStrategyId])
+  const filteredRules = rules.flatMap((rule, index) => {
+    const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
+    const query = ruleSearch.trim().toLocaleLowerCase()
+    const text = [rule.name, hero?.name, actionLabel(rule, heroes), targetLabel(rule, heroes, hydraHeads),
+      conditionLabel(rule, effects, heroes, trials)].join(' ').toLocaleLowerCase()
+    return !query || text.includes(query) ? [{ rule, index }] : []
+  })
 
   const completedTrials = useMemo(() => {
     const ids = new Set<number>(live.completedTrialIds ?? [])
@@ -2732,14 +2841,13 @@ function App() {
     setSimulationContextRevision(current => current + 1)
   }
 
-  // Every save also packages the team's complete simulation data.
-  // `value` replaces the edited strategy first.
-  async function save(showMessage = true, snapshotTeam = true, value?: Strategy) {
+  // Every save also packages the team's complete simulation data (and, with the
+  // game open, snapshots the team).
+  async function save() {
     if (savingRef.current || loadingContext || data?.storageHealth?.ok === false) return false
     savingRef.current = true
     setSaving(true)
     setError('')
-    if (value) setConfig(value)
     const context = { ...editorRef.current }
     const entry = drafts.get(context.key)
     const generation = entry?.generation ?? 0
@@ -2747,7 +2855,7 @@ function App() {
       const result = await api<StrategyBundle>('/api/config', {
         method: 'POST',
         body: JSON.stringify({ bossMode: context.mode, strategyId: activeStrategyId,
-          config: context.value, snapshotTeam, pid: selectedPid,
+          config: context.value, pid: selectedPid,
           expectedRevision: entry?.revision || undefined }),
       })
       const updated = drafts.saved(context.key, generation, result.config, result.revision)
@@ -2756,7 +2864,7 @@ function App() {
         editorRef.current.value = updated.value
         setConfigState(updated.value)
         setStrategyProfiles(result.strategyProfiles)
-        if (showMessage) setNotice(simulationSaveText(language, result.simulationPackage, result.message ?? tr('app.strategyGroupSaved')))
+        setNotice(simulationSaveText(language, result.simulationPackage, result.message ?? tr('app.strategyGroupSaved')))
       }
       return true
     } catch (reason) {
@@ -2774,13 +2882,13 @@ function App() {
 
   // Before an action that works on the saved strategy group; false when the user cancels.
   // Discarding restores the last saved version of this group.
-  async function settleUnsaved(action: UnsavedAction, snapshotTeam = true) {
+  async function settleUnsaved(action: UnsavedAction) {
     const context = { ...editorRef.current }
     if (!drafts.dirty(context.key)) return true
     const choice = await askUnsaved(action)
     setUnsavedPrompt(null)
     if (choice === 'cancel') return false
-    if (choice === 'save') return save(true, snapshotTeam)
+    if (choice === 'save') return save()
     const entry = drafts.get(context.key)
     drafts.forget(context.key)
     if (entry) showDraft(context.mode, activeStrategyId, entry.saved, entry.revision)
@@ -2835,11 +2943,7 @@ function App() {
           strategyId: activeStrategyId,
           name,
           pid: selectedPid,
-          ...(profileDialog === 'create' ? {
-            config: editorRef.current.value,
-            snapshotTeam: true,
-            pid: selectedPid,
-          } : {}),
+          ...(profileDialog === 'create' ? { config: editorRef.current.value } : {}),
         }),
       })
       applyStrategyBundle(result)
@@ -3040,7 +3144,7 @@ function App() {
 
   function moveRule(index: number, direction: number) {
     const target = index + direction
-    if (target < 0 || target >= rules.length) return
+    if (!canMoveRule(index, direction, rules.length, ruleSearch)) return
     setConfig((current) => {
       const next = [...(current.rules ?? [])]
       ;[next[index], next[target]] = [next[target], next[index]]
@@ -3066,21 +3170,46 @@ function App() {
           <button className="icon-button" onClick={() => void refreshAccounts()} disabled={refreshing || controller.running} title={tr('app.refreshAccounts')}><RefreshCw size={18} className={refreshing ? 'spin' : ''} /></button>
         </div>
         <div className="topbar-actions">
-          {controller.running && <button className="button pause" onClick={() => void stop()}><CirclePause size={17} />{tr('app.pauseTakeover')}</button>}
           <div className={`live-badge${connectionError ? ' offline' : ''}`} title={connectionError || undefined}><Activity size={16} /><span>{connectionError ? tr('app.disconnectedShowingTheLastReceived') : backendText(live.statusLabel || controller.status) || tr('app.waitingForStatus')}</span></div>
           <LanguagePicker locale={language} onChange={changeLanguage} />
         </div>
       </header>
 
-      <nav className="mode-switcher" aria-label={tr('app.bossMode')}>
-        {(data?.modes ?? []).map((mode) => (
-          <button key={mode.id} type="button" className={bossMode === mode.id ? 'active' : ''} disabled={controller.running || loadingContext || profileBusy || saving} onClick={() => void switchBossMode(mode.id)}>
-            <span className="mode-icon">{mode.id === 'chimera' ? <Swords size={21} /> : <Waves size={21} />}</span>
-            <span><strong>{modeName(mode.id)}</strong></span>
-            {mode.id === 'hydra' && mode.status !== 'ready' && !(bossMode === 'hydra' && live.modeReady) && <em>{tr('app.needsLiveCalibration')}</em>}
-          </button>
-        ))}
-      </nav>
+      <div className="mode-bar">
+        <nav className="mode-switcher" aria-label={tr('app.bossMode')}>
+          {(data?.modes ?? []).map((mode) => (
+            <button key={mode.id} type="button" className={bossMode === mode.id ? 'active' : ''} disabled={controller.running || loadingContext || profileBusy || saving} onClick={() => void switchBossMode(mode.id)}>
+              <span className="mode-icon">{mode.id === 'chimera' ? <Swords size={21} /> : <Waves size={21} />}</span>
+              <span><strong>{modeName(mode.id)}</strong></span>
+              {mode.id === 'hydra' && mode.status !== 'ready' && !(bossMode === 'hydra' && live.modeReady) && <em>{tr('app.needsLiveCalibration')}</em>}
+            </button>
+          ))}
+        </nav>
+        <div className={`strategy-picker${draftDirty ? ' dirty' : ''}`} ref={strategyMenuRef}>
+          <Layers3 size={17} className="strategy-picker-icon" />
+          <span className="strategy-picker-label">{tr('app.strategyGroups')}</span>
+          <select data-i18n-skip aria-label={tr('app.switchStrategyGroup')} title={tr('app.currentStrategyGroup')} value={activeStrategyId} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy || saving} onChange={(event) => void selectStrategyProfile(event.target.value)}>
+            {strategyProfiles.map((profile) => <option key={profile.id} value={profile.id}>{dataName(profile.name)} · {tr('app.ruleCount', { count: profile.ruleCount })}</option>)}
+          </select>
+          {draftDirty && <span className="strategy-unsaved">{saving ? tr('app.saving') : tr('app.unsaved')}</span>}
+          <button className="icon-button strategy-save" title={draftDirty ? tr('app.thisStrategyGroupHasUnsaved') : tr('app.saveThisStrategyGroup')} aria-label={tr('rules.saveStrategyGroup' as MessageKey)} disabled={saving || loadingContext || profileBusy || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={17} /></button>
+          <button className="icon-button" title={tr('rules.manageStrategyGroups' as MessageKey)} aria-label={tr('rules.manageStrategyGroups' as MessageKey)} aria-haspopup="menu" aria-expanded={strategyMenuOpen} onClick={() => setStrategyMenuOpen((open) => !open)}><MoreHorizontal size={18} /></button>
+          {strategyMenuOpen && <div className="strategy-menu" role="menu">
+            {([
+              ['copy', <Copy size={16} />, tr('app.createCopy'), () => openProfileNameDialog('create')],
+              ['import', <Upload size={16} />, tr('app.importStrategy'), () => strategyImportRef.current?.click()],
+              ['export', <Download size={16} />, tr('app.exportStrategy'), () => void exportStrategyProfile()],
+              ['rename', <Edit3 size={16} />, tr('app.renameStrategyGroup'), () => void beginRename()],
+              ['delete', <Trash2 size={16} />, tr('app.deleteStrategyGroup'), () => void deleteStrategyProfile()],
+            ] as const).map(([id, icon, label, run]) => (
+              <button key={id} type="button" role="menuitem" className={id === 'delete' ? 'danger' : ''}
+                disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy || (id === 'delete' && strategyProfiles.length <= 1)}
+                onClick={() => { setStrategyMenuOpen(false); run() }}>{icon}<span>{label}</span></button>
+            ))}
+          </div>}
+          <input ref={strategyImportRef} className="sr-only" type="file" accept=".json,.raid-strategy.json,application/json" onChange={(event) => void importStrategyFile(event)} />
+        </div>
+      </div>
 
       {(error || notice) && <div className={`toast ${error ? 'error' : ''}`}><span>{backendText(error || notice)}</span><button onClick={() => { setError(''); setNotice('') }}><X size={16} /></button></div>}
       {!error && selectedProcess?.error && <div className="toast error"><span>{tr('app.accountReadFailed', { error: backendText(selectedProcess.error) })}</span></div>}
@@ -3120,15 +3249,16 @@ function App() {
               <span><small>{tr('app.requiredTrials')}</small><strong>{selectedTrials.length ? tr('app.trialsSelected', { selectedTrialsCount: selectedTrials.length }) : tr('app.clickToChooseTrials')}</strong><em>{selectedTrialDescriptions[0] || tr('app.readsEveryTrialForThe')}</em></span>
               <ChevronDown size={18} />
             </button>}
-            {bossMode === 'chimera' && <button type="button" className={`devour-forecast-toggle ${objectives.battleForecast !== false ? 'selected' : ''}`} aria-pressed={objectives.battleForecast !== false} onClick={() => updateObjective('battleForecast', objectives.battleForecast === false)}>
-              <span className="check-box">{objectives.battleForecast !== false && <Check size={14} />}</span>
-              <span><strong>{tr('app.simulateTheWholeBattleAt')}</strong><small>{tr('app.whenTakingOverFromThe')}</small></span>
-            </button>}
             {bossMode === 'hydra' && <button className={`trial-trigger early-retry-trigger ${hydraDevourRetryConditions.length ? 'has-selection' : ''}`} disabled={!team.some((value) => value > 0)} onClick={() => setHydraDevourRetryOpen(true)}>
               <span className="trial-trigger-icon"><RefreshCw size={20} /></span>
-              <span><small>{tr('app.devourOrderRegroup')}</small><strong>{hydraDevourRetryConditions.length ? tr('app.devourConditionsSet', { hydraDevourRetryConditionsCount: hydraDevourRetryConditions.length }) : tr('app.setByMarkOrderAnd')}</strong><em>{objectives.devourOrderForecast ? tr('app.forecastAtBattleStartThen') : tr('app.firstTargetReadAtBattle')}</em></span>
+              <span><small>{tr('app.devourOrderRegroup')}</small><strong>{hydraDevourRetryConditions.length ? tr('app.devourConditionsSet', { hydraDevourRetryConditionsCount: hydraDevourRetryConditions.length }) : tr('app.setByMarkOrderAnd')}</strong><em>{openingForecastOn ? tr('app.forecastAtBattleStartThen') : tr('app.firstTargetReadAtBattle')}</em></span>
               <ChevronDown size={18} />
             </button>}
+            {/* The goals above, checked at the opening by simulating the whole battle (both bosses). */}
+            <button type="button" className={`devour-forecast-toggle ${openingForecastOn ? 'selected' : ''}`} aria-pressed={openingForecastOn} onClick={() => updateObjective(openingForecastKey, !openingForecastOn)}>
+              <span className="check-box">{openingForecastOn && <Check size={14} />}</span>
+              <span><strong>{tr('app.simulateTheWholeBattleAt')}</strong><small>{bossMode === 'chimera' ? tr('app.whenTakingOverFromThe') : tr('app.hydraOpeningForecastHint')}</small></span>
+            </button>
             {bossMode === 'hydra' && !live.modeReady && <p className="mode-calibration"><Waves size={16} /><span><strong>{tr('app.waitingForTheFirstLive')}</strong>{tr('app.enterTheHydraPreparationScreen')}</span></p>}
           </section>
           </CollapsiblePanel>
@@ -3138,42 +3268,67 @@ function App() {
             <div className="run-status"><span className={controller.running ? 'pulse' : ''}><Bot size={19} /></span><span><small>{tr('app.takeoverStatus')}</small><strong>{backendText(controller.status)}</strong></span></div>
             <div className="run-actions">
               <button className="button pause" disabled={!controller.running} onClick={() => void stop()}><CirclePause size={19} />{tr('app.pause')}</button>
-              <button className="button start" disabled={saving || loadingContext || data?.storageHealth?.ok === false || Boolean(connectionError) || controller.running || !selectedProcess?.accountName || (bossMode === 'hydra' && !live.modeReady)} onClick={() => void start()}><CirclePlay size={19} />{tr('app.start')}</button>
+              <button className="button start" aria-describedby={startDisabledReason && !controller.running ? 'start-disabled-reason' : undefined} disabled={Boolean(startDisabledReason)} onClick={() => void start()}><CirclePlay size={19} />{tr('app.start')}</button>
             </div>
+            {startDisabledReason && !controller.running && <p className="start-disabled-reason" id="start-disabled-reason">{startDisabledReason}</p>}
           </section>
           </CollapsiblePanel>
         </aside>
 
         <section className="strategy-column">
-          <CollapsiblePanel key={`${bossMode}:profiles`} id={`${bossMode}:profiles`} title={tr('app.strategyGroups')} hint={selectedStrategyName}>
-<section className="card strategy-profile-card">
-            <div className="strategy-profile-identity">
-              <span className="strategy-profile-icon"><Layers3 size={21} /></span>
-              <span><small>{tr('app.currentStrategyGroup')}{strategyAccount.name ? <em className="strategy-account" data-i18n-skip> · {strategyAccount.name}</em> : null}</small><strong data-i18n-skip>{selectedStrategyName}</strong></span>
+          <CollapsiblePanel key={`${bossMode}:rules`} id={`${bossMode}:rules`} title={tr('app.actionRules')} rules hint={rules.length} revealVersion={ruleRevealVersion}>
+<section className="card rules-card">
+            <div className="rules-header">
+              <div><span className="eyebrow"><Sparkles size={14} />{tr('app.strategyTree')}</span><h2>{tr('app.actionRules')}</h2></div>
+              <label className="rule-search"><Search size={16} /><input value={ruleSearch} onChange={(event) => setRuleSearch(event.target.value)} placeholder={tr('app.findChampionSkillOrRule')} aria-label={tr('app.findActionRules')} />{ruleSearch && <button type="button" className="icon-button" onClick={() => setRuleSearch('')} aria-label={tr('app.clearSearch')}><X size={15} /></button>}</label>
+              <div className="toolbar">{drafts.dirty(editorRef.current.key) && <><span className="draft-dirty">{tr('app.unsaved')}</span><button className="button ghost" disabled={saving || profileBusy || loadingContext || data?.storageHealth?.ok === false} onClick={() => void discardDraft()}>{tr('app.loadSavedVersion')}</button></>}<button className="button ghost" disabled={saving || loadingContext || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={17} />{tr('app.save')}</button><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />{tr('app.addRule')}</button></div>
             </div>
-            <label className="strategy-profile-select">
-              <span>{tr('app.switchStrategyGroup')}</span>
-              <select data-i18n-skip value={activeStrategyId} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onChange={(event) => void selectStrategyProfile(event.target.value)}>
-                {strategyProfiles.map((profile) => <option key={profile.id} value={profile.id}>{dataName(profile.name)} · {tr('app.ruleCount', { count: profile.ruleCount })}</option>)}
-              </select>
-            </label>
-            <div className="strategy-profile-team">
-              <span><small>{tr('app.savedTeam')}</small><strong>{hasSavedStrategyTeam ? `${savedStrategyTeam.length}/${teamSize}` : tr('app.notSavedYet')}</strong></span>
-              <div>{savedStrategyTeam.slice(0, teamSize).map((typeId, index) => <HeroAvatar key={`${typeId}-${index}`} hero={heroByRuntimeId(heroes, typeId)} size="sm" />)}</div>
-            </div>
-            <div className="strategy-profile-actions">
-              <button className={`button ${draftDirty ? 'primary' : 'ghost'} profile-save-button`} title={draftDirty ? tr('app.thisStrategyGroupHasUnsaved') : tr('app.saveThisStrategyGroup')} disabled={saving || loadingContext || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={16} /><span>{draftDirty ? tr('app.saveChanges') : tr('app.save')}</span></button>
-              <button className="button ghost profile-copy-button" title={tr('app.createCopy')} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => openProfileNameDialog('create')}><Copy size={16} /><span>{tr('app.createCopy')}</span></button>
-              <input ref={strategyImportRef} className="sr-only" type="file" accept=".json,.raid-strategy.json,application/json" onChange={(event) => void importStrategyFile(event)} />
-              <button className="icon-button" title={tr('app.importStrategy')} aria-label={tr('app.importStrategy')} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => strategyImportRef.current?.click()}><Upload size={16} /></button>
-              <button className="icon-button" title={tr('app.exportStrategy')} aria-label={tr('app.exportStrategy')} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => void exportStrategyProfile()}><Download size={16} /></button>
-              <button className="icon-button" title={tr('app.renameStrategyGroup')} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy} onClick={() => void beginRename()}><Edit3 size={16} /></button>
-              <button className="icon-button danger" title={tr('app.deleteStrategyGroup')} disabled={loadingContext || data?.storageHealth?.ok === false || controller.running || profileBusy || strategyProfiles.length <= 1} onClick={() => void deleteStrategyProfile()}><Trash2 size={16} /></button>
+            <div className="rule-results-heading"><span>{tr('rules.resultCount' as MessageKey, { shown: filteredRules.length, total: rules.length })}</span><small>{ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('rules.executionOrder' as MessageKey)}</small></div>
+            <div className="rules-list">
+              {!rules.length && <div className="empty-state"><Database size={34} /><strong>{tr('app.noStrategyRulesYet')}</strong><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />{tr('app.addRule')}</button></div>}
+              {rules.length > 0 && !filteredRules.length && <div className="empty-state rule-search-empty"><Search size={26} /><strong>{tr('rules.noMatchingRules' as MessageKey)}</strong><span>{tr('rules.noMatchingRulesHelp' as MessageKey)}</span><button type="button" className="button ghost" onClick={() => setRuleSearch('')}>{tr('app.clearSearch')}</button></div>}
+              {filteredRules.map(({ rule, index }) => {
+                const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
+                const action = rule.action ?? {}
+                const firstPriority = Array.isArray(action.prioritySkills) && action.prioritySkills[0] && typeof action.prioritySkills[0] === 'object' ? action.prioritySkills[0] as JsonObject : undefined
+                const slot = typeof action.skillSlot === 'number' ? action.skillSlot : typeof firstPriority?.skillSlot === 'number' ? firstPriority.skillSlot : undefined
+                const skillTypeId = typeof action.skillTypeId === 'number' ? action.skillTypeId : typeof firstPriority?.skillTypeId === 'number' ? firstPriority.skillTypeId : undefined
+                const skill = hero?.skills.find((item) => skillTypeId ? item.typeId === skillTypeId : item.slot === slot)
+                const usage = ruleUsage.get(index + 1)
+                const usageMatches = usage !== undefined && usage.rule === (rule.name || backendRuleName(index + 1))
+                const mismatches = ruleMismatches(heroData, rule, heroes, team, hero)
+                return (
+                  <article className={`rule-row${highlightRule === index + 1 ? ' highlight' : ''}`} id={`rule-row-${index + 1}`} tabIndex={-1} key={`${index}-${rule.name ?? ''}`}>
+                    <span className="priority" title={tr('rules.priorityNumber' as MessageKey, { number: index + 1 })}>{String(index + 1).padStart(2, '0')}</span>
+                    <HeroAvatar hero={hero} />
+                    <div className="rule-primary"><strong>{rule.name || tr('app.rule', { value: index + 1 })}</strong><span>{hero?.name ?? (action.type === 'executeTrialRecipe' ? tr('app.anyActingChampion') : tr('app.noChampionSet'))}</span>
+                      {bossMode === 'chimera' && usageMatches && <em className={`sim-usage${usage.uses > 0 ? '' : ' unused'}`} title={tr('app.fromTheLatestStrategySimulation')} data-i18n-skip>{usage.uses > 0
+                        ? (tr('app.simulatedPerRun', { usesPerRun: usage.usesPerRun }))
+                        : (tr('app.unusedInSimulation'))}</em>}
+                      {mismatches.length > 0 && <TargetTag kind="never" notes={mismatches.map((mismatch) => <MismatchNote key={`${mismatch.skillTypeId}:${mismatch.target}:${mismatch.position ?? ''}`}
+                        mismatch={mismatch} hero={hero} heroes={heroes} outcome={action.type === 'defaultSkillPriority' ? 'autoFallback' : 'neverActs'} />)} />}</div>
+                    <div className="form-pills">{bossMode === 'chimera' ? ruleForms(rule).slice(0, 4).map((form) => <span key={form} title={formLabel(form) ?? form}>{formShort(form) ?? form}</span>) : <span>{tr('app.wholeHydraBattle')}</span>}</div>
+                    <HoverCard className="rule-action" inline={false} focusable={false} content={skill ? <SkillDetailCard hero={hero} skill={skill} slot={slot} /> : null}>
+                      <SkillIcon hero={hero} skill={skill} slot={slot} /><span><small>{tr('app.action')}</small><strong>{actionLabel(rule, heroes)}</strong></span></HoverCard>
+                    <div className="rule-target"><Crosshair size={16} /><span><small>{tr('app.target')}</small><strong>{targetLabel(rule, heroes, hydraHeads)}</strong></span></div>
+                    {action.type === 'defaultSkillPriority'
+                      ? <div className="rule-condition"><small>{tr('app.defaultSkillRule')}</small><span>{action.formPolicies ? tr('app.setPerChimeraForm') : tr('app.skillsBlocked', { blockedSkillTypeIdsCount: asNumberArray(action.blockedSkillTypeIds).length })}</span></div>
+                      : <HoverCard className="rule-condition" inline={false} focusable={false} content={<><strong>{tr('rules.fullLogicPreview' as MessageKey)}</strong><p>{conditionDescription(rule, effects, heroes, trials, true).full}</p></>}>
+                        <small>{tr('app.strictRule')}</small><span>{conditionDescription(rule, effects, heroes, trials).summary}</span></HoverCard>}
+                    <div className="rule-buttons">
+                      <button className="icon-button" title={ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('app.moveUp')} aria-label={tr('rules.moveRuleUp' as MessageKey, { number: index + 1 })} disabled={!canMoveRule(index, -1, rules.length, ruleSearch)} onClick={() => moveRule(index, -1)}><ArrowUp size={16} /></button>
+                      <button className="icon-button" title={ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('app.moveDown')} aria-label={tr('rules.moveRuleDown' as MessageKey, { number: index + 1 })} disabled={!canMoveRule(index, 1, rules.length, ruleSearch)} onClick={() => moveRule(index, 1)}><ArrowDown size={16} /></button>
+                      <button className="icon-button" title={tr('app.edit')} aria-label={tr('rules.editRule' as MessageKey, { number: index + 1 })} onClick={() => { setEditIndex(index); setRuleOpen(true) }}><Edit3 size={16} /></button>
+                      <button className="icon-button danger" title={tr('app.delete')} aria-label={tr('rules.deleteRule' as MessageKey, { number: index + 1 })} onClick={() => setConfig((current) => ({ ...current, rules: (current.rules ?? []).filter((_, itemIndex) => itemIndex !== index) }))}><Trash2 size={16} /></button>
+                    </div>
+                  </article>
+                )
+              })}
             </div>
           </section>
           </CollapsiblePanel>
 
-          <CollapsiblePanel key={`${bossMode}:overview`} id={`${bossMode}:overview`} title={tr('app.battleOverview')} hint={damageText(live.damage ?? 0)}>
+          <CollapsiblePanel key={`${bossMode}:overview`} id={`${bossMode}:overview`} title={tr('app.battleOverview')} hint={damageText(live.damage ?? 0)} defaultOpen={false}>
           <div className="overview-grid">
             <Metric label={tr('app.currentDamage')} value={damageText(live.damage ?? 0)} icon={<Swords size={18} />} />
             <Metric label={tr('app.bossTurn2')} value={String(bossMode === 'chimera' ? live.chimeraTurn ?? 0 : live.hydraTurn ?? 0)} icon={<Activity size={18} />} />
@@ -3181,7 +3336,7 @@ function App() {
           </div>
           </CollapsiblePanel>
 
-          {bossMode === 'chimera' ? <CollapsiblePanel key={`${bossMode}:trials`} id={`${bossMode}:trials`} title={tr('app.completedTrials')} hint={completedTrials.length}>
+          {bossMode === 'chimera' ? <CollapsiblePanel key={`${bossMode}:trials`} id={`${bossMode}:trials`} title={tr('app.completedTrials')} hint={completedTrials.length} defaultOpen={false}>
 <section className="card completed-trials-card">
             <div className="completed-trials-heading">
               <span><BookOpenCheck size={20} /><strong>{tr('app.trialsCompletedThisRunAnd')}</strong></span>
@@ -3202,7 +3357,7 @@ function App() {
               </div>
             ) : <div className="completed-trials-empty"><Check size={17} /><span>{tr('app.noTrialsCompletedYet')}</span></div>}
           </section>
-          </CollapsiblePanel> : <CollapsiblePanel key={`${bossMode}:heads`} id={`${bossMode}:heads`} title={tr('app.hydraStatus')} >
+          </CollapsiblePanel> : <CollapsiblePanel key={`${bossMode}:heads`} id={`${bossMode}:heads`} title={tr('app.hydraStatus')} defaultOpen={false}>
 <section className="card completed-trials-card hydra-summary">
             <div className="completed-trials-heading"><span><Waves size={20} /><strong>{tr('app.hydraBattleFocus')}</strong></span><em>{live.modeReady ? tr('app.stateConnected') : tr('app.waitingForTheHydraState')}</em></div>
             {(live.heads?.length ?? 0) > 0 ? <div className="live-hydra-heads">{live.heads?.map((liveHead, index) => {
@@ -3223,7 +3378,7 @@ function App() {
             {!data.storageHealth.backups.length && <p>{tr('app.noValidBackupIsAvailable')}</p>}
           </section>
           </CollapsiblePanel>}
-          {bossMode === 'hydra' && (objectives.devourOrderForecast === true || controller.telemetry?.devourForecast || hydraForecasts.length > 0) && <HydraForecastPanel forecast={controller.telemetry?.devourForecast} history={hydraForecasts} observed={controller.telemetry?.devour?.sequence} heroes={heroes} language={language} onOpenReport={setHydraReportId} />}
+          {bossMode === 'hydra' && <HydraForecastPanel enabled={openingForecastOn} forecast={controller.telemetry?.devourForecast} history={hydraForecasts} observed={controller.telemetry?.devour?.sequence} heroes={heroes} language={language} onOpenReport={setHydraReportId} />}
           {bossMode === 'chimera' && <BattleForecastPanel language={language} enabled={objectives.battleForecast !== false} forecast={controller.telemetry?.battleForecast}
             history={chimeraSimulation?.battleForecasts ?? []} heroes={heroes} effects={effects} trialById={trialCatalogById} onOpenReport={setSimulationReportId} />}
           {bossMode === 'hydra' && <HydraSimulationPanel key={`${strategyAccount.key}:${activeStrategyId}`} language={language} overview={hydraSimulation} heroes={heroes} heads={hydraHeads} effects={effects} request={api}
@@ -3233,6 +3388,7 @@ function App() {
             draft={config} strategyId={activeStrategyId} strategyName={selectedStrategyName} strategyTeam={savedStrategyTeam}
             pid={selectedPid} onOpenReport={setSimulationReportId} onSummary={onSimulationSummary} />}
           <CollapsiblePanel key={`${bossMode}:decision`} id={`${bossMode}:decision`} title={tr('app.decisionExplanation')}
+            defaultOpen={false}
             hint={controller.telemetry?.decision ? controller.telemetry.decision.hero : toolText(tr('app.noRecordsYet'))}>
           <section className="card decision-panel">
             {controller.telemetry?.decision ? <>
@@ -3247,57 +3403,14 @@ function App() {
           </CollapsiblePanel>
 
 
-          <CollapsiblePanel key={`${bossMode}:rules`} id={`${bossMode}:rules`} title={tr('app.actionRules')} rules hint={rules.length}>
-<section className="card rules-card">
-            <div className="rules-header">
-              <div><span className="eyebrow"><Sparkles size={14} />{tr('app.strategyTree')}</span><h2>{tr('app.actionRules')}</h2></div>
-              <label className="rule-search"><Search size={16} /><input value={ruleSearch} onChange={(event) => setRuleSearch(event.target.value)} placeholder={tr('app.findChampionSkillOrRule')} aria-label={tr('app.findActionRules')} />{ruleSearch && <button type="button" className="icon-button" onClick={() => setRuleSearch('')} aria-label={tr('app.clearSearch')}><X size={15} /></button>}</label>
-              <div className="toolbar">{drafts.dirty(editorRef.current.key) && <><span className="draft-dirty">{tr('app.unsaved')}</span><button className="button ghost" disabled={saving || profileBusy || loadingContext || data?.storageHealth?.ok === false} onClick={() => void discardDraft()}>{tr('app.loadSavedVersion')}</button></>}<button className="button ghost" disabled={saving || loadingContext || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={17} />{tr('app.save')}</button><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />{tr('app.addRule')}</button></div>
-            </div>
-            <div className="rules-list">
-              {!rules.length && <div className="empty-state"><Database size={34} /><strong>{tr('app.noStrategyRulesYet')}</strong><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />{tr('app.addRule')}</button></div>}
-              {rules.map((rule, index) => {
-                const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
-                if (ruleSearch.trim() && ![rule.name, hero?.name, actionLabel(rule, heroes), conditionLabel(rule, effects, heroes, trials)].join(" ").toLocaleLowerCase().includes(ruleSearch.trim().toLocaleLowerCase())) return null
-                const action = rule.action ?? {}
-                const firstPriority = Array.isArray(action.prioritySkills) && action.prioritySkills[0] && typeof action.prioritySkills[0] === 'object' ? action.prioritySkills[0] as JsonObject : undefined
-                const slot = typeof action.skillSlot === 'number' ? action.skillSlot : typeof firstPriority?.skillSlot === 'number' ? firstPriority.skillSlot : undefined
-                const skillTypeId = typeof action.skillTypeId === 'number' ? action.skillTypeId : typeof firstPriority?.skillTypeId === 'number' ? firstPriority.skillTypeId : undefined
-                const skill = hero?.skills.find((item) => skillTypeId ? item.typeId === skillTypeId : item.slot === slot)
-                const usage = ruleUsage.get(index + 1)
-                const usageMatches = usage !== undefined && usage.rule === (rule.name || backendRuleName(index + 1))
-                return (
-                  <article className={`rule-row${highlightRule === index + 1 ? ' highlight' : ''}`} id={`rule-row-${index + 1}`} key={`${index}-${rule.name ?? ''}`}>
-                    <span className="priority">{String(index + 1).padStart(2, '0')}</span>
-                    <HeroAvatar hero={hero} />
-                    <div className="rule-primary"><strong>{rule.name || tr('app.rule', { value: index + 1 })}</strong><span>{hero?.name ?? (action.type === 'executeTrialRecipe' ? tr('app.anyActingChampion') : tr('app.noChampionSet'))}</span>
-                      {bossMode === 'chimera' && usageMatches && <em className={`sim-usage${usage.uses > 0 ? '' : ' unused'}`} title={tr('app.fromTheLatestStrategySimulation')} data-i18n-skip>{usage.uses > 0
-                        ? (tr('app.simulatedPerRun', { usesPerRun: usage.usesPerRun }))
-                        : (tr('app.unusedInSimulation'))}</em>}</div>
-                    <div className="form-pills">{bossMode === 'chimera' ? ruleForms(rule).slice(0, 4).map((form) => <span key={form} title={formLabel(form) ?? form}>{formShort(form) ?? form}</span>) : <span>{tr('app.wholeHydraBattle')}</span>}</div>
-                    <HoverCard className="rule-action" inline={false} focusable={false} content={skill ? <SkillDetailCard hero={hero} skill={skill} slot={slot} /> : null}>
-                      <SkillIcon hero={hero} skill={skill} slot={slot} /><span><small>{tr('app.action')}</small><strong>{actionLabel(rule, heroes)}</strong></span></HoverCard>
-                    <div className="rule-target"><Crosshair size={16} /><span><small>{tr('app.target')}</small><strong>{targetLabel(rule, heroes, hydraHeads)}</strong></span></div>
-                    <div className="rule-condition"><small>{action.type === 'defaultSkillPriority' ? tr('app.defaultSkillRule') : tr('app.strictRule')}</small><span>{action.type === 'defaultSkillPriority' ? (action.formPolicies ? tr('app.setPerChimeraForm') : tr('app.skillsBlocked', { blockedSkillTypeIdsCount: asNumberArray(action.blockedSkillTypeIds).length })) : conditionLabel(rule, effects, heroes, trials)}</span></div>
-                    <div className="rule-buttons">
-                      <button className="icon-button" title={tr('app.moveUp')} disabled={index === 0} onClick={() => moveRule(index, -1)}><ArrowUp size={16} /></button>
-                      <button className="icon-button" title={tr('app.moveDown')} disabled={index === rules.length - 1} onClick={() => moveRule(index, 1)}><ArrowDown size={16} /></button>
-                      <button className="icon-button" title={tr('app.edit')} onClick={() => { setEditIndex(index); setRuleOpen(true) }}><Edit3 size={16} /></button>
-                      <button className="icon-button danger" title={tr('app.delete')} onClick={() => setConfig((current) => ({ ...current, rules: (current.rules ?? []).filter((_, itemIndex) => itemIndex !== index) }))}><Trash2 size={16} /></button>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
-          </section>
-          </CollapsiblePanel>
+
 
           <section className={`log-drawer ${showLogs ? 'open' : ''}`}>
             <div className="log-handle">
               <button className="log-toggle" onClick={() => setShowLogs((value) => !value)}><span><Activity size={16} />{tr('app.runLog', { bossMode: modeName(bossMode) })} <em>{controller.logs.length}</em></span><ChevronDown size={17} /></button>
               <button className="log-maximize" title={tr('app.expandRunLog')} aria-label={tr('app.expandRunLog')} onClick={() => setLogsExpanded(true)}><Maximize2 size={16} /></button>
             </div>
-            {showLogs && <LogView key={bossMode} logs={controller.logs.slice(-200)} />}
+            {showLogs && <LogView key={bossMode} mode={bossMode} cursor={controller.logCursor} logs={controller.logs.slice(-200)} bufferHint={tr('rules.logRecentBuffer' as MessageKey, { count: 200 })} />}
           </section>
         </section>
       </main>
@@ -3334,8 +3447,8 @@ function App() {
       </Dialog.Root>
 
       {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={applyRequiredTrials} />}
-      {bossMode === 'hydra' && <HydraDevourRetryPicker open={hydraDevourRetryOpen} onOpenChange={setHydraDevourRetryOpen} heroes={heroes} team={team} conditions={hydraDevourRetryConditions} forecast={objectives.devourOrderForecast === true} onApply={(conditions, forecast) => setConfig((current) => ({ ...current, objectives: { ...(current.objectives ?? {}), devourOrderRetryConditions: conditions, devourOrderForecast: forecast } }))} />}
-      <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} onSave={saveRule} />
+      {bossMode === 'hydra' && <HydraDevourRetryPicker open={hydraDevourRetryOpen} onOpenChange={setHydraDevourRetryOpen} heroes={heroes} team={team} conditions={hydraDevourRetryConditions} onApply={(conditions) => setConfig((current) => ({ ...current, objectives: { ...(current.objectives ?? {}), devourOrderRetryConditions: conditions } }))} />}
+      <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} heroData={heroData} onSave={saveRule} />
       <TeamPreviewDialog language={language}
         snapshot={teamDialog === 'live' ? teamPreview : teamDialog === 'reference' ? config.referenceTeam ?? null : null}
         title={teamDialog === 'reference' ? (tr('app.authorSTeamSetup')) : (tr('app.currentTeamSetup'))}
@@ -3364,7 +3477,7 @@ function App() {
               <Dialog.Close className="icon-button" aria-label={tr('app.closeFullRunLog')}><X size={19} /></Dialog.Close>
             </div>
             <div className="log-dialog-status"><span className={`status-dot ${controller.running ? 'online' : ''}`} /><strong>{backendText(controller.status)}</strong><em>{tr('app.entryCount', { logsCount: controller.logs.length })}</em></div>
-            <LogView key={bossMode} logs={controller.logs} />
+            <LogView key={bossMode} mode={bossMode} cursor={controller.logCursor} logs={controller.logs} />
             <div className="dialog-footer"><span>{tr('app.eachBossModeKeepsIts')}</span><div><button className="button ghost" onClick={() => void clearLogs()}><Trash2 size={15} />{tr('app.clearThisMode')}</button><Dialog.Close className="button primary">{tr('app.collapseRunLog')}</Dialog.Close></div></div>
           </Dialog.Content>
         </Dialog.Portal>

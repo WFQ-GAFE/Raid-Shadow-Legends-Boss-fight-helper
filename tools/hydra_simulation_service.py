@@ -13,6 +13,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable
 
+from boss_stages import DIFFICULTIES
 from capture_identity import unique_first
 from chimera_simulation_service import KEEP_SIMULATIONS, SimulationService, _read_json, recent_folders, summary_row
 from hydra_forecast_live import REPORT_PREFIX, WORK_ROOT as FORECAST_ROOT
@@ -26,6 +27,15 @@ PROJECT_ROOT = Path(
 CAPTURE_ROOTS = {"capture": PROJECT_ROOT / "cache" / "hydra-capture", "forecast": FORECAST_ROOT}
 SIMULATION_ROOT = PROJECT_ROOT / "cache" / "hydra-simulations"
 PROVENANCE_TYPE = "verified_hydra_replay_source"
+
+
+def head_type_ids(setup: Any) -> list[int]:
+    """The week's heads in a saved battle: the four in play, then the two in reserve."""
+    try:
+        side = setup[0]["s"]
+        return [unit["i"] for unit in [*(side.get("h") or []), *(side.get("o") or [])] if isinstance(unit.get("i"), int)]
+    except (IndexError, KeyError, TypeError, AttributeError):
+        return []
 
 
 def list_captures(limit: int = 20, roots: dict[str, Path] | None = None) -> list[dict[str, Any]]:
@@ -64,6 +74,7 @@ def list_captures(limit: int = 20, roots: dict[str, Path] | None = None) -> list
             "seed": provenance.get("seed"),
             "teamHeroTypeIds": provenance.get("teamHeroTypeIds") or [],
             "teamHeroIds": provenance.get("teamHeroIds") or [],
+            "headTypeIds": head_type_ids(_read_json(folder / "battle-setup.json")),
             "strategyName": strategy.get("name") if isinstance(strategy, dict) else None,
         })
         if len(result) >= limit:
@@ -90,14 +101,19 @@ def recent_simulations(limit: int = 10, root: Path | None = None) -> list[dict[s
 
 class HydraSimulationService(SimulationService):
     boss_mode = "hydra"
+    # Every Hydra difficulty: the boss side is the stage's, checked against the server's (boss_stages).
+    other_difficulties = DIFFICULTIES["hydra"]
+    sets_boss_health = False
 
     def __init__(self, capture_roots: dict[str, Path] | None = None, simulation_root: Path = SIMULATION_ROOT,
                  runner: Callable[..., dict[str, Any]] = run_simulation,
-                 bundle_provider: Callable[[int | None], Path] | None = None):
+                 bundle_provider: Callable[[int | None], Path] | None = None,
+                 stage_provider: Callable[[], dict[str, Any]] | None = None):
         self.capture_roots = capture_roots or CAPTURE_ROOTS
         super().__init__(capture_root=self.capture_roots["capture"], simulation_root=simulation_root,
                          runner=runner, bundle_provider=bundle_provider,
-                         battle_forecast_root=self.capture_roots.get("forecast", simulation_root))
+                         battle_forecast_root=self.capture_roots.get("forecast", simulation_root),
+                         stage_provider=stage_provider)
 
     def _folder(self, simulation_id: str) -> Path:
         # An opening forecast's report lives in the forecast's own folder (hydra_forecast_live).
@@ -132,6 +148,14 @@ class HydraSimulationService(SimulationService):
     def _runner_arguments(self, capture: Path, provenance: dict[str, Any]) -> dict[str, Any]:
         return {"team_selection": {"heroTypeIds": provenance.get("teamHeroTypeIds") or [],
                                    "heroIds": provenance.get("teamHeroIds") or []}}
+
+    @staticmethod
+    def _stage_arguments(arguments: dict[str, Any], stage: dict[str, Any], stages: dict[str, Any]) -> dict[str, Any]:
+        return arguments  # the Hydra's rules name no difficulty
+
+    @staticmethod
+    def _stage_strategy(strategy: dict[str, Any], difficulty: int) -> dict[str, Any]:
+        return strategy
 
     @staticmethod
     def _progress(values: dict[str, Any]) -> tuple[str, int]:

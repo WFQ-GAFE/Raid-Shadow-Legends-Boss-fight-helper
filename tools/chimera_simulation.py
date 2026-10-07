@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable
 
 import chimera_controller as controller
-from simulation_common import battle_snapshot, decision_rule_index, opening_stats, rule_index_by_name, stuck_report
+from simulation_common import battle_snapshot, decision_rule_index, opening_stats, rule_index_by_name, stuck_report, target_misses
 
 
 SCHEMA = 1
@@ -149,6 +149,7 @@ class ChimeraOfflinePolicySession:
             state["_decisionTrace"] = []
             state["_decisionTraceLite"] = True
             state["_reservedStrictSkillTypeIds"] = []
+            state["_targetMisses"] = []
             decision = controller.pending_mythic_followup_decision(self.runtime_state, state)
             if decision is None:
                 decision = controller.evaluate(self.strategy, state, self.capability_memory, self.runtime_state)
@@ -182,10 +183,12 @@ class ChimeraOfflinePolicySession:
         self.previous = (state, decision)
         released = any(isinstance(entry, dict) and entry.get("outcome") == "reservation_released"
                        for entry in state.get("_decisionTrace") or [])
+        misses = state.get("_targetMisses") or []
         return {"status": "command", "actorId": state["activeHeroId"], "skillTypeId": skill["typeId"],
                 "skillSlot": skill.get("slot"), "targetId": decision.target_id, "rule": decision.rule,
                 "ruleIndex": decision_rule_index(self.strategy, state, decision.rule),
-                "trialId": decision.trial_id, **({"reservationReleased": True} if released else {})}
+                "trialId": decision.trial_id, **({"reservationReleased": True} if released else {}),
+                **({"targetMisses": misses} if misses else {})}
 
 
 def _reply_line(decision: dict[str, Any], sequence: int) -> str:
@@ -403,6 +406,7 @@ def summarize_run(result: dict[str, Any], strategy: dict[str, Any]) -> dict[str,
         "commands": engine.get("commands"),
         "stuck": result.get("stuck"),
         "reservationReleases": sum(1 for decision in decisions if decision.get("reservationReleased")),
+        "targetMisses": target_misses(decisions),
         "completedTrials": completed,
         "mandatory": [{"trialId": trial_id, "completed": trial_id in completed,
                        "completedBossTurn": completed.get(trial_id),
