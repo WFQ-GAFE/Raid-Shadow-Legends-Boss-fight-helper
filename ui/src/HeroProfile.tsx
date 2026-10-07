@@ -63,7 +63,7 @@ function damageLines(formulas: string[], scopes?: string[]) {
   return lines
 }
 
-export function HeroProfile({ language, data, dataState, effects, typeId, roster, name, bossMode, inTeam, canAdd, replacementSlots = [], heroAvatar, onToggle, onReplace, onClose }: {
+export function HeroProfile({ language, data, dataState, effects, typeId, roster, name, bossMode, inTeam, canAdd, heroAvatar, onToggle, onClose }: {
   language: UiLanguage
   data: HeroData | null
   dataState: 'loading' | 'ready' | 'unavailable'
@@ -74,10 +74,8 @@ export function HeroProfile({ language, data, dataState, effects, typeId, roster
   bossMode: 'chimera' | 'hydra'
   inTeam: boolean
   canAdd: boolean
-  replacementSlots?: { index: number; label: string }[]
   heroAvatar: (typeId: number) => ReactNode
   onToggle?: () => void
-  onReplace?: (index: number) => void
   onClose: () => void
 }) {
   const { t } = useI18n()
@@ -207,11 +205,6 @@ export function HeroProfile({ language, data, dataState, effects, typeId, roster
             <span>{t('profile.fromTheGameSLocal')}</span>
             <div>
               <Dialog.Close className="button ghost">{t('picker.close')}</Dialog.Close>
-              {onReplace && !inTeam && replacementSlots.length > 0 && <select className="profile-replace-select" value=""
-                aria-label={t('picker.selectReplacement', { name })} onChange={(event) => { if (event.target.value !== '') onReplace(Number(event.target.value)) }}>
-                <option value="" disabled>{t('picker.replaceInPosition')}</option>
-                {replacementSlots.map(({ index, label }) => <option key={index} value={index}>{label}</option>)}
-              </select>}
               {onToggle && (inTeam || canAdd) && <button type="button" className={`button ${inTeam ? 'ghost discard-button' : 'primary'}`} onClick={onToggle}>
                 {inTeam ? t('profile.removeFromTeam') : t('profile.addToTeam')}</button>}
             </div>

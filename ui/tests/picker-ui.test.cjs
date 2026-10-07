@@ -144,7 +144,7 @@ async function picker(initialIds = [1, 2, 3]) {
 }
 const slotIds = h => h.findAll(byClass('picker-slot-profile')).map(node => Number(node.props['aria-label'].match(/Champion (\d+)/)[1]));
 // Roster cards only: the team slots' avatars carry a hero too.
-const candidates = h => h.findAll(node => typeof node.type === 'function' && node.props.hero && Array.isArray(node.props.replacementSlots));
+const candidates = h => h.findAll(node => typeof node.type === 'function' && node.props.hero && typeof node.props.replaceable === 'boolean');
 
 test('removing the leader and dragging out a champion keep preview, aura and submitted team aligned', async () => {
   const h = await picker();
@@ -167,19 +167,29 @@ test('initial missing heroes are compacted before displaying the leader', async 
   h.dispose();
 });
 
-test('a full team offers readable candidates, direct position replacement, and duplicate-safe replacement', async () => {
+test('a full team keeps candidates readable and replaces a member by dragging; a click only says so', async () => {
   const h = await picker();
   h.find(node => node.type === 'button' && node.props.children === 'Reset all filters').props.onClick(); h.render();
-  let replacement = candidates(h).find(node => node.props.hero.id === 4);
-  const card = replacement.type(replacement.props);
-  assert.ok(!card.props.className.includes('blocked'));
-  const select = flatten(card).find(node => node.type === 'select');
-  assert.equal(select.props.children[1].length, 3);
-  select.props.onChange({ target: { value: '1' } }); h.render();
+  const dragOnto = (id, index) => {
+    const candidate = candidates(h).find(node => node.props.hero.id === id);
+    candidate.type(candidate.props).props.onDragStart({ dataTransfer: { setData() {} }, nativeEvent: { defaultPrevented: false } });
+    h.findAll(byClass('picker-slot'))[index].props.onDrop({ preventDefault() {} }); h.render();
+  };
+  let candidate = candidates(h).find(node => node.props.hero.id === 4);
+  const card = candidate.type(candidate.props);
+  assert.ok(candidate.props.replaceable && !card.props.className.includes('blocked'));
+  // No replace-a-slot controls: dragging is the way to replace.
+  assert.ok(!flatten(card).some(node => node.type === 'select'));
+  assert.ok(!h.findAll(byClass('picker-slot-replace')).length && !h.findAll(byClass('picker-replacement')).length);
+  candidate.props.onClick(candidate.props.hero, { detail: 1 }); h.render();
+  assert.deepEqual(slotIds(h), [101, 201, 301]);
+  assert.equal(h.find(byClass('picker-hint')).props.children, makeTranslate('en')('picker.theTeamIsFullDrag'));
+  dragOnto(4, 1);
   assert.deepEqual(slotIds(h), [101, 401, 301]);
-  replacement = candidates(h).find(node => node.props.hero.id === 5);
-  assert.deepEqual(replacement.props.replacementSlots.map(item => item.index), [0]);
-  replacement.props.onReplace(0, replacement.props.hero); h.render();
+  // Another copy of a champion in the team goes only into that champion's own slot.
+  dragOnto(5, 2);
+  assert.deepEqual(slotIds(h), [101, 401, 301]);
+  dragOnto(5, 0);
   assert.deepEqual(slotIds(h), [102, 401, 301]);
   h.dispose();
 });

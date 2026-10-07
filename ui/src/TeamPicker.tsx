@@ -49,19 +49,19 @@ function PickerAvatar({ hero, heroAvatar }: { hero: RosterHero; heroAvatar: (typ
 }
 
 // Only cards whose own state changed render again when a champion is chosen.
-const RosterCard = memo(function RosterCard({ language, hero, name, element, slot, replaceable, replacementSlots, duplicatePosition, heroAvatar, onClick, onOpen, onReplace, onDragStart, onDragEnd }: {
+// replaceable: not in the team, which is full (or holds another copy of the champion):
+// the card stays readable, since dragging it onto a team slot replaces that slot.
+const RosterCard = memo(function RosterCard({ language, hero, name, element, slot, replaceable, duplicatePosition, heroAvatar, onClick, onOpen, onDragStart, onDragEnd }: {
   language: UiLanguage
   hero: RosterHero
   name: string
   element?: string
   slot?: number
   replaceable: boolean
-  replacementSlots: { index: number; label: string }[]
   duplicatePosition?: number
   heroAvatar: (typeId: number) => ReactNode
   onClick: (hero: RosterHero, event: MouseEvent) => void
   onOpen: (hero: RosterHero, fromDoubleClick: boolean) => void
-  onReplace: (index: number, hero: RosterHero) => void
   onDragStart: (event: DragEvent, source: DragSource) => void
   onDragEnd: () => void
 }) {
@@ -73,8 +73,7 @@ const RosterCard = memo(function RosterCard({ language, hero, name, element, slo
       <button type="button" className={`head-type-option ${slot ? 'active' : ''}`} onClick={(event) => onClick(hero, event)}
         onDoubleClick={() => onOpen(hero, true)}
         aria-pressed={Boolean(slot)}
-        aria-label={replaceable ? t('picker.selectReplacement', { name }) : undefined}
-        title={slot ? t('picker.clickToRemoveDoubleClick') : replaceable ? t('picker.selectReplacement', { name }) : t('picker.clickToAddOrDrag')}>
+        title={slot ? t('picker.clickToRemoveDoubleClick') : t('picker.clickToAddOrDrag')}>
         <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
         <span><strong>{element && <i className={`element-dot element-${element}`} />}{name}</strong>
           <small>{`${hero.grade}★ · ${rarityName(language, hero.rarity)} · ${t('picker.lv', { level: hero.level })}${hero.empower ? ` · +${hero.empower}` : ''}`}</small>
@@ -83,11 +82,6 @@ const RosterCard = memo(function RosterCard({ language, hero, name, element, slo
         {slot && <em>{slot}</em>}
       </button>
       {duplicatePosition && <small className="picker-duplicate-note">{t('picker.duplicateConflict', { position: duplicatePosition })}</small>}
-      {replaceable && <select className="picker-card-replace" value="" aria-label={t('picker.selectReplacement', { name })}
-        onChange={(event) => { if (event.target.value !== '') onReplace(Number(event.target.value), hero) }}>
-        <option value="" disabled>{t('picker.replaceInPosition')}</option>
-        {replacementSlots.map(({ index, label }) => <option key={index} value={index}>{label}</option>)}
-      </select>}
       <button type="button" className="picker-card-info" aria-label={t('picker.profile', { name })} title={t('picker.profile2')}
         onClick={() => onOpen(hero, false)}><Info size={14} /></button>
     </div>
@@ -125,7 +119,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   const [heroData, setHeroData] = useState<HeroData | null>(null)
   const [dataState, setDataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
   const [profile, setProfile] = useState<RosterHero | null>(null)
-  const [replacement, setReplacement] = useState<RosterHero | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const [dragging, setDragging] = useState<DragSource['kind'] | null>(null)
   const [hint, setHint] = useState('')
@@ -153,7 +146,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     setError('')
     setQuery('')
     setProfile(null)
-    setReplacement(null)
     setHint('')
     setDataState('loading')
     setHeroData(null)
@@ -296,7 +288,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
       next[index] = hero
     }
     updateSlots(next)
-    setReplacement(null)
   }, [t, updateSlots])
 
   const toggle = useCallback((hero: RosterHero) => {
@@ -304,21 +295,16 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     const at = current.findIndex((item) => item?.id === hero.id)
     if (at >= 0) {
       updateSlots(current.map((item, index) => (index === at ? null : item)))
-      setReplacement(null)
       return
     }
     const empty = current.findIndex((item) => !item)
+    // A full team: dragging a champion onto a slot replaces it.
     if (empty < 0) {
-      setReplacement(hero)
-      setHint('')
-      return
-    }
-    if (current.some((item) => item && championId(item.typeId) === championId(hero.typeId))) {
-      setReplacement(hero)
+      setHint(t('picker.theTeamIsFullDrag'))
       return
     }
     place(empty, hero)
-  }, [place, updateSlots])
+  }, [place, updateSlots, t])
 
   // A double click opens the profile and is not a pick: its first click is undone.
   const clickCard = useCallback((hero: RosterHero, event: MouseEvent) => {
@@ -330,7 +316,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     const snapshot = clickSnapshot.current
     if (fromDoubleClick && snapshot?.heroId === hero.id) updateSlots(snapshot.slots)
     clickSnapshot.current = null
-    setReplacement(null)
     setProfile(hero)
   }, [updateSlots])
 
@@ -368,7 +353,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
       const next = [...slotsRef.current]
       ;[next[source.index], next[index]] = [next[index], next[source.index]]
       updateSlots(next)
-      setReplacement(null)
     }
   }
   const move = (index: number, step: number) => {
@@ -377,7 +361,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     const next = [...slots]
     ;[next[index], next[target]] = [next[target], next[index]]
     updateSlots(next)
-    setReplacement(null)
   }
 
   const leader = slots[0]
@@ -395,10 +378,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     setQuery(''); setGrades(new Set()); setRarities(new Set()); setPlaces(new Set(PLACES.map(([value]) => value)))
     setConditions([]); setElements(new Set()); setRoles(new Set()); setFactions(new Set())
   }
-  const replacementSlotsFor = (hero: RosterHero) => slots.flatMap((current, index) => {
-    if (!current || slots.some((other, at) => at !== index && other && championId(other.typeId) === championId(hero.typeId))) return []
-    return [{ index, label: `${index + 1} · ${nameOf(current.typeId)}` }]
-  })
   const filterGroups = [
     { key: 'grades', label: t('picker.stars'), all: false, entries: [...grades].map((value) => ({ key: String(value), label: `${value}★`, remove: () => setGrades((current) => toggled(current, value)) })) },
     { key: 'rarities', label: t('picker.rarity'), all: false, entries: [...rarities].map((value) => ({ key: String(value), label: rarityName(language, value), remove: () => setRarities((current) => toggled(current, value)) })) },
@@ -422,10 +401,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
           </div>
 
           <div className="picker-team">
-            {replacement && <div className="picker-replacement" role="status">
-              <span>{t('picker.replacementPending', { name: nameOf(replacement.typeId) })}</span>
-              <button type="button" className="button ghost picker-clear" onClick={() => setReplacement(null)}>{t('picker.cancelReplacement')}</button>
-            </div>}
             <div className={`picker-slots picker-slots-${teamSize}`}>
               {slots.map((hero, index) => (
                 <div key={hero ? `hero-${hero.id}` : `empty-${index}`}
@@ -442,11 +417,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
                       <PickerAvatar hero={hero} heroAvatar={heroAvatar} />
                       <small>{nameOf(hero.typeId)}</small>
                     </button>
-                    {replacement && replacementSlotsFor(replacement).some((item) => item.index === index) && <button type="button"
-                      className="picker-slot-replace" onClick={() => place(index, replacement)}
-                      aria-label={t('picker.replacePosition', { name: nameOf(replacement.typeId), position: index + 1, current: nameOf(hero.typeId) })}>
-                      {t('picker.replaceInPosition')} {index + 1}
-                    </button>}
                     <span className="picker-slot-actions">
                       <button type="button" title={t('picker.moveLeft')} aria-label={t('picker.moveChampionLeft', { name: nameOf(hero.typeId), position: index + 1 })} disabled={index === 0} onClick={() => move(index, -1)}><ArrowLeft size={13} /></button>
                       <button type="button" title={t('picker.remove')} aria-label={t('picker.removeChampion', { name: nameOf(hero.typeId), position: index + 1 })} onClick={() => toggle(hero)}><X size={13} /></button>
@@ -548,7 +518,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
                   event.preventDefault()
                   endDrag()
                   updateSlots((current) => current.map((item, index) => (index === source.index ? null : item)))
-                  setReplacement(null)
                 }}>
                 {error ? <p className="team-picker-note error">{backendText(error, language)}</p>
                   : roster === null ? <p className="team-picker-note">{t('picker.readingTheAccountSChampions')}</p>
@@ -561,9 +530,9 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
                           const slot = slotOf.get(hero.id)
                           const duplicate = !slot ? slots.findIndex((current) => current && championId(current.typeId) === championId(hero.typeId)) : -1
                           return <RosterCard key={hero.id} language={language} hero={hero} name={nameOf(hero.typeId)} element={elementOf.get(hero.typeId)} slot={slot}
-                            replaceable={!slot && (full || duplicate >= 0)} replacementSlots={replacementSlotsFor(hero)}
+                            replaceable={!slot && (full || duplicate >= 0)}
                             duplicatePosition={duplicate >= 0 ? duplicate + 1 : undefined} heroAvatar={heroAvatar}
-                            onClick={clickCard} onOpen={openProfile} onReplace={place} onDragStart={startDrag} onDragEnd={endDrag} />
+                            onClick={clickCard} onOpen={openProfile} onDragStart={startDrag} onDragEnd={endDrag} />
                         })}
                         {visible.length < shown.length && <div ref={moreRef} className="team-picker-more">
                           {t('picker.scrollDownForMore', { visibleCount: visible.length, shownCount: shown.length })}</div>}
@@ -588,8 +557,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
             roster={profile} name={profile ? nameOf(profile.typeId) : ''} bossMode={bossMode}
             inTeam={profile ? slotOf.has(profile.id) : false}
             canAdd={profile ? !full && !chosenChampions.has(championId(profile.typeId)) : false}
-            replacementSlots={profile && !slotOf.has(profile.id) ? replacementSlotsFor(profile) : []}
-            onReplace={profile ? (index) => place(index, profile) : undefined}
             heroAvatar={heroAvatar} onToggle={profile ? () => toggle(profile) : undefined} onClose={() => setProfile(null)} />
         </Dialog.Content>
       </Dialog.Portal>
