@@ -12,12 +12,12 @@ A Windows helper for the Chimera and Hydra fights in **RAID: Shadow Legends**: w
 
 **RAID: Shadow Legends** 奇美拉与六头蛇战斗的 Windows 助手：为队伍编写技能规则，让工具按规则出手，并在实战前离线检验规则。
 
-Current version: **1.1.3** ([release notes / notas da versão](docs/1.1.3-release-notes.md)) · 当前版本：**1.1.3**（[更新说明](docs/1.1.3-release-notes.md)）
+Current version: **1.1.4** ([release notes / notas da versão](docs/1.1.4-release-notes.md)) · 当前版本：**1.1.4**（[更新说明](docs/1.1.4-release-notes.md)）
 
 ## Getting started / 开始使用
 
-1. Download `RSL-Boss-helper-1.1.3.exe` from the latest release and run it; no installation is needed (Windows x64 with the Microsoft Edge WebView2 Runtime).<br>
-   从最新版本下载 `RSL-Boss-helper-1.1.3.exe` 直接运行，无需安装（Windows x64，需要 Microsoft Edge WebView2 运行库）。
+1. Download `RSL-Boss-helper-1.1.4.exe` from the latest release and run it; no installation is needed (Windows x64 with the Microsoft Edge WebView2 Runtime).<br>
+   从最新版本下载 `RSL-Boss-helper-1.1.4.exe` 直接运行，无需安装（Windows x64，需要 Microsoft Edge WebView2 运行库）。
 2. Start RAID, pick your account in the tool and choose Chimera or Hydra. Open the boss preparation screen and the tool reads your team.<br>
    打开游戏，在工具中选择账号和奇美拉或六头蛇模式。打开 Boss 准备界面，工具会读取你的队伍。
 3. Write rules in **Action rules** (or import a strategy someone shared) and set **Battle Goals**. On the preparation screen, click **Start** under **Controller**: the tool starts the battle and plays it from the opening.<br>
@@ -25,16 +25,16 @@ Current version: **1.1.3** ([release notes / notas da versão](docs/1.1.3-releas
 4. After updating the tool, restart the game once. Your strategies are kept in `%LOCALAPPDATA%\RSL-Boss-helper` and carried over from earlier versions automatically.<br>
    更新工具后请重启一次游戏。策略保存在 `%LOCALAPPDATA%\RSL-Boss-helper`，旧版本的策略会自动带过来。
 
-## What's new in 1.1.3 / 1.1.3 新功能
+## What's new in 1.1.4 / 1.1.4 新功能
 
-- **Simulate any difficulty:** Hydra and Chimera simulations are built from the game's own stage data, so you can test your rules on a difficulty you have not fought yet. For the Chimera you can also set the Boss's starting HP. Take over one battle from the opening once; after a Boss rotation, take over another battle from its opening to update it.<br>
-  **任意难度模拟：** 六头蛇和奇美拉的模拟按游戏自带的关卡数据生成，没打过的难度也能检验规则；奇美拉还能设置 Boss 开打血量。只需用工具从开局接管过一场战斗；Boss 轮换后再从开局接管一场即可更新。
-- **Rule target checks:** the rule editor checks each skill's valid targets from the game data, marks targets the skill cannot reach and asks before applying such a rule. The run log explains rules skipped because their target was unavailable; simulation reports list those rules and their counts.<br>
-  **规则目标检查：** 规则编辑器按游戏数据检查技能能选的目标，标出技能够不到的目标并在应用前确认；运行日志说明因目标不可选而跳过的规则，模拟报告列出对应规则与次数。
-- **Richer simulation reports:** filter the action log by buffs and debuffs, Chimera trials and forms or Hydra head types; see which enemy actions hit a champion, remaining shields and other absorb values, and actual hits when some enemy skills choose a different target; switch runs or jump to where a run stopped.<br>
-  **更详细的模拟报告：** 出手记录可按增益/减益、奇美拉试炼与形态、六头蛇蛇头类型筛选；查看英雄被哪些敌人出手打到、护盾等吸收值的剩余量，以及部分敌方技能重新选取的实际命中目标；可切换场次或跳到卡住的位置。
-- **Also:** a fix for a game crash when saving a team picked from the roster (restart the game after updating), rule conditions explained in plain words, a tidier main window, team picker improvements and report fixes.<br>
-  **其他：** 修复保存自选队伍时游戏崩溃（更新后请重启游戏），规则条件改用文字解释，主界面整理，选人器改进，以及报告显示修复。
+- **More human-like pacing:** the tool waits a short random moment before each regroup, each battle start and each skill, and takes a short break after many retries in a row. Built in; nothing to set.<br>
+  **更像真人的操作节奏：** 重整、开战和每次出手前都会随机停顿片刻，连续重来多次后还会稍作休息。已内置，无需设置。
+- **Faster regroups:** when the opening simulation predicts the goals will fail, the tool regroups as soon as the simulation finishes, even in the middle of a skill animation, for both Hydra and Chimera.<br>
+  **重整更快：** 开局模拟预计无法达成目标时，模拟一算完就立即重整，技能动画中途也可以；六头蛇和奇美拉都适用。
+- **Simulations closer to real battles:** fixed Chimera simulations that could add the Hydra area bonus to your team. After a Boss rotation, simulations use the current rotation's Boss once you have opened the Boss preparation screen with the tool running. Teams use your own account's bonuses even when the base battle came from another account.<br>
+  **模拟更接近实战：** 修复奇美拉模拟可能把六头蛇区域加成算进队伍的问题。Boss 换轮后，只要工具开着时打开过一次 Boss 准备界面，模拟就按本轮的 Boss 进行。用其他账号的战斗作底子时，队伍加成按本账号计算。
+- **Also:** picking a run in a simulation report shows its damage and its trials or regroup result, and champion names and portraits missing on first use are now filled in automatically.<br>
+  **其他：** 在模拟报告中选择某一场时显示该场伤害和试炼或重整情况；修复首次使用时英雄名称和头像缺失的问题。
 
 ## Features / 主要功能
 
