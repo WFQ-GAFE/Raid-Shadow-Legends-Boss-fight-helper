@@ -18,8 +18,10 @@ import {
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 
-// headTypeIds: the week's heads (the four in play, then the two in reserve).
-type HydraCapture = { id: string; capturedAt?: string; stageId?: number; difficulty?: number; seed?: number; teamHeroTypeIds: number[]; headTypeIds?: number[]; strategyName?: string | null }
+// headTypeIds: the week's heads (the four in play, then the two in reserve); rotationHeadTypeIds: the
+// heads of the newer rotation the game showed, which the simulation rebuilds the Hydra on.
+type HydraCapture = { id: string; capturedAt?: string; stageId?: number; difficulty?: number; seed?: number; teamHeroTypeIds: number[]; headTypeIds?: number[]; strategyName?: string | null
+  rotationStageId?: number; rotationHeadTypeIds?: number[]; otherAccount?: boolean; teamLevelKnown?: boolean }
 type HydraRecent = { id: string; createdAt?: string; strategyName?: string; status?: string; runs?: number; finishedRuns?: number; damageMedian?: number | null; regroupRuns?: number; stuckRuns?: number }
 export type HydraSimulationOverview = { strategyId?: string; captures: HydraCapture[]; job?: SimulationJob | null; recent: HydraRecent[]; teamSources?: TeamSources }
 
@@ -72,7 +74,8 @@ type Summary = {
   reason?: string
   strategy: { id?: string; name?: string; rules?: number }
   // openingDifficulty: the saved opening's own, when it ran on another difficulty (boss from the game's stage data).
-  capture: { id: string; stageId?: number; seed?: number; teamHeroTypeIds?: number[]; difficulty?: number; teamSource?: string; teamSavedAt?: string; openingStageId?: number; openingDifficulty?: number }
+  // rotationRebuilt: the heads are the game's current rotation, newer than the opening's.
+  capture: { id: string; stageId?: number; seed?: number; teamHeroTypeIds?: number[]; difficulty?: number; teamSource?: string; teamSavedAt?: string; openingStageId?: number; openingDifficulty?: number; rotationRebuilt?: boolean }
   // The team the simulation ran with (reports from 1.1.1 on).
   team?: SimulationTeam | null
   runs?: RunSummary[]
@@ -178,6 +181,8 @@ export function HydraSimulationPanel({ language, overview, heroes, heads, effect
   const baseDifficulty = capture?.difficulty
   const [chosenDifficulty, setDifficulty] = useRunDifficulty('hydra', baseDifficulty, DIFFICULTIES)
   const rebuilt = baseDifficulty !== undefined && chosenDifficulty !== undefined && chosenDifficulty !== baseDifficulty
+  // The heads the simulation plays: the newer rotation's when the game showed one.
+  const baseHeads = capture?.rotationHeadTypeIds ?? capture?.headTypeIds ?? []
   const inputSignature = simulationInputSignature({ config: draft, strategyId, captureId, runs, teamSource, difficulty: chosenDifficulty,
     teamSavedAt: teamSource === 'author' ? sources?.author?.savedAt : teamSource === 'strategy' ? sources?.strategy?.savedAt : undefined })
   const inputsChanged = Boolean(summary && (origins[summary.id] ? origins[summary.id] !== inputSignature
@@ -227,8 +232,8 @@ export function HydraSimulationPanel({ language, overview, heroes, heads, effect
             <div className="field team-source-field"><span>{t('chimeraSim.team')}</span>
               <TeamSourcePicker options={teamOptions} value={teamSource} onChange={setTeamSource} disabled={blocked} /></div>
             <p className="team-source-check">{teamCheckText(language, sources?.check)}</p>
-            <SimulationBase capture={capture} difficultyText={(difficulty) => difficultyText(language, difficulty)}>
-              {capture.headTypeIds?.length ? <span className="simulation-base-icons">{capture.headTypeIds.map((typeId, index) =>
+            <SimulationBase capture={capture} difficultyText={(difficulty) => difficultyText(language, difficulty)} teamSwapped={teamSource !== 'battle'}>
+              {baseHeads.length ? <span className="simulation-base-icons">{baseHeads.map((typeId, index) =>
                 <span key={`${typeId}-${index}`} className={index >= 4 ? 'reserve' : ''}><HeadIcon typeId={typeId} size="xs" /></span>)}</span> : null}
             </SimulationBase>
             <div className="simulation-controls">
@@ -328,6 +333,7 @@ export function HydraSimulationReport({ language, simulationId, onClose, heroes,
   }, [simulationId])
   const aggregate = summary?.aggregate
   const rebuilt = summary?.capture.openingDifficulty !== undefined
+  const otherDifficulty = rebuilt && summary?.capture.openingDifficulty !== summary?.capture.difficulty
   const description = summary
     ? t('sim.reportSummary', { createdAt: summary.createdAt, difficulty: difficultyText(language, summary.capture.difficulty), calculated: aggregate?.finishedRuns ?? 0, total: aggregate?.runs ?? 0 })
     : t('sim.loading')
@@ -343,8 +349,9 @@ export function HydraSimulationReport({ language, simulationId, onClose, heroes,
               <div className="simulation-report-title"><Dialog.Title><FlaskConical size={17} /> {summary?.kind === 'battle' ? t('hydraSim.openingForecastReport') : t('hydraSim.hydraStrategySimulationReport')} · {summary?.strategy.name || '…'}</Dialog.Title>
                 <Dialog.Close className="icon-button" aria-label={t('chimeraSim.closeSimulationReport')}><X size={19} /></Dialog.Close></div>
               <div className="simulation-report-meta"><Dialog.Description>{description}</Dialog.Description>
-              {rebuilt && <em className="tag team-source-tag" title={t('sim.rebuiltHint')}>
+              {otherDifficulty && <em className="tag team-source-tag" title={t('sim.rebuiltHint')}>
                 {t('sim.rebuiltFrom', { opening: difficultyText(language, summary?.capture.openingDifficulty) })}</em>}
+              {summary?.capture.rotationRebuilt && <em className="tag team-source-tag" title={t('sim.rotationRebuiltHint')}>{t('sim.rotationRebuilt')}</em>}
               {summary?.capture.teamSource && summary.capture.teamSource !== 'battle' && <em className="tag team-source-tag" title={summary.capture.teamSavedAt ?? ''}>{teamSourceLabel(language, summary.capture.teamSource)}</em>}
               {summary?.capture.teamHeroTypeIds && <HeroList typeIds={summary.capture.teamHeroTypeIds} />}
               <SimulationTeamButton team={summary?.team} />
@@ -451,6 +458,27 @@ function LogTab({ summary, runIndex, setRunIndex, request, onJump }: { summary: 
     { key: 'reserved', label: t('chimeraSim.onlyActionsThatUsedA'), test: (row: HydraRow) => row.reservationReleased === true },
   ], [t])
   const runs = (summary.runs ?? []).map((run) => run.index).sort((a, b) => a - b)
+  // Each run's damage and the live verdict on the goals, in the run list and beside it for the run shown.
+  const minimumDamage = summary.aggregate?.minimumDamage ?? 0
+  const hasGoals = minimumDamage > 0 || Boolean(summary.aggregate?.devourConditions)
+  const runEnd = (item: RunSummary) => item.stuck ? t('hydraSim.stoppedTurn', { turn: item.stuck.turn ?? '?' })
+    : item.status === 'complete' ? t('hydraSim.finishedTurns', { turn: item.turn ?? '?' })
+    : item.status === 'partial' ? t('sim.partialCalculation') : toolText(lang, item.reason ?? item.status)
+  const verdict = (item: RunSummary) => item.verdict.verdict === 'retry' ? t('hydraSim.regroup2')
+    : item.verdict.verdict === 'continue' && hasGoals && item.status === 'complete' ? t('hydraSim.continue') : ''
+  const runOption = (index: number) => {
+    const item = summary.runs?.find((entry) => entry.index === index)
+    return item ? [damageText(item.damage), item.stuck ? runEnd(item) : '', verdict(item)].filter(Boolean).join(' · ') : ''
+  }
+  const run = summary.runs?.find((item) => item.index === runIndex)
+  const runFacts = run && <>
+    <span><small>{t('chimeraSim.damage')}</small>
+      <strong className={minimumDamage > 0 ? (run.damage ?? 0) >= minimumDamage ? 'good' : 'bad' : ''}>{damageText(run.damage)}</strong>
+      {minimumDamage > 0 && <small>{t('sim.damageGoal', { goal: damageText(minimumDamage) })}</small>}</span>
+    <span><small>{t('chimeraSim.result')}</small><strong className={run.stuck ? 'bad' : ''}>{runEnd(run)}</strong></span>
+    {verdict(run) && <span><small>{t('hydraSim.liveVerdict')}</small>
+      <strong className={run.verdict.verdict === 'retry' ? 'bad' : 'good'}>{verdict(run)}</strong></span>}
+  </>
   return <ActionLog<HydraRow>
     rows={detail?.timeline ?? null}
     bossSkills={detail?.bossSkills}
@@ -458,6 +486,8 @@ function LogTab({ summary, runIndex, setRunIndex, request, onJump }: { summary: 
     runs={runs}
     runIndex={runIndex}
     setRunIndex={setRunIndex}
+    runOption={runOption}
+    runFacts={runFacts}
     groupOf={(row) => Math.floor(Math.max(row.turn - 1, 0) / TURNS_PER_GROUP)}
     groupTitle={(block, rows) => {
       const damage = rows.reduce((total, row) => total + row.damage, 0)

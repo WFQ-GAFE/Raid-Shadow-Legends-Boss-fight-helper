@@ -22,6 +22,7 @@ import time
 from typing import Any, Callable
 
 import chimera_controller as controller
+from engine_prestart import PrestartedEngine, popen_with
 from simulation_common import battle_snapshot, decision_rule_index, opening_stats, rule_index_by_name, stuck_report, target_misses
 
 
@@ -209,8 +210,10 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                    start_selection: dict[str, Any] | None = None,
                    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
                    cancel: threading.Event | None = None,
-                   on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-    """One isolated original-engine Chimera battle driven by the strategy."""
+                   on_progress: Callable[[dict[str, Any]], None] | None = None,
+                   engine: PrestartedEngine | None = None) -> dict[str, Any]:
+    """One isolated original-engine Chimera battle driven by the strategy.
+    ``engine``: one started ahead for this battle (engine_prestart), used when it fits."""
     started = time.monotonic()
     result: dict[str, Any] = {"schema": SCHEMA, "type": "chimera_strategy_simulation", "status": "unknown",
                               "reason": None, "requestedSeed": seed, "decisions": []}
@@ -228,10 +231,12 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
     except ValueError as error:
         result["reason"] = str(error)
         return result
-    process = subprocess.Popen(
-        [str(probe), "chimera-forecast", str(packed_input), "captured" if seed is None else str(int(seed))],
+    parameter = "captured" if seed is None else str(int(seed))
+    process, engine = popen_with(engine, probe, "chimera-forecast", parameter, packed_input, lambda: subprocess.Popen(
+        [str(probe), "chimera-forecast", str(packed_input), parameter],
         cwd=str(probe.parent), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)))
+    result["prestarted"] = engine is not None
     stderr_chunks: list[bytes] = []
     drain = threading.Thread(target=lambda: stderr_chunks.append(process.stderr.read()), daemon=True)
     drain.start()
@@ -290,6 +295,8 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         except subprocess.TimeoutExpired:
             process.kill()
         drain.join(timeout=5)
+        if engine is not None:
+            engine.finished()
     result["elapsedSeconds"] = round(time.monotonic() - started, 3)
     result["objectiveEvents"] = session.objective_events
     if timed_out.is_set():

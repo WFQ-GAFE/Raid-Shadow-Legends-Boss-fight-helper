@@ -78,6 +78,13 @@ div.rule-condition.hover-anchor { display: grid; align-items: initial; }
 .simulation-history-row.static:hover { border-color: transparent; background: transparent; }
 .run-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .run-picker select { min-width: 150px; max-width: 100%; }
+/* The shown run's damage, how it ended and its goals, beside the run list. */
+.run-facts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-left: 8px; font-size: 12px; }
+.run-facts > span { display: inline-flex; align-items: baseline; gap: 5px; }
+.run-facts small { color: var(--muted); font-size: 11px; }
+.run-facts strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.run-facts strong.good { color: var(--teal); }
+.run-facts strong.bad { color: var(--danger); }
 .simulation-log-jump { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .log-row { grid-template-columns: 55px 30px 96px minmax(120px, 1.6fr) 70px minmax(90px, 1.4fr) 44px; }
 .log-turn { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
@@ -121,3 +128,7 @@ div.rule-condition.hover-anchor { display: grid; align-items: initial; }
   .log-row .dmg { grid-column: 4; grid-row: 1; }
   .log-row .log-state-label { grid-column: 3 / -1; }
 }
+
+/* 1.1.4: what a simulation changes on its base battle (a newer rotation, another account). */
+.simulation-base > small.simulation-base-note { color: var(--text); font-size: 11px; }
+.simulation-base > small.simulation-base-note.warn { color: var(--gold); }

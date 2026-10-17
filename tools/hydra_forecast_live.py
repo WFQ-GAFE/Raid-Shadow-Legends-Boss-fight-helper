@@ -27,7 +27,8 @@ from typing import Any, Callable
 from convert_hydra_replay_source import ConversionError, convert
 from damage_units import damage_text
 from forecast_advice import advice as failure_note
-from hydra_forecast import evaluate_conditions, run_forecast
+from engine_prestart import EnginePrestarter
+from hydra_forecast import MAX_GAME_TURN, evaluate_conditions, run_forecast
 from hydra_replay_source import ReplaySourceError, validate_replay_source
 from hydra_simulation import HydraSimulationSession, battle_report, forecast_run
 from raid_processes import is_supported_raid_executable, process_path
@@ -50,6 +51,8 @@ STATIC_DATA_ROOT = (Path(os.environ.get("USERPROFILE", str(Path.home())))
                     / "AppData" / "LocalLow" / "Plarium" / "Raid_ Shadow Legends" / "static-data")
 WORK_ROOT = PROJECT_ROOT / "cache" / "hydra-forecast"
 RUNTIME_ROOT = PROJECT_ROOT / "runtime" / "hydra-forecast"
+# Engines started ahead of their battle wait here for its files (engine_prestart).
+PRESTART_ROOT = PROJECT_ROOT / "cache" / "engine-prestart"
 KEEP_WORK_DIRECTORIES = 12
 INPUT_WAIT_SECONDS = 20.0
 # A forecast's report is opened as a Hydra simulation report with this prefix
@@ -356,7 +359,8 @@ class HydraForecastMonitor:
                  converter: Callable[[Path, Path], dict[str, Any]] = convert,
                  bundle_provider: Callable[[int], Path] | None = None,
                  work_root: Path = WORK_ROOT,
-                 validator: Callable[..., tuple[dict[str, Any], bytes, bytes]] = validate_replay_source):
+                 validator: Callable[..., tuple[dict[str, Any], bytes, bytes]] = validate_replay_source,
+                 prestarter: EnginePrestarter | None = None):
         self.emit = emit or (lambda text: print(text, flush=True))
         self.runner = runner
         self.converter = converter
@@ -365,10 +369,28 @@ class HydraForecastMonitor:
             probe_source(), game_build_directory(pid), newest_static_data()))
         self.work_root = work_root
         self.battle: BattleForecast | None = None
+        # The next battle's engine, started during the regroup (engine_prestart).
+        self.prestarter = prestarter or EnginePrestarter("forecast", str(MAX_GAME_TURN), PRESTART_ROOT / "hydra")
 
     def cancel(self) -> None:
         if self.battle and self.battle.job:
             self.battle.job.cancel.set()
+
+    def prestart(self, config: dict[str, Any], pid: int) -> None:
+        """Start the next battle's engine now, while the game loads that battle."""
+        if forecast_enabled(config):
+            self.prestarter.prestart(lambda: self.bundle_provider(int(pid)) / "raid_offline_probe.exe")
+
+    def verdict_ready(self, state: dict[str, Any]) -> bool:
+        """This battle's forecast has finished and its verdict is not read yet: the
+        controller reads it at once instead of at the next hero turn."""
+        current = self.battle
+        rng = state.get("battleRandom")
+        job = current.job if current else None
+        return (current is not None and isinstance(rng, dict)
+                and current.key == (state.get("battleGeneration"), rng.get("battleSetupId"))
+                and current.status == "running" and job is not None and job.thread is not None
+                and not job.thread.is_alive())
 
     def observe(self, config: dict[str, Any], state: dict[str, Any], *, ipc: Any,
                 capability_memory: Any, marked_target: Callable[[dict[str, Any]], Any],
@@ -485,6 +507,7 @@ class HydraForecastMonitor:
         memory = copy.deepcopy(capability_memory)
         pid = state.get("pid")
         job = ForecastJob()
+        engine = self.prestarter.take()
 
         def work() -> None:
             try:
@@ -500,7 +523,7 @@ class HydraForecastMonitor:
                 result = self.runner(bundle / "raid_offline_probe.exe", folder / "packed", strategy,
                                      team_selection=team, capability_memory=memory,
                                      cancel=job.cancel, session_factory=HydraSimulationSession,
-                                     on_decision=_keep_snapshot)
+                                     on_decision=_keep_snapshot, engine=engine)
                 result["bundle"] = bundle.name
                 # The snapshots and engine rows are in the report's run file.
                 compact = {key: value for key, value in result.items() if key != "engineTurns"}

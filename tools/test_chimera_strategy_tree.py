@@ -223,6 +223,10 @@ class ActiveIpc:
             "sessionId": 123,
         }
 
+    def decision(self) -> dict:
+        # The snapshot does not change while a command waits its human-like pause.
+        return {}
+
 
 class GamePausedIpc:
     def lifecycle(self) -> dict:
@@ -801,6 +805,49 @@ def main() -> int:
             nonce=2,
             ignore_freshness=True,
         )
+    # The opening forecast's verdict is read while the action plays out: a regroup ends
+    # the wait at once and nothing more is reported for the abandoned battle.
+    asked: list[int] = []
+
+    def action_plays_out(ipc, baseline, session_id, interrupt=None):
+        assert interrupt is not None and interrupt() is True
+        return None
+
+    def verdict(config, state, **kwargs):
+        asked.append(kwargs["nonce"])
+        return True
+
+    regroup_output = io.StringIO()
+    with (
+        patch("chimera_controller.queue_command", return_value={"queued": True}),
+        patch("chimera_controller.wait_for_command_ack", return_value={"status": "submitted"}),
+        patch("chimera_controller.wait_for_turn_advance", side_effect=action_plays_out),
+        patch("chimera_controller.poll_forecast_verdict", side_effect=verdict),
+        redirect_stdout(regroup_output),
+    ):
+        assert process_state(
+            executable_config,
+            executable_state,
+            agent=Path("agent.dll"),
+            ipc=ActiveIpc(),
+            session_id=123,
+            execute_requested=True,
+            nonce=5,
+            ignore_freshness=True,
+        )
+    assert asked == [5]
+    assert "执行成功" not in render(regroup_output.getvalue(), "zh-CN")
+    # Without a verdict the wait ends at the next turn as before.
+    turns = iter([{"battle": {"turn": 1}}, {"battle": {"turn": 1}}, {"battle": {"turn": 2}}])
+    calls: list[bool] = []
+
+    class TurnIpc(ActiveIpc):
+        def decision(self):
+            return next(turns)
+
+    advanced = wait_for_turn_advance(TurnIpc(), {"battle": {"turn": 1}}, 123, timeout_seconds=2.0,
+                                     interrupt=lambda: calls.append(True) or False)
+    assert advanced == {"battle": {"turn": 2}} and len(calls) == 2
 
     no_match_output = io.StringIO()
     executable_state["activeHeroName"] = "测试英雄"

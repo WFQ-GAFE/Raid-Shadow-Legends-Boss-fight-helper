@@ -30,7 +30,8 @@ from chimera_simulation import run_simulation, summarize_run
 from chimera_simulation_service import (BATTLE_FORECAST_PREFIX, BATTLE_FORECAST_ROOT, aggregate,
                                         difficulty_for_stage)
 from convert_hydra_replay_source import ConversionError, convert
-from hydra_forecast_live import (ForecastSetupError, ensure_runtime_bundle, game_build_directory,
+from engine_prestart import EnginePrestarter
+from hydra_forecast_live import (PRESTART_ROOT, ForecastSetupError, ensure_runtime_bundle, game_build_directory,
                                  newest_static_data, probe_source)
 from simulation_common import write_run
 from strategy_storage import atomic_write_json
@@ -168,7 +169,8 @@ class ChimeraForecastMonitor:
                  converter: Callable[[Path, Path], dict[str, Any]] = convert,
                  bundle_provider: Callable[[int], Path] | None = None,
                  work_root: Path = BATTLE_FORECAST_ROOT,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 prestarter: EnginePrestarter | None = None):
         self.emit = emit or (lambda text: print(text, flush=True))
         self.runner = runner
         self.converter = converter
@@ -177,10 +179,26 @@ class ChimeraForecastMonitor:
         self.work_root = work_root
         self.clock = clock
         self.battle: _Battle | None = None
+        # The next battle's engine, started during the regroup (engine_prestart).
+        self.prestarter = prestarter or EnginePrestarter("chimera-forecast", "captured", PRESTART_ROOT / "chimera")
 
     def cancel(self) -> None:
         if self.battle and self.battle.job:
             self.battle.job.cancel.set()
+
+    def prestart(self, config: dict[str, Any], pid: int) -> None:
+        """Start the next battle's engine now, while the game loads that battle."""
+        if forecast_enabled(config):
+            self.prestarter.prestart(lambda: self.bundle_provider(int(pid)) / "raid_offline_probe.exe")
+
+    def verdict_ready(self, state: dict[str, Any]) -> bool:
+        """This battle's simulation has finished and its verdict is not read yet: the
+        controller reads it at once instead of at the next hero turn."""
+        current = self.battle
+        job = current.job if current else None
+        return (current is not None and current.generation == state.get("battleGeneration")
+                and current.status == "running" and job is not None and job.thread is not None
+                and not job.thread.is_alive())
 
     def observe(self, config: dict[str, Any], state: dict[str, Any], *, capture: Any,
                 capability_memory: Any) -> ChimeraForecastRetry | None:
@@ -281,6 +299,7 @@ class ChimeraForecastMonitor:
         memory = current.memory
         pid = state.get("pid")
         job = _Job()
+        engine = self.prestarter.take()
 
         def work() -> None:
             try:
@@ -295,7 +314,7 @@ class ChimeraForecastMonitor:
                 result = self.runner(probe, folder / "packed", strategy, capability_memory=memory,
                                      static_state=static_state, team_selection=team,
                                      start_selection=start_selection if isinstance(start_selection, dict) else None,
-                                     timeout_seconds=SIMULATION_TIMEOUT_SECONDS, cancel=job.cancel)
+                                     timeout_seconds=SIMULATION_TIMEOUT_SECONDS, cancel=job.cancel, engine=engine)
                 job.result = result
                 job.record = self._save(strategy, provenance, folder.name, result)
             except (ForecastSetupError, ConversionError, OSError, ValueError) as error:

@@ -71,6 +71,16 @@ public:
         write(line + "\n");
     }
 
+    // A worker started ahead of its battle (--await-input) waits here, its runtime and
+    // static data loaded, until the policy process has written the battle's input:
+    // "input" runs it, "cancel" (or a closed channel) ends the worker.
+    bool await_input() {
+        const auto line = read_line();
+        if (line == "input") return true;
+        if (line == "cancel") return false;
+        throw std::runtime_error("Awaited input signal is not recognized");
+    }
+
     PolicyReply receive(std::uint64_t expected_sequence) {
         const auto line = read_line();
         std::vector<std::string> fields;

@@ -18,6 +18,7 @@ from capture_identity import unique_first
 from chimera_simulation_service import KEEP_SIMULATIONS, SimulationService, _read_json, recent_folders, summary_row
 from hydra_forecast_live import REPORT_PREFIX, WORK_ROOT as FORECAST_ROOT
 from hydra_simulation import aggregate, difficulty_for_stage, run_simulation, run_timeline, summarize_run
+from simulation_base import battle_facts
 from ui_text import ui_text
 
 
@@ -66,6 +67,7 @@ def list_captures(limit: int = 20, roots: dict[str, Path] | None = None) -> list
         if folder not in distinct:
             continue
         strategy = _read_json(folder / "strategy.json")
+        setup = _read_json(folder / "battle-setup.json")
         result.append({
             "id": f"{key}:{folder.name}",
             "capturedAt": time.strftime("%Y-%m-%d %H:%M", time.localtime(modified)),
@@ -74,7 +76,8 @@ def list_captures(limit: int = 20, roots: dict[str, Path] | None = None) -> list
             "seed": provenance.get("seed"),
             "teamHeroTypeIds": provenance.get("teamHeroTypeIds") or [],
             "teamHeroIds": provenance.get("teamHeroIds") or [],
-            "headTypeIds": head_type_ids(_read_json(folder / "battle-setup.json")),
+            "headTypeIds": head_type_ids(setup),
+            **{name: value for name, value in battle_facts(setup).items() if name in ("ownerId", "battleTime")},
             "strategyName": strategy.get("name") if isinstance(strategy, dict) else None,
         })
         if len(result) >= limit:

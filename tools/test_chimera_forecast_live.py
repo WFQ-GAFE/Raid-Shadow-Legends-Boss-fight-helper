@@ -122,3 +122,55 @@ def test_mid_battle_takeover_and_missing_capture_are_skipped() -> None:
         watcher.observe(CONFIG, state(1, generation=6), capture=Capture(root, generation=6, status="unavailable"),
                         capability_memory=None)
         assert watcher.battle.status == "unavailable" and "无法进行" in render(messages[-1], "zh-CN")
+
+
+def test_the_verdict_is_ready_as_soon_as_the_simulation_ends() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        messages: list[str] = []
+        watcher = monitor(root, result(completed=False), messages)
+        capture = Capture(root / "capture")
+        assert not watcher.verdict_ready(state(1))
+        watcher.observe(CONFIG, state(1), capture=capture, capability_memory=None)
+        watcher.battle.job.thread.join()
+        # Ready without a new hero turn; not for another battle.
+        assert watcher.verdict_ready(state(1)) and not watcher.verdict_ready(state(1, generation=6))
+        retry = watcher.observe(CONFIG, state(1), capture=capture, capability_memory=None)
+        assert retry is not None and retry.cause == "mandatory"
+        assert not watcher.verdict_ready(state(1))
+
+
+def test_the_controller_regroups_between_hero_turns_when_the_verdict_is_ready() -> None:
+    from unittest.mock import patch
+    import chimera_controller as controller
+
+    class Ipc:
+        def __init__(self, decision):
+            self.current = decision
+
+        def decision(self):
+            return self.current
+
+        def lifecycle(self):
+            return {"screen": "battle", "takeoverState": "active", "sessionId": 1}
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        watcher = monitor(root, result(completed=False), [])
+        capture = Capture(root / "capture")
+        live = {**state(1), "sequence": 7}
+        config = {**CONFIG, "mode": "execute"}
+        with patch.object(controller, "ACTIVE_BOSS_MODE", "chimera"), \
+                patch.object(controller, "chimera_forecast_monitor", return_value=watcher), \
+                patch.object(controller, "chimera_capture_monitor", return_value=capture), \
+                patch.object(controller, "is_battle_decision_state", return_value=True), \
+                patch.object(controller, "emit_telemetry"), \
+                patch.object(controller, "request_chimera_regroup_retry") as regroup:
+            poll = lambda: controller.poll_forecast_verdict(config, live, agent=Path("offline"), ipc=Ipc(live), session_id=1,
+                                                            nonce=3, runtime_state={}, execute_requested=True,
+                                                            capability_memory=None)
+            assert poll() is False  # nothing started yet
+            watcher.observe(CONFIG, live, capture=capture, capability_memory=None)
+            watcher.battle.job.thread.join()
+            assert poll() is True and regroup.call_count == 1
+            assert poll() is False and regroup.call_count == 1  # the verdict is read once

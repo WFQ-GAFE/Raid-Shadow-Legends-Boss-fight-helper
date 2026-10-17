@@ -10,6 +10,7 @@ the probe; the newest cached result is still served while the game is closed.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -17,17 +18,19 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from hydra_forecast_live import PROJECT_ROOT
+from hero_catalog_recovery import catalog_from_hero_data
 from strategy_storage import atomic_write_bytes
 from ui_text import ui_text
 
-SCHEMA = 4  # 3: skills carry their targets; 4: the skill whose level they use
+PROJECT_ROOT = Path(os.environ.get("CHIMERA_PROJECT_ROOT", Path(__file__).resolve().parent.parent)).resolve()
+SCHEMA = 5  # 5: complete skill order per ascension/form for safe catalog recovery
 # One folder per schema: versions sharing the data folder keep their own file
 # instead of rebuilding each other's (1.1.2 reads schema 2 from cache/hero-data).
 HERO_DATA_ROOT = PROJECT_ROOT / "cache" / "hero-data" / f"schema-{SCHEMA}"
 KEEP_FILES = 2
 RECHECK_SECONDS = 600.0
 PROBE_TIMEOUT_SECONDS = 240
+RETRY_SECONDS = 15.0
 FIXED_ONE = float(2 ** 32)
 # 6 stars, level 60: HP, ATK and DEF are the static base stat times this,
 # rounded (HP is then multiplied by 15). Fitted to the hero screen's base stats
@@ -222,6 +225,21 @@ def _forms(hero: dict[str, Any]) -> list[dict[str, Any]]:
     return forms
 
 
+def _catalog_forms(hero: dict[str, Any]) -> list[list[int]]:
+    """The original order, including added skills; ascension deltas lose replacements."""
+    result: list[list[int]] = []
+    for form in hero.get("Forms") or []:
+        if not isinstance(form, dict):
+            continue
+        result.append(list(dict.fromkeys(
+            value
+            for field in ("SkillTypeIds", "AdditionalSkillTypeIds")
+            for value in form.get(field) or []
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        )))
+    return result
+
+
 def compact(raw: dict[str, Any]) -> dict[str, Any]:
     """The probe's hero-data report reduced to the picker's data."""
     texts = raw.get("texts") if isinstance(raw.get("texts"), dict) else {}
@@ -241,6 +259,9 @@ def compact(raw: dict[str, Any]) -> dict[str, Any]:
         forms = _forms(hero)
         entry: dict[str, Any] = {"name": _text(texts, "hero-type/name", identifier),
                                  "faction": hero.get("Fraction"), "rarity": hero.get("Rarity"), "forms": forms}
+        # The picker still consumes the small ascension deltas below. Recovery
+        # needs the complete list: [A1, upgraded A2, A3] is not four abilities.
+        catalog_forms = {"0": _catalog_forms(hero)}
         auras = [_aura(leader) for leader in hero.get("LeaderSkills") or [] if isinstance(leader, dict)]
         if auras:
             entry["aura"] = auras
@@ -250,6 +271,7 @@ def compact(raw: dict[str, Any]) -> dict[str, Any]:
             if not variant_item:
                 continue
             variant_forms = _forms(variant_item.get("hero") or {})
+            catalog_forms[str(level)] = _catalog_forms(variant_item.get("hero") or {})
             ascension[str(level)] = {
                 "stats": [form["stats"] for form in variant_forms],
                 "skills": [[skill for skill in form["skills"]
@@ -258,6 +280,7 @@ def compact(raw: dict[str, Any]) -> dict[str, Any]:
             }
         if ascension:
             entry["ascension"] = ascension
+        entry["catalogForms"] = catalog_forms
         heroes[str(identifier)] = entry
     enums = raw.get("enums") if isinstance(raw.get("enums"), dict) else {}
     used = {row[0] for skill in skills.values() for key in ("buffs", "debuffs") for row in skill.get(key, [])}
@@ -382,23 +405,36 @@ class HeroDataService:
         self.key = ""
         self.error = ""
         self.building = False
-        self.checked_at = 0.0
+        self.checked_at = float("-inf")
 
-    def snapshot(self, pid: int | None) -> dict[str, Any]:
+    def snapshot(self, pid: int | None, *, force_retry: bool = False) -> dict[str, Any]:
         """{"status": "ready", "data": ...}, "building" or "unavailable" with a reason."""
         with self.lock:
             if self.data is None and not self.building:
                 self.data = self._newest_cached()
+            if force_retry and self.data is None and not self.building:
+                self.checked_at = float("-inf")
             stale = time.monotonic() - self.checked_at > RECHECK_SECONDS
             if stale and not self.building:
                 self.building = True
                 self.checked_at = time.monotonic()
                 threading.Thread(target=self._build, args=(pid,), name="hero-data", daemon=True).start()
             if self.data is not None:
-                return {"status": "ready", "data": self.data}
+                result: dict[str, Any] = {"status": "ready", "data": self.data}
+                if self.error:
+                    # Keep healthy data usable, while exposing a failed refresh
+                    # to catalog diagnostics instead of silently hiding it.
+                    result["refreshError"] = self.error
+                return result
             if self.building:
                 return {"status": "building"}
             return {"status": "unavailable", "reason": self.error or ui_text("heroData.unavailable")}
+
+    def request_retry(self) -> None:
+        """Allow a caller to retry now; never start a second concurrent build."""
+        with self.lock:
+            if self.data is None and not self.building:
+                self.checked_at = float("-inf")
 
     def _newest_cached(self) -> dict[str, Any] | None:
         try:
@@ -418,7 +454,16 @@ class HeroDataService:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        return data if isinstance(data, dict) and data.get("schema") == SCHEMA else None
+        return data if HeroDataService._usable(data) else None
+
+    @staticmethod
+    def _usable(data: Any) -> bool:
+        if not isinstance(data, dict) or data.get("schema") != SCHEMA \
+                or not isinstance(data.get("heroes"), dict) or not isinstance(data.get("skills"), dict):
+            return False
+        # An empty/static model that has not initialized must not become a
+        # persistent "ready" cache and suppress all later recovery attempts.
+        return bool(catalog_from_hero_data(data))
 
     def _build(self, pid: int | None) -> None:
         data: dict[str, Any] | None = None
@@ -434,6 +479,9 @@ class HeroDataService:
             data = self._load(path) if key != self.key or self.data is None else self.data
             if data is None:
                 data = compact(self.runner(bundle / "raid_offline_probe.exe", bundle))
+                if not self._usable(data):
+                    data = None
+                    raise HeroDataError(ui_text("heroData.noData"))
                 self.root.mkdir(parents=True, exist_ok=True)
                 atomic_write_bytes(path, json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
                 for old in sorted(self.root.glob("*.json"), key=lambda item: item.stat().st_mtime_ns,
@@ -443,15 +491,40 @@ class HeroDataService:
             error = str(caught) or type(caught).__name__
         with self.lock:
             if data is not None:
-                self.data, self.key, self.error = data, key, ""
+                self.data, self.key, self.error = data, key, error
             else:
                 self.error = error
                 # Try again sooner after a failure (the game may not be open yet).
-                self.checked_at = time.monotonic() - RECHECK_SECONDS + 15
+                self.checked_at = time.monotonic() - RECHECK_SECONDS + RETRY_SECONDS
             self.building = False
 
 
 _LEVEL_LINKS: tuple[tuple[str, int], dict[int, int]] | None = None
+
+
+def _read_skill_level_links(path: Path) -> dict[int, int]:
+    """Read the independent schema-4/5 link table, even without display metadata.
+
+    Team assembly needs these links before the complete champion catalog has
+    finished loading. Its cache contract is intentionally narrower than the
+    HeroDataService ready/healthy contract.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict) or data.get("schema") not in (4, 5) \
+            or not isinstance(data.get("skills"), dict):
+        return {}
+    result: dict[int, int] = {}
+    for raw_id, skill in data["skills"].items():
+        if not isinstance(raw_id, str) or not raw_id.isdecimal() or int(raw_id) <= 0 \
+                or not isinstance(skill, dict):
+            continue
+        parent = skill.get("levelOf")
+        if isinstance(parent, int) and not isinstance(parent, bool) and parent > 0:
+            result[int(raw_id)] = parent
+    return result
 
 
 def skill_level_links(root: Path = HERO_DATA_ROOT) -> dict[int, int]:
@@ -463,9 +536,7 @@ def skill_level_links(root: Path = HERO_DATA_ROOT) -> dict[int, int]:
     except (OSError, ValueError):
         return {}
     if _LEVEL_LINKS is None or _LEVEL_LINKS[0] != key:
-        skills = (HeroDataService._load(newest) or {}).get("skills") or {}
-        _LEVEL_LINKS = (key, {int(skill_id): skill["levelOf"] for skill_id, skill in skills.items()
-                              if isinstance(skill, dict) and isinstance(skill.get("levelOf"), int)})
+        _LEVEL_LINKS = (key, _read_skill_level_links(newest))
     return _LEVEL_LINKS[1]
 
 

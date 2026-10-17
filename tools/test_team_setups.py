@@ -11,6 +11,7 @@ import zlib
 
 from team_preview import decode_preview, display_preview, portable_snapshot
 from ui_text import render
+import team_setups
 from team_setups import (
     StrategyTeamStore, TeamSetupError, building_bonus, check_against_captures, decode_account_bonuses,
     decode_roster, differences,
@@ -128,6 +129,35 @@ def test_check_against_saved_battles_finds_the_building_rule() -> None:
         assert latest_check("chimera", root / "checks") is None
         remember_check(result, root / "checks")
         assert latest_check("chimera", root / "checks")["compared"] == 1
+        # A check saved by 1.1.3 (it also compared with the other boss's battles) is not used.
+        (root / "checks" / "chimera.json").write_text(json.dumps({**result, "schema": 1}), encoding="utf-8")
+        assert latest_check("chimera", root / "checks") is None
+
+
+def test_check_uses_only_battles_of_the_same_boss() -> None:
+    """A Hydra battle carries the Hydra area bonus, so a Chimera team is never checked against it."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        hydra_area = {"p": {"m": 21 * ONE // 100}, "f": {"s": 10 * ONE}}
+        observatory = {"6": hydra_area, "7": AREA}
+        roots = {"chimera": (root / "chimera-capture",), "hydra": (root / "hydra-capture",)}
+        write_capture(root / "chimera-capture" / "one", [server_hero(11, 7001, 1, area=None),
+                                                          server_hero(12, 7002, 2, area=None)])
+        write_capture(root / "hydra-capture" / "one", [server_hero(13, 7003, 1, area=hydra_area),
+                                                        server_hero(14, 7004, 2, area=hydra_area),
+                                                        server_hero(15, 7005, 3, area=hydra_area)])
+        team = [hero(11, 7001), hero(12, 7002), hero(13, 7003), hero(14, 7004), hero(15, 7005)]
+        original = team_setups.CAPTURE_ROOTS
+        team_setups.CAPTURE_ROOTS = roots
+        try:
+            chimera = check_against_captures(team, observatory, "chimera")
+            hydra = check_against_captures(team, observatory, "hydra")
+        finally:
+            team_setups.CAPTURE_ROOTS = original
+        assert chimera["compared"] == 2 and chimera["matched"] == 2 and chimera["rule"] == "building"
+        assert hydra["compared"] == 3 and hydra["matched"] == 3
+        assert (hydra["rule"], hydra["area"]) == ("building+area", "6")
+        assert chimera["schema"] == hydra["schema"] == team_setups.CHECK_SCHEMA
 
 
 def test_team_is_swapped_into_the_opening_with_matching_provenance() -> None:
@@ -219,7 +249,7 @@ def test_preview_team_store_and_sources() -> None:
         assert author["heroes"][0]["parts"] == battle["parts"] and author["savedAt"] == saved["savedAt"]
         # The team as it is now, read from the game.
         now = simulation_team("current", "chimera", type_ids, check=None, current=lambda: team)
-        assert now["rule"] == "building+area" and now["area"] == AREA  # Chimera area (7) by default
+        assert now["rule"] == "building"  # real Chimera battles add no area bonus
         assert simulation_team("battle", "chimera", [], saved=None) is None
         for source, strategy_team, arguments, message in (
                 ("strategy", [], {"saved": saved, "bonuses": bonuses}, "还没有设定队伍"),

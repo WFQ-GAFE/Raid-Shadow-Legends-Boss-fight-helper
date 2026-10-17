@@ -52,14 +52,21 @@ PROJECT_ROOT = Path(
 ).resolve()
 STRATEGY_TEAM_ROOT = PROJECT_ROOT / "cache" / "strategy-teams"
 CHECK_ROOT = PROJECT_ROOT / "cache" / "team-setup-checks"
-CAPTURE_ROOTS = (PROJECT_ROOT / "cache" / "chimera-capture", PROJECT_ROOT / "cache" / "hydra-capture",
-                 PROJECT_ROOT / "cache" / "hydra-forecast")
+# Saved battles of each boss. A battle's building (`z`) bonus includes that boss's
+# area, so a team is checked only against battles of its own boss: a Hydra battle
+# carries the Hydra area (+10 SPD, +21% C.DMG...) that a Chimera battle does not.
+CAPTURE_ROOTS = {"chimera": (PROJECT_ROOT / "cache" / "chimera-capture",),
+                 "hydra": (PROJECT_ROOT / "cache" / "hydra-capture", PROJECT_ROOT / "cache" / "hydra-forecast")}
 TEAM_SIZE = {"chimera": 5, "hydra": 6}
 # ObservatoryLocationId of each boss (SharedModel.Meta.Village): Hydra = 6, AllianceBoss = 7.
 AREA_LOCATIONS = {"hydra": ("6", "7"), "chimera": ("7", "6")}
 # Ways the building (`z`) bonus may be combined; the check against saved
 # battles picks the one the server uses.
 BUILDING_RULES = ("building+area", "building", "capitol+area", "capitol")
+# The rule before any check: real Hydra battles add the Hydra area, real Chimera battles no area.
+DEFAULT_RULES = {"hydra": "building+area", "chimera": "building"}
+# Version 1 checks also compared with the other boss's battles (wrong area bonus).
+CHECK_SCHEMA = 2
 # HeroSlotSetup fields that belong to the hero and its gear (compared with saved battles).
 HERO_FIELDS = ("i", "h", "g", "w", "l", "x", "r", "v", "s", "b", "e", "y", "c", "bl", "re", "z")
 PARTS = ("artifacts", "sets", "blessing", "relics", "academy", "building", "capitol")
@@ -259,7 +266,7 @@ def _ordered(fields: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def captured_hero_setups(roots: tuple[Path, ...] = CAPTURE_ROOTS) -> dict[int, tuple[str, dict[str, Any]]]:
+def captured_hero_setups(roots: tuple[Path, ...]) -> dict[int, tuple[str, dict[str, Any]]]:
     """Newest server-built setup of every hero found in the saved openings."""
     folders: list[Path] = []
     for root in roots:
@@ -281,12 +288,13 @@ def captured_hero_setups(roots: tuple[Path, ...] = CAPTURE_ROOTS) -> dict[int, t
 
 
 def check_against_captures(heroes: list[dict[str, Any]], observatory: dict[str, Any], boss_mode: str,
-                           roots: tuple[Path, ...] = CAPTURE_ROOTS) -> dict[str, Any]:
-    """Compare assembled setups with server-built ones of the same heroes; pick the building rule."""
-    captured = captured_hero_setups(roots)
+                           roots: tuple[Path, ...] | None = None) -> dict[str, Any]:
+    """Compare assembled setups with server-built ones of the same heroes in battles of the same boss;
+    pick the building rule."""
+    captured = captured_hero_setups(CAPTURE_ROOTS.get(boss_mode, ()) if roots is None else roots)
     pairs = [(hero, captured[hero["model"]["heroId"]]) for hero in heroes
              if hero.get("model", {}).get("heroId") in captured]
-    result: dict[str, Any] = {"schema": 1, "bossMode": boss_mode, "checkedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+    result: dict[str, Any] = {"schema": CHECK_SCHEMA, "bossMode": boss_mode, "checkedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                               "heroes": len(heroes), "compared": len(pairs), "rule": None, "area": None,
                               "matched": 0, "orderMatched": 0, "differences": {}}
     if not pairs:
@@ -320,13 +328,17 @@ def check_against_captures(heroes: list[dict[str, Any]], observatory: dict[str, 
 
 
 def team_battle_setup(capture_setup: list[dict[str, Any]], heroes: list[dict[str, Any]], *, area: dict[str, Any] | None,
-                      rule: str, powers: list[float | None] | None = None) -> list[dict[str, Any]]:
-    """A saved opening's BattleSetup with its player team replaced (boss, stage and seed unchanged)."""
+                      rule: str, powers: list[float | None] | None = None,
+                      team_level: int | None = None) -> list[dict[str, Any]]:
+    """A saved opening's BattleSetup with its player team replaced (boss, stage and seed unchanged).
+    ``team_level``: the team's own account's `f.l` (a few percent of HP/ATK/DEF), None keeps the opening's."""
     result = copy.deepcopy(capture_setup)
     setup = result[0]
     team = setup.get("f")
     if not isinstance(team, dict) or not _integer(team.get("i")) or not team.get("h"):
         raise TeamSetupError(ui_text("teams.noPlayerTeam"))
+    if _integer(team_level):
+        team["l"] = team_level
     first = team["h"][0] if isinstance(team["h"][0], dict) else {}
     rounds = len(((first.get("p") or {}).get("r")) or []) or 1
     team["h"] = [hero_slot_setup(hero, slot=index + 1, owner_id=team["i"], area=area, rule=rule,
@@ -336,7 +348,8 @@ def team_battle_setup(capture_setup: list[dict[str, Any]], heroes: list[dict[str
 
 
 def prepare_team_input(capture: Path, heroes: list[dict[str, Any]], boss_mode: str, destination: Path, *,
-                       area: dict[str, Any] | None, rule: str, powers: list[float | None] | None = None) -> dict[str, Any]:
+                       area: dict[str, Any] | None, rule: str, powers: list[float | None] | None = None,
+                       team_level: int | None = None) -> dict[str, Any]:
     """Write a converter input folder with the team swapped in; returns its provenance."""
     size = TEAM_SIZE[boss_mode]
     if not 1 <= len(heroes) <= size:
@@ -348,7 +361,7 @@ def prepare_team_input(capture: Path, heroes: list[dict[str, Any]], boss_mode: s
         raise TeamSetupError(ui_text("teams.missingGear"))
     original = json.loads((capture / "battle-setup.json").read_text(encoding="utf-8"))
     provenance = json.loads((capture / "capture-provenance.json").read_text(encoding="utf-8"))
-    data = json.dumps(team_battle_setup(original, heroes, area=area, rule=rule, powers=powers),
+    data = json.dumps(team_battle_setup(original, heroes, area=area, rule=rule, powers=powers, team_level=team_level),
                       ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     destination.mkdir(parents=True, exist_ok=True)
     atomic_write_bytes(destination / "battle-setup.json", data)
@@ -360,6 +373,8 @@ def prepare_team_input(capture: Path, heroes: list[dict[str, Any]], boss_mode: s
                                "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                                "source": "team_setups.team_battle_setup"}
     swapped["teamSwappedFrom"] = capture.name
+    if _integer(team_level):
+        swapped["teamLevel"] = team_level
     atomic_write_json(destination / "capture-provenance.json", swapped)
     return swapped
 
@@ -841,7 +856,7 @@ def simulation_team(source: str, boss_mode: str, strategy_team: list[Any] | None
     location = str((check or {}).get("area") or AREA_LOCATIONS[boss_mode][0])
     return {"source": source, "heroes": chosen["heroes"], "powers": chosen.get("powers"),
             "area": (chosen.get("observatory") or {}).get(location),
-            "rule": (check or {}).get("rule") or BUILDING_RULES[0],
+            "rule": (check or {}).get("rule") or DEFAULT_RULES.get(boss_mode, BUILDING_RULES[0]),
             "savedAt": chosen.get("savedAt") or chosen.get("capturedAt"),
             "display": chosen.get("display"),
             "check": check_summary(check)}
@@ -906,7 +921,7 @@ def latest_check(boss_mode: str, root: Path = CHECK_ROOT) -> dict[str, Any] | No
         value = json.loads((root / f"{boss_mode}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return value if isinstance(value, dict) else None
+    return value if isinstance(value, dict) and value.get("schema") == CHECK_SCHEMA else None
 
 
 def remember_check(result: dict[str, Any], root: Path = CHECK_ROOT) -> None:

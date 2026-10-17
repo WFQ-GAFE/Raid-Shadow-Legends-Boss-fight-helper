@@ -23,6 +23,7 @@ import time
 from typing import Any, Callable
 
 import chimera_controller as controller
+from engine_prestart import PrestartedEngine, popen_with
 from hydra_offline_policy import HydraOfflinePolicySession
 
 
@@ -294,11 +295,13 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                  on_decision: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
                  cancel: threading.Event | None = None,
                  session_factory: Callable[..., HydraOfflinePolicySession] = HydraOfflinePolicySession,
+                 engine: PrestartedEngine | None = None,
                  ) -> dict[str, Any]:
     """Run one isolated original-engine battle driven by the list policy.
 
     ``session_factory`` may add report facts to each decision
     (hydra_simulation.HydraSimulationSession: the rule's number, a stall's report).
+    ``engine``: one started ahead for this battle (engine_prestart), used when it fits.
     """
     started = time.monotonic()
     result: dict[str, Any] = {
@@ -326,10 +329,11 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         strategy, require_rng=False,
         capability_memory=capability_memory or controller.SkillCapabilityMemory(),
         team_selection=team_selection)
-    process = subprocess.Popen(
+    process, engine = popen_with(engine, probe, "forecast", str(max_game_turn), packed_input, lambda: subprocess.Popen(
         [str(probe), "forecast", str(packed_input), str(max_game_turn)],
         cwd=str(probe.parent), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)))
+    result["prestarted"] = engine is not None
     stderr_chunks: list[bytes] = []
     drain = threading.Thread(target=lambda: stderr_chunks.append(process.stderr.read()), daemon=True)
     drain.start()
@@ -405,6 +409,8 @@ def run_forecast(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         except subprocess.TimeoutExpired:
             process.kill()
         drain.join(timeout=5)
+        if engine is not None:
+            engine.finished()
     result["elapsedSeconds"] = round(time.monotonic() - started, 3)
     result["policyDecisions"] = len(decisions)
     if timed_out.is_set():

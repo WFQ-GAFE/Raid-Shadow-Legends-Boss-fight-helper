@@ -569,16 +569,21 @@ export function adviceTitle(language: Lang, advice?: FailureAdvice | null) {
 // the strategy group. Its boss is rebuilt from the game's data on the chosen difficulty and its team
 // replaced by the strategy's; it still gives the week's rotation, the game version's battle
 // settings and the seed of run 1.
-export type CaptureOption = { id: string; capturedAt?: string; difficulty?: number; teamHeroTypeIds: number[]; strategyName?: string | null }
+// rotationStageId: the game showed a newer rotation, so the boss is rebuilt on it (tools/simulation_base.py).
+// otherAccount without teamLevelKnown: a swapped-in team keeps the other account's team level.
+export type CaptureOption = { id: string; capturedAt?: string; difficulty?: number; teamHeroTypeIds: number[]; strategyName?: string | null
+  rotationStageId?: number; otherAccount?: boolean; teamLevelKnown?: boolean }
 
-export function SimulationBase({ capture, difficultyText, children }: {
-  capture: CaptureOption; difficultyText: (difficulty?: number) => string; children?: ReactNode
+export function SimulationBase({ capture, difficultyText, teamSwapped, children }: {
+  capture: CaptureOption; difficultyText: (difficulty?: number) => string; teamSwapped: boolean; children?: ReactNode
 }) {
   const { t } = useSim()
   const when = capture.id.startsWith('strategy-package:') ? t('sim.baseStrategyPackage')
     : t('sim.baseBattleWhen', { when: capture.capturedAt?.slice(5) ?? '' })
   return <div className="simulation-base">
     <span className="simulation-base-line"><strong>{t('sim.baseBattle')}</strong><span>{when} · {difficultyText(capture.difficulty)}</span>{children}</span>
+    {capture.rotationStageId !== undefined && <small className="simulation-base-note">{t('sim.baseRotationRebuilt')}</small>}
+    {teamSwapped && capture.otherAccount && !capture.teamLevelKnown && <small className="simulation-base-note warn">{t('sim.baseOtherAccount')}</small>}
     <small>{t('sim.baseBattleHint')}</small>
   </div>
 }
@@ -1054,6 +1059,10 @@ type ActionLogProps<Row> = {
   onResetFilters?: () => void
   // The caller's filters that this run does not have (a head or form it never shows).
   unavailable?: string[]
+  // A run's result in a few words for its entry in the run list (damage, goals).
+  runOption?: (index: number) => string
+  // The shown run's result beside the run list: damage, how it ended, the goals.
+  runFacts?: ReactNode
 }
 
 // The bosses' skills (names, descriptions) come with each battle's log.
@@ -1067,7 +1076,7 @@ export function ActionLog<Row extends LogRow>(props: ActionLogProps<Row> & { bos
 }
 
 function ActionLogView<Row extends LogRow>({ rows, actors, runs, runIndex, setRunIndex, groupOf, groupTitle, filters, enemyToggle, rowWhen, openByDefault, extras, footer, toolbar, header, scope,
-  failure, stopped, onResetFilters, unavailable }: ActionLogProps<Row>) {
+  failure, stopped, onResetFilters, unavailable, runOption, runFacts }: ActionLogProps<Row>) {
   const { lang, t, swapped, effects, heroes } = useSim()
   const [hero, setHero] = useState(0)
   const [active, setActive] = useState<Record<string, boolean>>({})
@@ -1164,9 +1173,13 @@ function ActionLogView<Row extends LogRow>({ rows, actors, runs, runIndex, setRu
         <button type="button" disabled={position <= 0} onClick={() => setRunIndex(runs[position - 1])}>{t('sim.previousRun')}</button>
         <label><span className="sr-only">{t('sim.runSelect')}</span>
           <select value={runIndex} aria-label={t('sim.runSelect')} onChange={(event) => setRunIndex(Number(event.target.value))}>
-            {runs.map((index) => <option key={index} value={index}>{t('sim.runSelect')} {runLabel(index)}</option>)}
+            {runs.map((index) => {
+              const facts = runOption?.(index)
+              return <option key={index} value={index}>{t('sim.runSelect')} {runLabel(index)}{facts ? ` · ${facts}` : ''}</option>
+            })}
           </select></label>
         <button type="button" disabled={position < 0 || position >= runs.length - 1} onClick={() => setRunIndex(runs[position + 1])}>{t('sim.nextRun')}</button>
+        {runFacts && <div className="run-facts" role="status">{runFacts}</div>}
       </div>
       <div className="hero-filter">
         <button className={hero === 0 ? 'active' : ''} onClick={() => setHero(0)}>{t('sim.all')}</button>

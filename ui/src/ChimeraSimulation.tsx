@@ -32,6 +32,10 @@ export type SimulationCapture = {
   // The alliance Chimera's HP already lost when the battle started (it carries over).
   bossHealthLost?: number
   strategyName?: string | null
+  // The game showed a newer rotation (the boss is rebuilt on it); the base battle is another account's.
+  rotationStageId?: number
+  otherAccount?: boolean
+  teamLevelKnown?: boolean
 }
 
 export type SimulationJob = {
@@ -149,9 +153,10 @@ export type SimulationSummary = {
   reason?: string
   strategy: { id?: string; name?: string; rules?: number }
   // openingDifficulty: the saved opening's own, when the boss came from the game's stage data
-  // (another difficulty or starting HP); bossHealthPercent: the Chimera's HP at the start then.
+  // (another difficulty, rotation or starting HP); bossHealthPercent: the Chimera's HP at the start then;
+  // rotationRebuilt: the boss is the game's current rotation, newer than the opening's.
   capture: { id: string; stageId?: number; seed?: number; teamHeroTypeIds?: number[]; bossHeroTypeId?: number; difficulty?: number; teamSource?: string; teamSavedAt?: string
-    openingStageId?: number; openingDifficulty?: number; bossHealthPercent?: number }
+    openingStageId?: number; openingDifficulty?: number; bossHealthPercent?: number; rotationRebuilt?: boolean }
   // The team the simulation ran with (reports from 1.1.1 on).
   team?: SimulationTeam | null
   runs?: RunSummary[]
@@ -306,11 +311,14 @@ export function ChimeraSimulationPanel({ language, overview, heroes, effects, tr
   const [health, setHealth] = useState<string | null>(null)
   useEffect(() => setHealth(null), [captureId])
   const otherDifficulty = baseDifficulty !== undefined && chosenDifficulty !== undefined && chosenDifficulty !== baseDifficulty
+  // Another difficulty or a newer rotation is a fresh Chimera: full HP unless set.
+  const freshBoss = otherDifficulty || capture?.rotationStageId !== undefined
   const fullHealth = baseDifficulty !== undefined ? overview?.difficultyHealth?.[baseDifficulty] : undefined
-  const baseHealth = capture?.bossHealthLost !== undefined && fullHealth ? Math.max(0, 100 * (1 - capture.bossHealthLost / fullHealth)) : undefined
-  const healthInput = simulationHealthInput(health, otherDifficulty ? 100 : baseHealth)
+  const baseHealth = capture?.bossHealthLost !== undefined && fullHealth && capture.rotationStageId === undefined
+    ? Math.max(0, 100 * (1 - capture.bossHealthLost / fullHealth)) : undefined
+  const healthInput = simulationHealthInput(health, freshBoss ? 100 : baseHealth)
   const healthInvalid = healthInput.invalid
-  const shownHealth = health ?? (otherDifficulty ? '100' : baseHealth !== undefined ? String(Math.round(baseHealth * 10) / 10) : '')
+  const shownHealth = health ?? (freshBoss ? '100' : baseHealth !== undefined ? String(Math.round(baseHealth * 10) / 10) : '')
   const inputSignature = simulationInputSignature({ config: draft, strategyId, captureId, runs, teamSource, difficulty: chosenDifficulty,
     bossHealth: healthInput.value ?? healthInput.defaultValue,
     teamSavedAt: teamSource === 'author' ? sources?.author?.savedAt : teamSource === 'strategy' ? sources?.strategy?.savedAt : undefined })
@@ -369,7 +377,7 @@ export function ChimeraSimulationPanel({ language, overview, heroes, effects, tr
             <div className="field team-source-field"><span>{t('chimeraSim.team')}</span>
               <TeamSourcePicker options={teamOptions} value={teamSource} onChange={setTeamSource} disabled={blocked} /></div>
             <p className="team-source-check">{teamCheckText(language, sources?.check)}</p>
-            <SimulationBase capture={capture} difficultyText={(difficulty) => difficultyText(language, difficulty)}>
+            <SimulationBase capture={capture} difficultyText={(difficulty) => difficultyText(language, difficulty)} teamSwapped={teamSource !== 'battle'}>
               {baseHealth !== undefined && <span>{t('chimeraSim.bossHealthTag', { percent: percent(baseHealth / 100, baseHealth % 1 ? 1 : 0) })}</span>}
             </SimulationBase>
             <div className="simulation-controls">
@@ -551,6 +559,7 @@ export function SimulationReport({ language, simulationId, onClose, heroes, effe
               <div className="simulation-report-meta"><Dialog.Description>{description}</Dialog.Description>
               {otherDifficulty && <em className="tag team-source-tag" title={t('sim.rebuiltHint')}>
                 {t('sim.rebuiltFrom', { opening: difficultyText(language, summary?.capture.openingDifficulty) })}</em>}
+              {summary?.capture.rotationRebuilt && <em className="tag team-source-tag" title={t('sim.rotationRebuiltHint')}>{t('sim.rotationRebuilt')}</em>}
               {rebuilt && summary?.capture.bossHealthPercent !== undefined && <em className="tag team-source-tag">
                 {t('chimeraSim.bossHealthTag', { percent: percent(summary.capture.bossHealthPercent / 100, Number.isInteger(summary.capture.bossHealthPercent) ? 0 : 1) })}</em>}
               {summary?.capture.teamSource && summary.capture.teamSource !== 'battle' && <em className="tag team-source-tag" title={summary.capture.teamSavedAt ?? ''}>{teamSourceLabel(language, summary.capture.teamSource)}</em>}
@@ -690,6 +699,26 @@ function LogTab({ summary, runIndex, setRunIndex, request, onJump }: { summary: 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [t, focus])
   const runs = (summary.runs ?? []).map((run) => run.index).sort((a, b) => a - b)
+  // Each run's damage and mandatory trials, in the run list and beside it for the run shown.
+  const minimumDamage = summary.aggregate?.minimumDamage ?? 0
+  const runDamage = (item: RunSummary) => item.damage || item.bossDamageTaken || 0
+  const mandatoryDone = (item: RunSummary) => item.mandatory.filter((trial) => trial.completed).length
+  const runEnd = (item: RunSummary) => item.stuck ? t('chimeraSim.stoppedBossTurn', { bossTurns: item.stuck.bossTurns ?? '?' })
+    : item.status === 'complete' ? t('chimeraSim.finished') : item.status === 'partial' ? t('sim.partialCalculation') : toolText(lang, item.reason ?? item.status)
+  const runOption = (index: number) => {
+    const item = summary.runs?.find((entry) => entry.index === index)
+    return item ? [damageText(runDamage(item)),
+      item.mandatory.length ? t('sim.runMandatory', { done: mandatoryDone(item), total: item.mandatory.length }) : '',
+      item.stuck ? runEnd(item) : ''].filter(Boolean).join(' · ') : ''
+  }
+  const runFacts = run && <>
+    <span><small>{t('chimeraSim.damage')}</small>
+      <strong className={minimumDamage > 0 ? runDamage(run) >= minimumDamage ? 'good' : 'bad' : ''}>{damageText(runDamage(run))}</strong>
+      {minimumDamage > 0 && <small>{t('sim.damageGoal', { goal: damageText(minimumDamage) })}</small>}</span>
+    {run.mandatory.length > 0 && <span><small>{t('chimeraSim.mandatoryTrials')}</small>
+      <strong className={mandatoryDone(run) === run.mandatory.length ? 'good' : 'bad'}>{mandatoryDone(run)}/{run.mandatory.length}</strong></span>}
+    <span><small>{t('chimeraSim.result')}</small><strong className={run.stuck ? 'bad' : ''}>{runEnd(run)}</strong></span>
+  </>
   const mandatoryIds = new Set(run?.mandatory.map((item) => item.trialId))
   const otherDone = Object.entries(run?.completedTrials ?? {}).filter(([id]) => !mandatoryIds.has(Number(id)))
     .sort(([, left], [, right]) => left - right)
@@ -715,6 +744,8 @@ function LogTab({ summary, runIndex, setRunIndex, request, onJump }: { summary: 
     runs={runs}
     runIndex={runIndex}
     setRunIndex={setRunIndex}
+    runOption={runOption}
+    runFacts={runFacts}
     groupOf={(row) => row.bossTurns}
     groupTitle={(bossTurns, rows) => {
       const damage = rows.reduce((total, row) => total + (row.source !== 'enemy' ? row.damage : 0), 0)
