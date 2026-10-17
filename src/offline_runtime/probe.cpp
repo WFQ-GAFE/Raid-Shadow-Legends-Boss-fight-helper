@@ -10,6 +10,10 @@
 //   chimera-forecast <input-directory> [seed]
 //       The same for a captured Chimera battle; with a seed, the same team and
 //       Chimera under another battle seed (strategy simulation).
+//   forecast | chimera-forecast <input-directory> <parameter> --await-input
+//       Started ahead of its battle: the worker loads the runtime and static data
+//       first, then waits on the policy channel for "input" (the battle's files are
+//       in the directory) or "cancel" before running the battle.
 //   hero-data <directory> [all | id,id,...]
 //       The champions' static definitions and skills from the copied static
 //       data, written into the report (champion search and profiles). The
@@ -172,7 +176,7 @@ std::string sanitized(std::string message) {
 
 int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
            const fs::path& input_directory, const std::wstring& parameter,
-           HANDLE policy_input, HANDLE policy_output) {
+           HANDLE policy_input, HANDLE policy_output, bool await_input) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     wcscpy_s(offline_fault_path, (report.parent_path() / L"fault.json").c_str());
     SetUnhandledExceptionFilter(record_offline_fault);
@@ -294,6 +298,19 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
             emit(isolated + "\"phase\":\"static_data_loading\",\"stage\":\"" + step + "\"");
         });
         PolicyChannel policy(policy_input, policy_output);
+        if (await_input) {
+            // Started ahead of its battle: the slow part (runtime, static data) is done;
+            // the battle's files are written into the input directory before "input".
+            stage = "awaiting_input";
+            emit(isolated + "\"phase\":\"awaiting_input\"");
+            if (!policy.await_input()) {
+                emit(isolated + "\"phase\":\"prestart_cancelled\"");
+                return 36;
+            }
+            for (const auto* name : {L"battle-setup.msgpack", L"battle-settings.msgpack"})
+                if (!fs::is_regular_file(input_directory / name))
+                    throw std::runtime_error("Input directory lacks battle setup or settings");
+        }
         auto progress = [&](const char* step) {
             stage = step;
             emit(isolated + "\"phase\":\"battle_processing\",\"stage\":\"" + step + "\"");
@@ -326,11 +343,14 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
     }
 }
 
-int launch(const std::wstring& mode, const fs::path& input_argument, const std::wstring& parameter) {
+int launch(const std::wstring& mode, const fs::path& input_argument, const std::wstring& parameter,
+           bool await_input) {
     const bool chimera = mode == L"chimera-forecast";
     const bool forecast = mode == L"forecast" || chimera;
     const bool hero_data = mode == L"hero-data";
     if (!forecast && !hero_data && mode != L"json-convert") return 2;
+    // Only a policy-driven battle can wait for its input on the policy channel.
+    if (await_input && !forecast) return 2;
     if (hero_data) {
         for (const wchar_t c : parameter)
             if (!(c == L',' || (c >= L'0' && c <= L'9')) && parameter != L"all")
@@ -362,8 +382,11 @@ int launch(const std::wstring& mode, const fs::path& input_argument, const std::
         : forecast ? std::vector<const wchar_t*>{L"battle-setup.msgpack", L"battle-settings.msgpack"}
                    : std::vector<const wchar_t*>{L"battle-setup.json", L"battle-settings.json"};
     if (!fs::is_directory(input)) throw std::runtime_error("Input directory is missing");
-    for (const auto* name : required)
-        if (!fs::is_regular_file(input / name)) throw std::runtime_error("Input directory lacks battle setup or settings");
+    // Started ahead of its battle, the directory is still empty; files created in it
+    // later inherit the read access granted below, and the worker checks them itself.
+    if (!await_input)
+        for (const auto* name : required)
+            if (!fs::is_regular_file(input / name)) throw std::runtime_error("Input directory lacks battle setup or settings");
     Profile profile;
     profile.create();
     ReadAccess access;
@@ -419,6 +442,7 @@ int launch(const std::wstring& mode, const fs::path& input_argument, const std::
     if (forecast)
         command += L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(policy_input.value)) +
                    L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(policy_output.value));
+    if (await_input) command += L" --await-input";
     if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, forecast ? TRUE : FALSE,
                         EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED,
                         nullptr, exe.parent_path().c_str(), &startup.StartupInfo, &process))
@@ -468,23 +492,27 @@ void attach_parent_console_if_interactive() {
 
 int wmain(int argc, wchar_t** argv) {
     try {
-        if ((argc == 7 || argc == 9) && std::wstring(argv[1]) == L"--worker") {
+        if ((argc == 7 || argc == 9 || argc == 10) && std::wstring(argv[1]) == L"--worker") {
             HANDLE policy_input = nullptr, policy_output = nullptr;
-            if (argc == 9) {
+            if (argc >= 9) {
                 policy_input = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[7])));
                 policy_output = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[8])));
             }
+            if (argc == 10 && std::wstring(argv[9]) != L"--await-input") return 1;
             return worker(argv[2], std::stoul(argv[3]), argv[4], fs::path(argv[5]), argv[6],
-                          policy_input, policy_output);
+                          policy_input, policy_output, argc == 10);
         }
         attach_parent_console_if_interactive();
-        if (argc < 3 || argc > 4) return 1;
+        // "<mode> <input-directory> [parameter] [--await-input]": the last starts a forecast
+        // worker ahead of its battle (see PolicyChannel::await_input).
+        const bool await_input = argc == 5 && std::wstring(argv[4]) == L"--await-input";
+        if (argc < 3 || argc > 5 || (argc == 5 && !await_input)) return 1;
         const std::wstring mode = argv[1];
         if (mode == L"json-convert" && argc != 3) return 1;
-        const std::wstring parameter = argc == 4 ? std::wstring(argv[3])
+        const std::wstring parameter = argc >= 4 ? std::wstring(argv[3])
                                                  : (mode == L"chimera-forecast" ? L"captured"
                                                     : mode == L"hero-data" ? L"all" : L"1000");
-        return launch(mode, fs::path(argv[2]), parameter);
+        return launch(mode, fs::path(argv[2]), parameter, await_input);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 9;

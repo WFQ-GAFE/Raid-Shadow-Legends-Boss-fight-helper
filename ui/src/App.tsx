@@ -7,7 +7,8 @@ import { DecisionRows } from './DecisionRows'
 import { CollapsiblePanel } from './CollapsiblePanel'
 import { TeamPreviewDialog, TeamPreviewSummary, type TeamPreviewSummaryState, type TeamSnapshot } from './TeamPreview'
 import { TeamPicker, type ChosenTeam, type RosterHero } from './TeamPicker'
-import { loadHeroData, withoutStrength, type HeroData } from './heroData'
+import { championId, loadHeroData, withoutStrength, type HeroData } from './heroData'
+import { HeroAvatar, HeroAvatarRevisionProvider } from './HeroAvatar'
 import { ruleTargetMismatches, skillReach, targetFits, type TargetMismatch } from './ruleTargets'
 import { describeRuleConditions, type RuleDescriptionContext } from './ruleDescriptions'
 import { canMoveRule, logDrawerPreference, revealRuleAfterRender } from './ruleNavigation'
@@ -1057,23 +1058,6 @@ function conditionDescription(rule: Rule, effects: EffectOption[] = [], heroes: 
 
 function conditionLabel(rule: Rule, effects: EffectOption[] = [], heroes: Hero[] = [], trials: Trial[] = []) {
   return conditionDescription(rule, effects, heroes, trials).full
-}
-
-function HeroAvatar({ hero, size = 'md' }: { hero?: Hero; size?: 'sm' | 'md' | 'lg' }) {
-  const [sourceIndex, setSourceIndex] = useState(0)
-  const sources = hero
-    ? [`/api/asset/hero/${hero.typeId}`, `/hero-fallbacks/${hero.typeId}.png`]
-    : []
-  useEffect(() => setSourceIndex(0), [hero?.typeId])
-  return (
-    <span className={`avatar avatar-${size}`} aria-hidden="true">
-      {hero && sourceIndex < sources.length ? (
-        <img src={sources[sourceIndex]} alt="" loading="lazy" decoding="async" onError={() => setSourceIndex((current) => current + 1)} />
-      ) : (
-        <span>{hero?.name?.slice(0, 1) || '?'}</span>
-      )}
-    </span>
-  )
 }
 
 function HydraHeadIcon({ head, size = 'md' }: { head?: HydraHead; size?: 'sm' | 'md' | 'lg' }) {
@@ -2668,6 +2652,7 @@ function App() {
     setData(current => current ? {
       ...current,
       storageHealth: next.storageHealth ?? current.storageHealth,
+      catalogRevision: next.catalogRevision ?? current.catalogRevision,
       heroes: next.heroes ?? current.heroes,
       hydraHeads: next.hydraHeads ?? current.hydraHeads,
       effects: next.effects ?? current.effects,
@@ -2692,9 +2677,15 @@ function App() {
     }
   }, [bossMode, live.chimeraDifficultyId])
 
+  const [heroData, setHeroData] = useState<HeroData | null>(null)
+  const heroDataRevisionAttempts = useRef(new Set<string>())
   const heroes = data?.heroes ?? []
-  const heroNameOf = useCallback((typeId: number) => heroByRuntimeId(heroes, typeId)?.name ?? (tr('app.champion4', { typeId })), [heroes, language])
-  const heroAvatarOf = useCallback((typeId: number) => <HeroAvatar hero={heroByRuntimeId(heroes, typeId)} size="md" />, [heroes])
+  const heroNameOf = useCallback((typeId: number) => heroByRuntimeId(heroes, typeId)?.name
+    || heroData?.heroes[String(championId(typeId))]?.name
+    || tr('app.champion4', { typeId }), [heroes, heroData, language])
+  const avatarRevision = `${data?.catalogRevision ?? ''}:${heroData ? 'ready' : 'loading'}`
+  const heroAvatarOf = useCallback((typeId: number) => <HeroAvatar hero={heroByRuntimeId(heroes, typeId)} typeId={typeId}
+    name={heroNameOf(typeId)} revision={avatarRevision} size="md" />, [heroes, heroNameOf, avatarRevision])
   const hydraHeads = data?.hydraHeads ?? []
   const effects = data?.effects ?? []
   const rules = config.rules ?? []
@@ -2711,13 +2702,16 @@ function App() {
   const strategyTeamIds = config.team?.heroTypeIds ?? config.team?.heroIds ?? []
   const team = strategyTeamIds.length ? strategyTeamIds : live.teamHeroIds ?? []
   // Who each skill can target, for the rule target warnings.
-  const [heroData, setHeroData] = useState<HeroData | null>(null)
   useEffect(() => {
+    if (heroData) return
+    const attemptKey = `${selectedPid ?? ''}:${data?.catalogRevision ?? ''}`
+    if (heroDataRevisionAttempts.current.has(attemptKey)) return
+    heroDataRevisionAttempts.current.add(attemptKey)
     let current = true
-    void loadPickerHeroData().then((value) => { if (current && value) setHeroData(value) })
+    void loadPickerHeroData().then((value) => { if (current && value) setHeroData(value) }).catch(() => undefined)
     return () => { current = false }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPid])
+  }, [selectedPid, data?.catalogRevision, heroData])
   const activeModeSpec = data?.modes.find((mode) => mode.id === bossMode)
   const teamSize = activeModeSpec?.teamSize ?? (bossMode === 'hydra' ? 6 : 5)
   // The full team on the preparation screen now, to set as the strategy's team.
@@ -2913,9 +2907,16 @@ function App() {
   }
 
   // Champion search tags and profiles, read once from the game's static data.
-  function loadPickerHeroData() {
-    const query = selectedPid === null || selectedPid === undefined ? '' : `?pid=${selectedPid}`
+  function loadPickerHeroData(retry = false) {
+    const params = new URLSearchParams()
+    if (selectedPid !== null && selectedPid !== undefined) params.set('pid', String(selectedPid))
+    if (retry) params.set('retry', '1')
+    const query = params.size ? `?${params}` : ''
     return loadHeroData(() => api<{ status: string; data?: HeroData; reason?: string }>(`/api/hero-data${query}`))
+      .then((value) => {
+        if (value) setHeroData(value)
+        return value
+      })
   }
 
   async function beginRename() {
@@ -3160,6 +3161,7 @@ function App() {
 
   return (
     <I18nProvider locale={language}>
+    <HeroAvatarRevisionProvider value={avatarRevision}>
     <div className="app-shell">
       <header className="topbar">
         <div className="brand" data-i18n-skip><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><span><strong>{APP_NAME}</strong><small>{__APP_VERSION__}</small></span></div>
@@ -3462,6 +3464,7 @@ function App() {
         heroAvatar={heroAvatarOf}
         skillName={(heroTypeId, skillTypeId) => heroByRuntimeId(heroes, heroTypeId)?.skills.find((skill) => skill.typeId === skillTypeId)?.name ?? `${skillTypeId}`} />
       <TeamPicker language={language} open={teamPickerOpen} teamSize={teamSize} bossMode={bossMode}
+        catalogRevision={data?.catalogRevision}
         initial={{ heroTypeIds: config.team?.heroTypeIds ?? [], heroInstanceIds: config.team?.heroInstanceIds ?? [] }}
         loadRoster={loadRoster} loadHeroData={loadPickerHeroData} effects={effects}
         onClose={() => setTeamPickerOpen(false)} onApply={(chosen) => void applyStrategyTeam(chosen)}
@@ -3485,6 +3488,7 @@ function App() {
         </Dialog.Portal>
       </Dialog.Root>
     </div>
+    </HeroAvatarRevisionProvider>
     </I18nProvider>
   )
 }

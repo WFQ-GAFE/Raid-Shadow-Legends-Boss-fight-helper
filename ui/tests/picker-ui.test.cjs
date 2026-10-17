@@ -30,6 +30,7 @@ function harness(file, exportName, initialProps) {
     }
   };
   const react = {
+    createContext: value => ({ defaultValue: value, Provider: 'context:provider' }), useContext: context => context.defaultValue,
     memo: value => value, useMemo: memo, useCallback: (callback, deps) => memo(() => callback, deps),
     useDeferredValue: value => value, useEffect: effect, useLayoutEffect: effect,
     useRef: value => memo(() => ({ current: value }), []), useId: () => memo(() => `picker-test-${cursor}`, []),
@@ -145,6 +146,160 @@ async function picker(initialIds = [1, 2, 3]) {
 const slotIds = h => h.findAll(byClass('picker-slot-profile')).map(node => Number(node.props['aria-label'].match(/Champion (\d+)/)[1]));
 // Roster cards only: the team slots' avatars carry a hero too.
 const candidates = h => h.findAll(node => typeof node.type === 'function' && node.props.hero && typeof node.props.replaceable === 'boolean');
+
+const namedData = () => ({ ...data, heroes: Object.fromEntries(Object.entries(data.heroes)
+  .map(([id, hero]) => [id, { ...hero, name: ({ 100: 'Alpha Champion', 200: 'Beta Champion', 300: 'Gamma Champion', 400: 'Delta Champion' })[id] }])) });
+const coldPickerProps = (loadData, extra = {}) => ({ language: 'en', open: true, teamSize: 3, bossMode: 'chimera',
+  initial: { heroInstanceIds: [1], heroTypeIds: [101] }, loadRoster: async () => heroes, loadHeroData: loadData, effects,
+  // This is what App supplies before its display catalog has been populated.
+  heroName: typeId => `Champion ${typeId}`, heroAvatar: () => 'avatar', onClose() {}, onApply() {}, ...extra });
+async function settlePicker(h) {
+  h.render(); h.flushEffects(); await Promise.resolve(); h.render(); h.flushEffects(); h.render();
+}
+
+test('a fresh install uses static champion names and searches them while the display catalog is empty', async () => {
+  const h = harness('TeamPicker.tsx', 'TeamPicker', coldPickerProps(async () => namedData()));
+  await settlePicker(h);
+  assert.equal(candidates(h).find(node => node.props.hero.typeId === 101).props.name, 'Alpha Champion');
+  assert.equal(candidates(h).find(node => node.props.hero.typeId === 102).props.name, 'Alpha Champion');
+  assert.ok(h.find(node => node.props.className === 'picker-slot-profile' && node.props['aria-label'].includes('Alpha Champion')));
+  h.find(node => node.type === 'input').props.onChange({ target: { value: 'alpha' } }); h.render();
+  assert.deepEqual(candidates(h).map(node => node.props.hero.typeId), [101, 102]);
+  h.dispose();
+});
+
+test('healthy catalog names outrank older offline names; only explicit placeholders use the fallback', async () => {
+  const h = harness('TeamPicker.tsx', 'TeamPicker', coldPickerProps(async () => namedData(), {
+    heroName: id => id === 101 ? 'Current Game Name' : `Champion ${id}` }));
+  await settlePicker(h);
+  assert.equal(candidates(h).find(node => node.props.hero.typeId === 101).props.name, 'Current Game Name');
+  assert.equal(candidates(h).find(node => node.props.hero.typeId === 102).props.name, 'Alpha Champion');
+  h.find(node => node.type === 'input').props.onChange({ target: { value: 'current game' } }); h.render();
+  assert.deepEqual(candidates(h).map(node => node.props.hero.typeId), [101]);
+  h.find(node => node.type === 'input').props.onChange({ target: { value: '' } }); h.render();
+  for (const primary of ['', 'l10n:hero-type/name?id=100#static']) {
+    h.render({ heroName: () => primary });
+    assert.equal(candidates(h).find(node => node.props.hero.typeId === 101).props.name, 'Alpha Champion');
+  }
+  h.render({ language: 'pt-BR', heroName: id => makeTranslate('pt-BR')('app.champion4', { typeId: id }) });
+  assert.equal(candidates(h).find(node => node.props.hero.typeId === 101).props.name, 'Alpha Champion');
+  h.dispose();
+});
+
+test('delayed static data repairs names and an existing search in the same picker without resetting the team', async () => {
+  let resolveData;
+  const pending = new Promise(resolve => { resolveData = resolve; });
+  const applied = [];
+  const h = harness('TeamPicker.tsx', 'TeamPicker', coldPickerProps(() => pending, { onApply: value => applied.push(value) }));
+  await settlePicker(h);
+  assert.ok(h.find(node => node.props.role === 'status' && node.props.children?.[0] === catalogs.en['picker.championDisplayLoading']));
+  assert.equal(candidates(h).find(node => node.props.hero.typeId === 101).props.name, 'Champion 101');
+  h.find(node => node.type === 'input').props.onChange({ target: { value: 'alpha' } }); h.render();
+  assert.equal(candidates(h).length, 0);
+  resolveData(namedData()); await Promise.resolve(); h.render(); h.flushEffects(); h.render();
+  assert.equal(h.find(node => node.type === 'input').props.value, 'alpha');
+  assert.deepEqual(candidates(h).map(node => node.props.hero.typeId), [101, 102]);
+  assert.equal(h.find(node => node.props.role === 'status' && node.props.children?.[0] === catalogs.en['picker.championDisplayLoading']), undefined);
+  h.find(node => node.type === 'button' && node.props.className === 'button primary').props.onClick();
+  assert.deepEqual(applied, [{ heroTypeIds: [101], heroInstanceIds: [1] }]);
+  h.dispose();
+});
+
+test('failed champion data offers a retry that preserves the roster, search and chosen team', async () => {
+  let reads = 0, rosterReads = 0;
+  const retries = [];
+  const applied = [];
+  const h = harness('TeamPicker.tsx', 'TeamPicker', coldPickerProps(async retry => { retries.push(retry); return ++reads === 1 ? null : namedData(); }, {
+    loadRoster: async () => { rosterReads++; return heroes; }, onApply: value => applied.push(value) }));
+  await settlePicker(h);
+  assert.ok(h.find(node => node.props.role === 'status' && node.props.children?.[0] === catalogs.en['picker.championDisplayUnavailable']));
+  h.find(node => node.type === 'input').props.onChange({ target: { value: 'alpha' } }); h.render();
+  h.find(node => node.type === 'button' && node.props.children === catalogs.en['sim.retry']).props.onClick();
+  await settlePicker(h);
+  assert.equal(reads, 2); assert.equal(rosterReads, 1);
+  assert.deepEqual(retries, [false, true]);
+  assert.equal(h.find(node => node.type === 'input').props.value, 'alpha');
+  assert.equal(candidates(h).length, 2);
+  h.find(node => node.type === 'button' && node.props.className === 'button primary').props.onClick();
+  assert.deepEqual(applied, [{ heroTypeIds: [101], heroInstanceIds: [1] }]);
+  h.dispose();
+});
+
+test('background catalog recovery repairs a failed open picker once per revision and preserves its edits', async () => {
+  let reads = 0, rosterReads = 0, available = false;
+  const applied = [];
+  const loadData = async () => { reads++; return available ? namedData() : null; };
+  const h = harness('TeamPicker.tsx', 'TeamPicker', coldPickerProps(loadData, {
+    catalogRevision: 'catalog-1', loadRoster: async () => { rosterReads++; return heroes; }, onApply: value => applied.push(value) }));
+  await settlePicker(h);
+  h.find(node => node.type === 'input').props.onChange({ target: { value: 'alpha' } }); h.render();
+  assert.equal(reads, 1);
+  // Polls and new callback references cannot retry the same failed revision.
+  for (let i = 0; i < 3; i++) {
+    h.render({ heroName: id => `Champion ${id}`, loadHeroData: retry => loadData(retry) });
+    await settlePicker(h);
+  }
+  assert.equal(reads, 1);
+  h.render({ catalogRevision: 'catalog-2' }); h.flushEffects(); await settlePicker(h);
+  assert.equal(reads, 2);
+  await settlePicker(h); assert.equal(reads, 2);
+  // The backend has now completed the offline read and advanced its revision.
+  available = true;
+  h.render({ catalogRevision: 'catalog-3' }); h.flushEffects(); await settlePicker(h);
+  assert.equal(reads, 3); assert.equal(rosterReads, 1);
+  assert.equal(h.find(node => node.type === 'input').props.value, 'alpha');
+  assert.deepEqual(candidates(h).map(node => node.props.hero.typeId), [101, 102]);
+  assert.ok(candidates(h).every(node => node.props.name === 'Alpha Champion'));
+  assert.equal(h.find(node => node.type === 'HeroProfile').props.dataState, 'ready');
+  assert.equal(h.find(node => node.props.role === 'status' && node.props.children?.[0] === catalogs.en['picker.championDisplayUnavailable']), undefined);
+  // Later avatar/catalog updates cannot restart healthy metadata loading.
+  h.render({ catalogRevision: 'catalog-4' }); h.flushEffects(); await settlePicker(h);
+  assert.equal(reads, 3);
+  h.find(node => node.type === 'button' && node.props.className === 'button primary').props.onClick();
+  assert.deepEqual(applied, [{ heroTypeIds: [101], heroInstanceIds: [1] }]);
+  h.dispose();
+});
+
+test('portraits can load before the display catalog and retry failed assets only when their revision changes', () => {
+  const h = harness('HeroAvatar.tsx', 'HeroAvatar', { typeId: 101, name: 'Alpha Champion', revision: 'assets-1' });
+  h.render(); h.flushEffects(); h.render();
+  let image = h.find(node => node.type === 'img');
+  assert.equal(image.props.src, '/api/asset/hero/100?revision=assets-1');
+  image.props.onError(); h.render();
+  assert.equal(h.find(node => node.type === 'img').props.src, '/hero-fallbacks/100.png?revision=assets-1');
+  // Duplicate errors from the old source must not skip the fallback.
+  image.props.onError(); h.render();
+  assert.equal(h.find(node => node.type === 'img').props.src, '/hero-fallbacks/100.png?revision=assets-1');
+  h.find(node => node.type === 'img').props.onError(); h.render();
+  assert.equal(h.find(node => node.type === 'img'), undefined);
+  assert.ok(h.find(node => node.type === 'span' && node.props.children === 'A'));
+  h.render({ typeId: 102 }); h.flushEffects(); h.render();
+  // Ascension variants share the same portrait; polling cannot cause a loop.
+  assert.equal(h.find(node => node.type === 'img'), undefined);
+  h.render({ revision: 'assets-2' }); h.flushEffects(); h.render();
+  assert.equal(h.find(node => node.type === 'img').props.src, '/api/asset/hero/100?revision=assets-2');
+  h.render({ revision: 'assets-3' }); h.flushEffects(); h.render();
+  assert.equal(h.find(node => node.type === 'img').props.src, '/api/asset/hero/100?revision=assets-2');
+  h.find(node => node.type === 'img').props.onError(); h.render(); h.flushEffects(); h.render();
+  assert.equal(h.find(node => node.type === 'img').props.src, '/api/asset/hero/100?revision=assets-3');
+  const { heroAvatarIdentity } = h.load('HeroAvatar.tsx');
+  assert.equal(heroAvatarIdentity(undefined, 8776), 8770);
+  for (const invalid of [0, -1, 1.5, NaN, Infinity]) assert.equal(heroAvatarIdentity(undefined, invalid), undefined);
+  h.dispose();
+});
+
+test('a first static-data failure is not cached and a successful retry keeps normal warm loading', async () => {
+  const h = harness('HeroAvatar.tsx', 'HeroAvatar', {});
+  const { loadHeroData } = h.load('heroData.ts');
+  let requests = 0;
+  assert.equal(await loadHeroData(async () => { requests++; return { status: 'unavailable' }; }), null);
+  await assert.rejects(loadHeroData(async () => { requests++; throw new Error('temporary read failure'); }), /temporary read failure/);
+  const ready = namedData();
+  assert.equal(await loadHeroData(async () => { requests++; return { status: 'ready', data: ready }; }), ready);
+  assert.equal(await loadHeroData(async () => { throw new Error('warm data should not be fetched again'); }), ready);
+  assert.equal(requests, 3);
+  h.dispose();
+});
 
 test('removing the leader and dragging out a champion keep preview, aura and submitted team aligned', async () => {
   const h = await picker();

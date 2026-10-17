@@ -353,6 +353,73 @@ def test_a_hydra_opening_runs_on_another_difficulty() -> None:
             raise AssertionError(f"boss health {health} accepted")
 
 
+def test_a_newer_rotation_and_the_accounts_team_level_replace_the_base_battles() -> None:
+    """The game showed rotation 4 after a rotation-3 base battle: the Hydra is rebuilt on rotation 4
+    (same difficulty), and the swapped-in team plays with its own account's team level."""
+    import chimera_simulation_service
+    from hydra_simulation_service import HydraSimulationService
+    from test_team_setups import hero, server_hero
+
+    data = extract(static_data())
+    newer = copy.deepcopy(data["stages"]["8039004"])
+    newer.update(stageId=8049003, difficulty=3)
+    newer["units"] = list(reversed(newer["units"]))
+    data["stages"]["8049003"] = newer
+    base = opening()
+    base[0]["t"] = 1_000_000_000_000  # battle time (ms)
+    base[0]["f"] = {"i": 95815853, "p": 1, "l": 25, "z": 0, "ls": 0, "h": [server_hero(11, 7001, 1)]}
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        write_opening(root / "capture" / "abc-1", base)
+        (root / "capture" / "abc-1" / "packed").mkdir()
+        (root / "capture" / "abc-1" / "packed" / "conversion-report.json").write_text("{}", encoding="utf-8")
+        converted = []
+
+        def convert(folder, probe):
+            converted.append(folder.name)
+            (folder / "packed").mkdir()
+            return {}
+
+        original = chimera_simulation_service.convert
+        chimera_simulation_service.convert = convert
+        try:
+            service = HydraSimulationService(capture_roots={"capture": root / "capture", "forecast": root / "forecast"},
+                                             simulation_root=root / "sims",
+                                             runner=lambda *args, **kwargs: {"status": "unknown", "reason": "test"},
+                                             bundle_provider=lambda pid: root, stage_provider=lambda: data)
+
+            def run(**options):
+                job = service.start({"rules": []}, {"id": "s"}, "capture:abc-1", 1, **options)
+                for _ in range(200):
+                    if service.status()["status"] != "running":
+                        break
+                    time.sleep(0.02)
+                assert service.status()["status"] == "complete", service.status()
+                return root / "sims" / job["id"], service.load(job["id"])["capture"]
+
+            team = {"source": "current", "heroes": [hero(21, 8001)], "powers": None, "area": None,
+                    "rule": "building", "savedAt": None, "check": None, "teamLevel": 23}
+            folder, facts = run(team=team, current_stage={"stageId": 8049002, "seenAt": 2_000_000_000.0})
+            assert converted == ["team-input", "stage-input"]
+            built = json.loads((folder / "stage-input" / "battle-setup.json").read_text("utf-8"))[0]
+            assert built["i"] == 8049003 and [unit["i"] for unit in built["s"]["h"]] == [26140, 26070]
+            assert built["f"]["l"] == 23 and [unit["i"] for unit in built["f"]["h"]] == [8001]
+            assert facts["stageId"] == 8049003 and facts["difficulty"] == 3 and facts["rotationRebuilt"] is True
+            assert facts["openingStageId"] == 8039003 and facts["openingDifficulty"] == 3
+            assert facts["teamLevel"] == 23 and facts["teamLevelSource"] == "account"
+            # Seen before the base battle (or the same rotation): the base battle as it is.
+            converted.clear()
+            folder, facts = run(current_stage={"stageId": 8049002, "seenAt": 500_000_000.0})
+            assert converted == [] and "rotationRebuilt" not in facts and facts["stageId"] == 8039003
+            # Without the account's own level the base battle's stays.
+            team.pop("teamLevel")
+            folder, facts = run(team=team)
+            assert json.loads((folder / "team-input" / "battle-setup.json").read_text("utf-8"))[0]["f"]["l"] == 25
+            assert facts["teamLevel"] == 25 and facts["teamLevelSource"] == "base"
+        finally:
+            chimera_simulation_service.convert = original
+
+
 def write_chimera_opening(folder: Path, setup: list[dict]) -> None:
     import gzip
     import hashlib

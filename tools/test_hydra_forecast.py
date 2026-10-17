@@ -553,3 +553,30 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(function):
             function()
             print("PASS", name)
+
+
+def test_the_verdict_is_read_between_hero_turns_once_the_forecast_ends():
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as folder:
+        monitor = monitor_with(forecast_result([(0, 0, 100), (40, 1, 101)]), [], Path(folder))
+        cfg = {**config([{"markIndex": 2, "relation": "isNoneOf", "heroTypeIds": [101]}]), "mode": "execute"}
+        first = live_state(0)
+        assert not monitor.verdict_ready(first)
+        monitor.observe(cfg, first, ipc=FakeIpc(), capability_memory=None,
+                        marked_target=controller.hydra_marked_target, tracker_armed=True)
+        monitor.battle.job.thread.join(timeout=10)
+        # Ready without a new hero turn; not for another battle.
+        assert monitor.verdict_ready(first) and not monitor.verdict_ready({**first, "battleGeneration": 4})
+        with (patch.object(controller, "ACTIVE_BOSS_MODE", "hydra"),
+              patch.object(controller, "hydra_forecast_monitor", return_value=monitor),
+              patch.object(controller, "is_battle_decision_state", return_value=True),
+              patch.object(controller, "emit_telemetry"),
+              patch.object(controller, "request_chimera_regroup_retry") as regroup):
+            def poll():
+                return controller.poll_forecast_verdict(cfg, first, agent=Path("offline"), ipc=FakeIpc(), session_id=1,
+                                                        nonce=3, runtime_state={}, execute_requested=True,
+                                                        capability_memory=None)
+            assert poll() is True and regroup.call_count == 1
+            assert regroup.call_args.kwargs["boss_mode"] == "hydra"
+            assert poll() is False and regroup.call_count == 1  # the verdict is read once

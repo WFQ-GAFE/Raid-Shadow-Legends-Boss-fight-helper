@@ -114,6 +114,7 @@ from chimera_simulation_service import (BATTLE_FORECAST_ROOT, SimulationService,
                                         list_captures as list_chimera_captures,
                                         recent_simulations as recent_chimera_simulations)
 from hero_data import HeroDataService
+from hero_catalog_recovery import merge_hero_catalog
 from hydra_simulation_service import (HydraSimulationService,
                                       recent_simulations as recent_hydra_simulations)
 from team_setups import (STRATEGY_TEAM_ROOT, TEAM_SIZE, StrategyTeamStore, TeamSetupError,  # noqa: E402
@@ -121,6 +122,8 @@ from team_setups import (STRATEGY_TEAM_ROOT, TEAM_SIZE, StrategyTeamStore, TeamS
                          check_against_captures,
                          decode_account_bonuses, decode_roster, exported_team, latest_check, preview_team,
                          remember_check, same_team, simulation_team, team_sources, unpack_simulation)
+from simulation_base import CurrentStages, account_team_level, base_notes  # noqa: E402
+from team_setups import CAPTURE_ROOTS as TEAM_CAPTURE_ROOTS  # noqa: E402
 from strategy_simulation_package import (capture_row, materialize_opening, package_status,  # noqa: E402
                                          pack_opening, sanitize_package, select_opening,
                                          valid_account_bonuses)
@@ -171,6 +174,7 @@ from chimera_icons import (  # noqa: E402
     discover_game_hydra_heads,
     ensure_icon_cache,
     game_hero_asset,
+    game_avatar_cache_revision,
     game_reward_asset,
     game_named_sprite,
     TEAM_ICON_BUNDLES,
@@ -480,8 +484,14 @@ class ChimeraService:
         self.controller = ControllerManager()
         self.simulations = SimulationService()
         self.hydra_simulations = HydraSimulationService()
+        # The boss stage the team screen last showed: the current rotation for simulations.
+        self.current_stages = CurrentStages()
         # Champion search tags and profiles from the game's static data.
         self.hero_data = HeroDataService()
+        self.hero_data_recovery_source: dict[str, Any] | None = None
+        self.hero_data_recovery_epoch = -1
+        self.hero_data_recovery_error = ""
+        self.hero_data_recovery_loading = False
         self.team_snapshots = TeamSnapshotStore()
         # Strategy groups of each game account (config/accounts/<userId>); the account
         # of the current request is kept per thread (see use_strategy_account).
@@ -634,6 +644,61 @@ class ChimeraService:
             self.hero_catalog = {key: static_entity(value) for key, value in catalog.items()}
             self.hero_catalog_mtime_ns = modified
             self._catalog_changed()
+
+    def hero_data_snapshot(self, pid: int | None, *, retry: bool = False) -> dict[str, Any]:
+        """Recover display/skill metadata from the isolated static-data reader.
+
+        Account identification can succeed after the one-time startup catalog
+        was missed. The offline reader is independent of a Boss screen or
+        battle, so its successful result also repairs the shared UI catalog.
+        """
+        service = getattr(self, "hero_data", None)
+        if service is None:
+            return {"status": "unavailable", "reason": ui_text("heroData.unavailable")}
+        snapshot = service.snapshot(pid, force_retry=True) if retry else service.snapshot(pid)
+        loading = snapshot.get("status") == "building"
+        if loading and not getattr(self, "hero_data_recovery_loading", False):
+            desktop_lifecycle_log("hero_catalog_loading source=offline")
+        self.hero_data_recovery_loading = loading
+        data = snapshot.get("data") if snapshot.get("status") == "ready" else None
+        if not isinstance(data, dict):
+            reason = str(snapshot.get("reason") or "")
+            if reason and reason != getattr(self, "hero_data_recovery_error", ""):
+                self.hero_data_recovery_error = reason
+                desktop_lifecycle_log(f"hero_catalog_unavailable {reason}")
+            return snapshot
+        with self.lock:
+            epoch = getattr(self, "catalog_epoch", 0)
+            if (data is getattr(self, "hero_data_recovery_source", None)
+                    and epoch == getattr(self, "hero_data_recovery_epoch", -1)):
+                return snapshot
+            result = merge_hero_catalog(self.hero_catalog, data)
+            if not result.source_count:
+                return {"status": "unavailable", "reason": ui_text("heroData.unavailable")}
+            if result.changed:
+                self.hero_catalog = {key: static_entity(value) for key, value in
+                                     canonicalize_hero_catalog(result.catalog).items()}
+                self._catalog_changed()
+                try:
+                    save_hero_catalog(self.hero_catalog)
+                    self.hero_catalog_mtime_ns = HERO_CATALOG.stat().st_mtime_ns
+                except OSError as error:
+                    # The current window can still use the repaired in-memory
+                    # data if this user's cache directory is temporarily busy.
+                    desktop_lifecycle_log(f"hero_catalog_cache_save_failed {error}")
+                desktop_lifecycle_log(
+                    f"hero_catalog_recovered source=offline added={result.added} "
+                    f"updated={result.updated} heroes={len(self.hero_catalog)}")
+            self.hero_data_recovery_source = data
+            self.hero_data_recovery_epoch = getattr(self, "catalog_epoch", 0)
+            self.hero_data_recovery_error = ""
+        return snapshot
+
+    def warm_hero_catalog(self, pid: int | None) -> None:
+        # snapshot starts at most one background offline read. Keep polling
+        # its result so an already-open picker/editor recovers automatically.
+        if isinstance(pid, int) and not isinstance(pid, bool) and getattr(self, "hero_data", None) is not None:
+            self.hero_data_snapshot(pid)
 
     def client_opened(self) -> None:
         with self.client_lock:
@@ -1731,6 +1796,10 @@ class ChimeraService:
         lifecycle_catalog = lifecycle_section.get("heroCatalog")
         if isinstance(lifecycle_catalog, list):
             self.update_hero_catalog({"heroes": lifecycle_catalog})
+        current_stages = getattr(self, "current_stages", None)
+        if screen == "team_selection" and current_stages is not None:
+            # The stage on the team screen names the current rotation (simulation_base).
+            current_stages.remember(lifecycle_section.get("bossMode"), lifecycle_section.get("stageId"))
         live_chimera_difficulty_id = self.update_rotation_catalog(
             rotation, lifecycle_section
         )
@@ -1860,7 +1929,8 @@ class ChimeraService:
 
     def catalog_payload(self, known_revision: str | None = None) -> dict[str, Any]:
         with self.lock:
-            catalog_revision = f"{getattr(self, 'catalog_session', 'initial')}:{getattr(self, 'catalog_epoch', 0)}"
+            catalog_revision = (f"{getattr(self, 'catalog_session', 'initial')}:"
+                                f"{getattr(self, 'catalog_epoch', 0)}:{game_avatar_cache_revision()}")
             if known_revision == catalog_revision:
                 return {"catalogRevision": catalog_revision}
             return {
@@ -1877,6 +1947,7 @@ class ChimeraService:
         state = self.live_state(pid, boss_mode) if pid is not None else {
             "bossMode": boss_mode, "statusLabel": ui_text("web.noAccount"), "modeReady": False,
         }
+        self.warm_hero_catalog(pid)
         health = storage_health(self.store_path())
         store = self.strategy_store() if health["ok"] else default_store()
         prepared = self.prepared_team_preview(pid)
@@ -2226,13 +2297,22 @@ class ChimeraService:
                 team["display"] = portable_snapshot(display_preview(preview))
             return team
 
-        return simulation_team(
+        chosen = simulation_team(
             source, boss_mode, team.get("heroTypeIds"),
             saved=saved,
             reference=reference,
             check=latest_check(boss_mode),
             current=current if pid is not None else None,
             bonuses=bonuses if pid is not None or package.get("accountBonuses") else None)
+        if chosen is not None:
+            # The team plays with this account's bonuses: its own team level too, not the base battle's.
+            chosen["teamLevel"] = self.own_team_level()
+        return chosen
+
+    def own_team_level(self) -> int | None:
+        """This account's team level (`f.l`) from its newest saved battle of either boss (simulation_base)."""
+        return account_team_level(self.strategy_account().key,
+                                  [root for roots in TEAM_CAPTURE_ROOTS.values() for root in roots])
 
     def team_preview_summary(self, pid: int | None, preview: dict[str, Any] | None = None) -> dict[str, Any] | None:
         preview = preview if preview is not None else self.prepared_team_preview(pid)
@@ -2258,8 +2338,21 @@ class ChimeraService:
         package = sanitize_package(config.get("simulationPackage"), boss_mode,
                                    (config.get("team") or {}).get("heroTypeIds"))
         row = capture_row(package, strategy_id, boss_mode, str(config.get("name") or "")) if package else None
-        return {**overview, "strategyId": strategy_id,
-                "captures": ([row] if row else []) + overview["captures"]}
+        captures = ([row] if row else []) + overview["captures"]
+        # What the simulation will change on each base battle: this rotation's boss, and whether
+        # another account's team level stays (simulation_base).
+        current = self.current_stage(boss_mode)
+        account = self.strategy_account().key
+        others = [item for item in captures if item.get("ownerId") is not None and str(item["ownerId"]) != str(account)]
+        level = self.own_team_level() if others and account else None
+        stages = None
+        if boss_mode == "hydra" and current is not None:
+            try:
+                stages = self.hydra_simulations.stage_provider()
+            except Exception:  # the heads only decorate the panel
+                stages = None
+        captures = [{**item, **base_notes(item, boss_mode, current, account, level, stages)} for item in captures]
+        return {**overview, "strategyId": strategy_id, "captures": captures}
 
     def _portable_capture(self, body: dict[str, Any], boss_mode: str) -> Path | None:
         capture_id = str(body.get("captureId") or "")
@@ -2288,7 +2381,8 @@ class ChimeraService:
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
             team=self.simulation_team(body, config, "hydra"),
             capture_folder=self._portable_capture(body, "hydra"),
-            difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None)
+            difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None,
+            current_stage=self.current_stage("hydra"))
 
     def start_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
         config = normalized_strategy(body.get("config"), {}, "chimera")
@@ -2305,7 +2399,12 @@ class ChimeraService:
             team=self.simulation_team(body, config, "chimera"),
             capture_folder=self._portable_capture(body, "chimera"),
             difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None,
-            boss_health=float(health) if isinstance(health, (int, float)) and not isinstance(health, bool) else None)
+            boss_health=float(health) if isinstance(health, (int, float)) and not isinstance(health, bool) else None,
+            current_stage=self.current_stage("chimera"))
+
+    def current_stage(self, boss_mode: str) -> dict[str, Any] | None:
+        stages = getattr(self, "current_stages", None)
+        return stages.latest(boss_mode) if stages is not None else None
 
     def bootstrap(
         self, pid: int | None = None, force: bool = False,
@@ -2330,6 +2429,7 @@ class ChimeraService:
             if isinstance(pid, int)
             else {"bossMode": boss_mode, "statusLabel": ui_text("web.noAccount"), "modeReady": False}
         )
+        self.warm_hero_catalog(pid)
         team = live.get("teamHeroIds") if isinstance(live, dict) else []
         if isinstance(team, list) and team:
             self.start_visual_preload(team)
@@ -2385,6 +2485,8 @@ class ChimeraService:
             return game_named_sprite(TEAM_ICON_BUNDLES[kind], parts[0])
         if kind == "hero" and len(parts) == 1 and parts[0].isdigit():
             requested_hero_id = int(parts[0])
+            if requested_hero_id <= 0 or requested_hero_id > 0x7FFFFFFF:
+                return None
             hero = self.hero_catalog.get(requested_hero_id)
             if hero is None:
                 # A rank/ascension variant id: the catalog's runtime ids, or the base id.
@@ -2407,6 +2509,14 @@ class ChimeraService:
                     hero_id,
                     allow_network=False,
                 )
+            # The account's roster can be ready before the display catalog.
+            # Local portraits are keyed by the base type, independently of a
+            # previously observed preparation team or saved battle.
+            base_id = (requested_hero_id - requested_hero_id % 10
+                       if 1 <= requested_hero_id % 10 <= 6 else requested_hero_id)
+            native = game_hero_asset(base_id, {})
+            fallback = DIST_DIR / "hero-fallbacks" / f"{base_id}.png"
+            return native or (fallback if fallback.is_file() else None)
         if kind == "head" and len(parts) == 1 and parts[0].isdigit():
             type_id = int(parts[0])
             with self.lock:
@@ -2575,7 +2685,8 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                     return
                 raw_pid = query.get("pid", [None])[0]
                 pid = int(raw_pid) if raw_pid and str(raw_pid).isdigit() else None
-                self._json(self.server.service.hero_data.snapshot(pid))
+                retry = query.get("retry", [""])[0] == "1"
+                self._json(self.server.service.hero_data_snapshot(pid, retry=retry))
                 return
             if parsed.path == "/api/team-preview":
                 if not self._write_authorized():

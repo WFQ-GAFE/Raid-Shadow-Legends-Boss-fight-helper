@@ -7,6 +7,7 @@ import io
 import os
 import re
 import threading
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,17 @@ _GAME_SKILL_PATHS_MEMORY: dict[str, Path] = {}
 _GAME_SKILL_ID_PATHS_MEMORY: dict[int, Path] = {}
 _GAME_REWARD_PATHS_MEMORY: dict[str, Path] = {}
 _GAME_AVATAR_CACHE_CHECKED = False
+_GAME_AVATAR_NEXT_CHECK = 0.0
+_GAME_AVATAR_RETRY_NEEDED = False
+_GAME_AVATAR_RETRY_ACTIVE = False
+_GAME_AVATAR_CACHE_REVISION = 0
+_GAME_AVATAR_CANCELLED = lambda: False
+_GAME_AVATAR_MISSING_IDS: set[str] = set()
+# Discover resources that arrive after launch without decoding bundles for
+# every portrait request. Failed decoders get a separate, longer backoff.
+AVATAR_SOURCE_RECHECK_SECONDS = 10.0
+AVATAR_DECODE_RETRY_SECONDS = 60.0
+_GAME_AVATAR_FAILED_SOURCES: dict[str, tuple[dict[str, Any], float]] = {}
 _GAME_SKILL_CACHE_CHECKED: set[int] = set()
 _GAME_REWARD_CACHE_CHECKED = False
 _GAME_BUILD_MEMORY: Path | None = None
@@ -853,15 +865,13 @@ def _valid_manifest_paths(values: Any) -> dict[str, Path]:
 
 def _avatar_bundle_sources() -> list[Path]:
     resource_dir = game_resource_directory()
-    if resource_dir is None or not resource_dir.is_dir():
-        return []
     sources = [
         path
         for directory in resource_dir.glob("HeroAvatars*")
         if directory.is_dir()
         for path in directory.rglob("__data")
         if path.is_file()
-    ]
+    ] if resource_dir is not None and resource_dir.is_dir() else []
     # Starter and early heroes' portraits ship with the build (HeroAvatarsLocal, HeroAvatarsLocal_2).
     build = game_build_directory()
     shipped = build / "Raid_Data" / "StreamingAssets" / "AssetBundles" if build is not None else None
@@ -872,45 +882,145 @@ def _avatar_bundle_sources() -> list[Path]:
     return sorted(sources, key=lambda value: (value.stat().st_mtime_ns, str(value)))
 
 
+def game_avatar_cache_revision() -> int:
+    """A cheap signal for clients to retry portraits that previously failed."""
+    return _GAME_AVATAR_CACHE_REVISION
+
+
+def _schedule_avatar_retry() -> None:
+    """Called under the asset lock; only one background retry worker runs."""
+    global _GAME_AVATAR_RETRY_ACTIVE
+    if _GAME_AVATAR_RETRY_ACTIVE or _GAME_AVATAR_CANCELLED():
+        return
+    _GAME_AVATAR_RETRY_ACTIVE = True
+
+    def work() -> None:
+        global _GAME_AVATAR_RETRY_ACTIVE
+        try:
+            while True:
+                time.sleep(AVATAR_SOURCE_RECHECK_SECONDS)
+                with _GAME_ASSET_LOCK:
+                    if not _GAME_AVATAR_RETRY_NEEDED or _GAME_AVATAR_CANCELLED():
+                        return
+                try:
+                    ensure_game_avatar_cache()
+                except Exception:
+                    # Optional art must not terminate startup or this recovery
+                    # path when a bundle is being downloaded/replaced.
+                    continue
+        finally:
+            with _GAME_ASSET_LOCK:
+                _GAME_AVATAR_RETRY_ACTIVE = False
+                if _GAME_AVATAR_RETRY_NEEDED and not _GAME_AVATAR_CANCELLED():
+                    _schedule_avatar_retry()
+
+    threading.Thread(target=work, name="avatar-cache-retry", daemon=True).start()
+
+
+def _save_avatar_image(sprite: Any, destination: Path) -> bool:
+    """Publish a complete PNG only when its bytes have actually changed."""
+    payload = io.BytesIO()
+    sprite.image.save(payload, format="PNG")
+    data = payload.getvalue()
+    try:
+        if destination.read_bytes() == data:
+            return False
+    except FileNotFoundError:
+        pass
+    temporary = destination.with_suffix(destination.suffix + f".{os.getpid()}.tmp")
+    try:
+        temporary.write_bytes(data)
+        os.replace(temporary, destination)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
 def ensure_game_avatar_cache() -> dict[str, Path]:
-    """Extract all lightweight hero portraits once at application startup."""
+    """Reuse portraits; discover late resources with a bounded background retry."""
     global _GAME_AVATAR_CACHE_CHECKED, _GAME_AVATAR_PATHS_MEMORY
+    global _GAME_AVATAR_NEXT_CHECK, _GAME_AVATAR_RETRY_NEEDED, _GAME_AVATAR_CACHE_REVISION
     with _GAME_ASSET_LOCK:
-        if _GAME_AVATAR_CACHE_CHECKED:
+        now = time.monotonic()
+        if _GAME_AVATAR_CANCELLED() or (_GAME_AVATAR_CACHE_CHECKED and now < _GAME_AVATAR_NEXT_CHECK):
             return dict(_GAME_AVATAR_PATHS_MEMORY)
+        _GAME_AVATAR_CACHE_CHECKED = True
+        _GAME_AVATAR_NEXT_CHECK = now + AVATAR_SOURCE_RECHECK_SECONDS
         manifest = _read_game_asset_manifest()
-        sources = _avatar_bundle_sources()
-        fingerprint = _source_fingerprint(sources)
         cached = _valid_manifest_paths(manifest.get("avatars"))
+        if cached != _GAME_AVATAR_PATHS_MEMORY:
+            _GAME_AVATAR_PATHS_MEMORY = cached
+            _GAME_AVATAR_CACHE_REVISION += 1
+        try:
+            sources = _avatar_bundle_sources()
+        except OSError:
+            _GAME_AVATAR_RETRY_NEEDED = True
+            _schedule_avatar_retry()
+            return dict(_GAME_AVATAR_PATHS_MEMORY)
+        fingerprint = _source_fingerprint(sources)
         avatar_entries = manifest.get("avatars")
         avatar_count = len(avatar_entries) if isinstance(avatar_entries, dict) else 0
         if (
             fingerprint
             and manifest.get("avatarExtractorVersion") == AVATAR_EXTRACTION
             and manifest.get("avatarSources") == fingerprint
-            and cached
             and len(cached) == avatar_count
         ):
-            _GAME_AVATAR_PATHS_MEMORY = cached
-            _GAME_AVATAR_CACHE_CHECKED = True
-            return cached
+            _GAME_AVATAR_MISSING_IDS.difference_update(cached)
+            _GAME_AVATAR_RETRY_NEEDED = bool(_GAME_AVATAR_MISSING_IDS)
+            if _GAME_AVATAR_RETRY_NEEDED:
+                _schedule_avatar_retry()
+            return dict(cached)
+        _GAME_AVATAR_RETRY_NEEDED = True
         if not sources:
-            _GAME_AVATAR_PATHS_MEMORY = cached
-            _GAME_AVATAR_CACHE_CHECKED = True
-            return cached
+            _schedule_avatar_retry()
+            return dict(cached)
         try:
             import UnityPy  # type: ignore
         except ImportError:
-            return cached
+            _GAME_AVATAR_NEXT_CHECK = now + AVATAR_DECODE_RETRY_SECONDS
+            _schedule_avatar_retry()
+            return dict(cached)
 
         ASSET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        avatars = dict(manifest.get("avatars", {})) if isinstance(manifest.get("avatars"), dict) else {}
-        plain: set[str] = set()
-        suffixed: dict[str, Any] = {}
+        avatars = {key: manifest["avatars"][key] for key in cached}
+        previous_plain = manifest.get("avatarPlainIds")
+        plain = {value for value in previous_plain if isinstance(value, str)} if isinstance(previous_plain, list) else set(cached)
+        suffixed: dict[str, tuple[str, Any]] = {}
+        completed: set[str] = set()
+        incomplete_suffixes: set[str] = set()
+        failed = False
+        changed = False
+        by_path = {item["path"]: item for item in fingerprint}
+        # A bad bundle must not invalidate all the healthy ones. Keep each
+        # successful fingerprint, including when another source is incomplete.
+        previous_sources = manifest.get("avatarSources")
+        successful = {
+            item["path"]: item for item in previous_sources
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+            and by_path.get(item["path"]) == item
+        } if isinstance(previous_sources, list) and manifest.get("avatarExtractorVersion") == AVATAR_EXTRACTION and len(cached) == avatar_count else {}
         for source in sources:
+            if _GAME_AVATAR_CANCELLED():
+                failed = True
+                break
+            source_key = str(source)
+            source_fingerprint = by_path.get(source_key)
+            if source_fingerprint is not None and successful.get(source_key) == source_fingerprint:
+                continue
+            previous_failure = _GAME_AVATAR_FAILED_SOURCES.get(source_key)
+            if previous_failure and previous_failure[0] == source_fingerprint and now < previous_failure[1]:
+                failed = True
+                continue
             try:
                 environment = UnityPy.load(str(source))
                 for obj in environment.objects:
+                    if _GAME_AVATAR_CANCELLED():
+                        failed = True
+                        break
                     if obj.type.name != "Sprite":
                         continue
                     sprite = obj.read()
@@ -920,31 +1030,63 @@ def ensure_game_avatar_cache() -> dict[str, Path]:
                         # A few heroes only have a suffixed portrait ("1510_skin", "1410_temp", "6480_avatar").
                         suffix = re.fullmatch(r"(\d{2,})_?[A-Za-z]+", name)
                         if suffix:
-                            suffixed[suffix.group(1)] = sprite
+                            suffixed[suffix.group(1)] = (source_key, sprite)
                         continue
                     base_name = identity.group(1)
                     filename = f"native-hero-{base_name}.png"
-                    sprite.image.save(ASSET_CACHE_DIR / filename)
+                    changed = _save_avatar_image(sprite, ASSET_CACHE_DIR / filename) or changed
                     avatars[base_name] = filename
                     plain.add(base_name)
+                if _GAME_AVATAR_CANCELLED():
+                    failed = True
+                    break
+                completed.add(source_key)
+                _GAME_AVATAR_FAILED_SOURCES.pop(source_key, None)
             except Exception as error:
+                failed = True
+                if source_fingerprint is not None:
+                    _GAME_AVATAR_FAILED_SOURCES[source_key] = (source_fingerprint, now + AVATAR_DECODE_RETRY_SECONDS)
                 _record_asset_extraction_error("avatar", source, error)
                 continue
-        for base_name, sprite in suffixed.items():
+        for base_name, (source_key, sprite) in suffixed.items():
+            if _GAME_AVATAR_CANCELLED():
+                failed = True
+                break
             if base_name in plain:
                 continue
             try:
                 filename = f"native-hero-{base_name}.png"
-                sprite.image.save(ASSET_CACHE_DIR / filename)
+                changed = _save_avatar_image(sprite, ASSET_CACHE_DIR / filename) or changed
                 avatars[base_name] = filename
             except Exception as error:
+                failed = True
+                incomplete_suffixes.add(source_key)
+                if by_path.get(source_key) is not None:
+                    _GAME_AVATAR_FAILED_SOURCES[source_key] = (by_path[source_key], now + AVATAR_DECODE_RETRY_SECONDS)
                 _record_asset_extraction_error("avatar", Path(base_name), error)
+        if not _GAME_AVATAR_CANCELLED():
+            for source_key in completed - incomplete_suffixes:
+                if by_path.get(source_key) is not None:
+                    successful[source_key] = by_path[source_key]
         manifest["avatarExtractorVersion"] = AVATAR_EXTRACTION
-        manifest["avatarSources"] = fingerprint
+        manifest["avatarSources"] = [item for item in fingerprint if successful.get(item["path"]) == item]
+        manifest["avatarPlainIds"] = sorted(plain)
         manifest["avatars"] = avatars
-        _write_game_asset_manifest(manifest)
+        try:
+            _write_game_asset_manifest(manifest)
+        except OSError as error:
+            failed = True
+            _record_asset_extraction_error("avatar-manifest", GAME_ASSET_MANIFEST, error)
+        previous_paths = _GAME_AVATAR_PATHS_MEMORY
         _GAME_AVATAR_PATHS_MEMORY = _valid_manifest_paths(avatars)
-        _GAME_AVATAR_CACHE_CHECKED = True
+        _GAME_AVATAR_MISSING_IDS.difference_update(_GAME_AVATAR_PATHS_MEMORY)
+        if changed or _GAME_AVATAR_PATHS_MEMORY != previous_paths:
+            _GAME_AVATAR_CACHE_REVISION += 1
+        _GAME_AVATAR_RETRY_NEEDED = failed or bool(_GAME_AVATAR_MISSING_IDS)
+        if failed:
+            _GAME_AVATAR_NEXT_CHECK = now + AVATAR_DECODE_RETRY_SECONDS
+        if _GAME_AVATAR_RETRY_NEEDED:
+            _schedule_avatar_retry()
         return dict(_GAME_AVATAR_PATHS_MEMORY)
 
 
@@ -1288,14 +1430,25 @@ def game_reward_asset(identity: str) -> Path | None:
 
 
 def game_hero_asset(hero_id: Any, hero: Any) -> Path | None:
+    global _GAME_AVATAR_RETRY_NEEDED
     base_id = _hero_base_id(hero, hero_id)
     if base_id is None:
         return None
-    with _GAME_ASSET_LOCK:
-        path = _GAME_AVATAR_PATHS_MEMORY.get(str(base_id))
-    if path is not None:
+    # This dictionary is replaced as a whole after a scan; known portraits
+    # must stay readable while another thread is decoding a large new bundle.
+    path = _GAME_AVATAR_PATHS_MEMORY.get(str(base_id))
+    if path is not None and path.is_file():
         return path
-    return ensure_game_avatar_cache().get(str(base_id))
+    path = ensure_game_avatar_cache().get(str(base_id))
+    if path is None:
+        # A successful scan may contain only the portraits shipped with the
+        # build. Keep watching for the requested downloaded portrait even if
+        # the browser stops retrying its failed image request.
+        with _GAME_ASSET_LOCK:
+            _GAME_AVATAR_MISSING_IDS.add(str(base_id))
+            _GAME_AVATAR_RETRY_NEEDED = True
+            _schedule_avatar_retry()
+    return path
 
 
 def game_skill_asset(hero_id: Any, hero: Any, skill: Any) -> Path | None:
@@ -1367,6 +1520,8 @@ def preload_game_visuals(
     catalog: dict[int, dict[str, Any]], hero_ids: Any = (), *, cancelled=lambda: False,
 ) -> dict[str, int]:
     """Warm native effect icons, portraits, rewards, and current-team skills."""
+    global _GAME_AVATAR_CANCELLED
+    _GAME_AVATAR_CANCELLED = cancelled
     effects = {} if cancelled() else ensure_icon_cache()
     avatars = {} if cancelled() else ensure_game_avatar_cache()
     rewards = {} if cancelled() else ensure_game_reward_cache()

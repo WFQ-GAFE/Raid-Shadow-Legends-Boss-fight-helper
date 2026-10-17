@@ -34,6 +34,7 @@ from forecast_advice import advice, failure_advice
 from capture_identity import unique_first
 from team_preview import TeamSnapshotStore
 from team_setups import prepare_team_input, team_report
+from simulation_base import battle_facts, read_battle_facts, rotation_stage
 from strategy_storage import atomic_write_json
 from ui_text import ui_text
 
@@ -147,6 +148,7 @@ def list_captures(limit: int = 20, root: Path | None = None) -> list[dict[str, A
             "bossHeroTypeId": provenance.get("bossHeroTypeId"),
             # The alliance Chimera's HP lost before this battle (it carries over).
             **({"bossHealthLost": chimera_health_lost(setup)} if isinstance(setup, list) else {}),
+            **{key: value for key, value in battle_facts(setup).items() if key in ("ownerId", "battleTime")},
             "strategyName": strategy.get("name") if isinstance(strategy, dict) else None,
         })
         if len(result) >= limit:
@@ -449,11 +451,14 @@ class SimulationService:
     def start(self, strategy: dict[str, Any], strategy_meta: dict[str, Any], capture_id: str, runs: int,
               pid: int | None = None, team: dict[str, Any] | None = None,
               capture_folder: Path | None = None, difficulty: int | None = None,
-              boss_health: float | None = None) -> dict[str, Any]:
-        """``team``: another team to put into the saved opening (team_setups), or None for its own.
+              boss_health: float | None = None, current_stage: dict[str, Any] | None = None) -> dict[str, Any]:
+        """``team``: another team to put into the saved opening (team_setups), or None for its own;
+        its ``teamLevel`` (the account's own `f.l`) replaces the opening's.
         ``difficulty``: the opening's rotation on another difficulty (boss_stages), or None for its own.
         ``boss_health``: the Chimera's HP at the start in percent, or None (the opening's own;
-        full on another difficulty)."""
+        full on another difficulty or rotation).
+        ``current_stage``: the stage the game's team screen last showed (simulation_base.CurrentStages);
+        a newer rotation than the opening's rebuilds the boss on it."""
         if not isinstance(strategy, dict):
             raise ValueError(ui_text("simService.missingStrategy"))
         controller.require_list_execution(strategy)
@@ -473,7 +478,8 @@ class SimulationService:
             self.cancel.clear()
         thread = threading.Thread(target=self._work, name=f"{self.boss_mode}-simulation", daemon=True,
                                   args=(simulation_id, copy.deepcopy(strategy), dict(strategy_meta), folder, runs, pid,
-                                        copy.deepcopy(team) if team else None, difficulty, boss_health))
+                                        copy.deepcopy(team) if team else None, difficulty, boss_health,
+                                        dict(current_stage) if current_stage else None))
         thread.start()
         return self.status() or {}
 
@@ -570,7 +576,7 @@ class SimulationService:
 
     def _work(self, simulation_id: str, strategy: dict[str, Any], meta: dict[str, Any], capture: Path,
               runs: int, pid: int | None, team: dict[str, Any] | None = None, difficulty: int | None = None,
-              boss_health: float | None = None) -> None:
+              boss_health: float | None = None, current_stage: dict[str, Any] | None = None) -> None:
         output = self.simulation_root / simulation_id
         summary: dict[str, Any] = {"schema": 1, "id": simulation_id, "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                                    "status": "running", "strategy": {**meta, "rules": len(strategy.get("rules", []))},
@@ -593,32 +599,40 @@ class SimulationService:
             packed = output / "battle-input"
             arguments = self._runner_arguments(capture, provenance)
             summary["capture"]["teamSource"] = team.get("source") if team else "battle"
+            facts = read_battle_facts(capture)  # owner, team level, battle time
             battle_setup = capture / "battle-setup.json"
             if team is not None:
                 # The same opening (boss, stage, seed) with the chosen team swapped in.
                 team_input = output / "team-input"
+                team_level = team.get("teamLevel")
                 provenance = prepare_team_input(capture, team["heroes"], self.boss_mode, team_input,
-                                                area=team.get("area"), rule=team["rule"], powers=team.get("powers"))
+                                                area=team.get("area"), rule=team["rule"], powers=team.get("powers"),
+                                                team_level=team_level)
                 convert(team_input, probe)
                 packed = team_input / "packed"
                 battle_setup = team_input / "battle-setup.json"
                 arguments = self._team_arguments(arguments, provenance)
                 summary["capture"].update(teamHeroTypeIds=provenance["teamHeroTypeIds"],
-                                          teamSavedAt=team.get("savedAt"), teamCheck=team.get("check"))
+                                          teamSavedAt=team.get("savedAt"), teamCheck=team.get("check"),
+                                          teamLevel=team_level if team_level is not None else facts.get("teamLevel"),
+                                          teamLevelSource="account" if team_level is not None else "base")
             opening_stage = provenance.get("stageId")
+            # The game showed a newer rotation than the opening's: its boss on the same difficulty.
+            rotation = rotation_stage(opening_stage, facts.get("battleTime"), current_stage)
+            base_stage = rotation if rotation is not None else opening_stage
             other = (difficulty is not None and isinstance(opening_stage, int)
                      and difficulty != difficulty_of(opening_stage))
-            if isinstance(opening_stage, int) and (other or boss_health is not None):
-                # The same opening (team, seed) on another difficulty or with another starting HP:
-                # the boss side from the game's stage data.
+            if isinstance(opening_stage, int) and (other or rotation is not None or boss_health is not None):
+                # The same opening (team, seed) on another difficulty or rotation, or with another
+                # starting HP: the boss side from the game's stage data.
                 self._update(message=ui_text("simService.buildingDifficulty"))
                 target = difficulty if other else difficulty_of(opening_stage)
                 stages = self.stage_provider()
-                stage = (stages.get("stages") or {}).get(str(stage_with_difficulty(opening_stage, target)))
+                stage = (stages.get("stages") or {}).get(str(stage_with_difficulty(base_stage, target)))
                 if not isinstance(stage, dict) or stage.get("boss") != self.boss_mode:
                     raise StageSetupError(ui_text("stages.notFound"))
                 health = (stages.get("chimera") or {}).get(str(target), {}).get("health") or 0
-                # Another difficulty starts at full HP unless asked otherwise.
+                # Another difficulty or rotation starts at full HP unless asked otherwise.
                 percent = boss_health if boss_health is not None else 100.0
                 lost = round(health * (100 - percent) / 100) if self.sets_boss_health else 0
                 stage_input = output / "stage-input"
@@ -635,6 +649,7 @@ class SimulationService:
                 summary["capture"].update(
                     openingStageId=opening_stage,
                     openingDifficulty=self._capture_facts({"stageId": opening_stage}).get("difficulty"),
+                    **({"rotationRebuilt": True} if rotation is not None else {}),
                     **({"bossHealthPercent": percent} if self.sets_boss_health else {}))
             # The memory the live controller would start the next battle with.
             memory = controller.SkillCapabilityMemory.load(controller.DEFAULT_CAPABILITY_CACHE,

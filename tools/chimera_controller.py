@@ -5,6 +5,7 @@ import ctypes
 import json
 import math
 import os
+import random
 import secrets
 import sys
 import threading
@@ -12,7 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from damage_units import damage_text
 from decision_observability import emit_telemetry, record_rule, decision_details, decision_context, devour_details, pick
@@ -3618,6 +3619,94 @@ def lifecycle_nonce(seed: int, offset: int) -> int:
     return 0x80000000 | payload
 
 
+# Human-like pacing. Anti-bot checks look for buttons pressed instantly and
+# attempts restarted over and over without a break, so every wait is random,
+# never the same twice:
+# - before each automatic regroup, 0.3-1 s;
+# - on the team screen before Start, 0.3-1 s; every 15-30 retries in a row a
+#   short break instead, 2-5 s;
+# - before each skill command, 0.05-0.25 s, now and then 0.02-0.05 s more (at most 0.3 s).
+# Built in on purpose (the user's choice): no setting, short enough not to slow
+# battles much.
+
+
+@dataclass(frozen=True)
+class RetryPause:
+    before_regroup: float = 0.0  # in battle or on the result screen, before pressing regroup
+    on_team_screen: float = 0.0  # on the team screen, before pressing Start
+    rest: bool = False  # on_team_screen includes a longer break
+
+
+class HumanPacing:
+    def __init__(self, rng: random.Random | None = None) -> None:
+        self.rng = rng or random.SystemRandom()
+        self.since_rest = 0
+        self.next_rest = self.rng.randint(15, 30)
+
+    def before_regroup(self) -> float:
+        return self.rng.uniform(0.3, 1.0)
+
+    def retry(self) -> RetryPause:
+        self.since_rest += 1
+        rest = self.since_rest >= self.next_rest
+        if rest:
+            on_team_screen = self.rng.uniform(2.0, 5.0)
+            self.since_rest = 0
+            self.next_rest = self.rng.randint(15, 30)
+        else:
+            on_team_screen = self.rng.uniform(0.3, 1.0)
+        return RetryPause(self.before_regroup(), on_team_screen, rest)
+
+    def action(self) -> float:
+        seconds = self.rng.uniform(0.05, 0.25)
+        if self.rng.random() < 0.08:
+            seconds += self.rng.uniform(0.02, 0.05)
+        return seconds
+
+
+_PACING = HumanPacing()
+
+
+def plan_retry_pause() -> RetryPause:
+    return _PACING.retry()
+
+
+def pace_before_command(ipc: AgentIpc, session_id: int, sequence: Any, seconds: float) -> bool:
+    """Wait before sending a skill command. The decision snapshot is taken only when the
+    game changes, so a newer (or cleared) one during the wait means the state moved on:
+    False, and the loop decides again from it. The agent checks the turn again when it
+    runs the command."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while (remaining := deadline - time.monotonic()) > 0:
+        require_takeover_active(ipc, session_id)
+        current = ipc.decision()
+        if not isinstance(current, dict) or current.get("sequence") != sequence:
+            return False
+        time.sleep(min(0.05, remaining))
+    return True
+
+
+def pace_on_screen(ipc: AgentIpc, session_id: int, seconds: float, screen: str) -> None:
+    """Wait up to `seconds` while the game stays on `screen`; a change ends the wait
+    early and is left to the caller's own checks. Pausing the takeover stops it."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while (remaining := deadline - time.monotonic()) > 0:
+        require_takeover_active(ipc, session_id)
+        if (ipc.lifecycle() or {}).get("screen") != screen:
+            return
+        time.sleep(min(0.1, remaining))
+
+
+def pace_before_start(ipc: AgentIpc, session_id: int, pause: RetryPause | None, mode: str) -> None:
+    if not pause or pause.on_team_screen <= 0:
+        return
+    seconds = round(pause.on_team_screen, 1)
+    emit_telemetry(lifecycle={"event": "retry_pacing", "bossMode": mode, "beforeRegroup": round(pause.before_regroup, 2),
+                              "onTeamScreen": seconds, "rest": pause.rest})
+    print(ui_text("ctl.pacingRest" if pause.rest else "ctl.pacingPause", seconds=seconds), flush=True)
+    pace_on_screen(ipc, session_id, pause.on_team_screen, "team_selection")
+
+
 def wait_for_lifecycle_screen(
     ipc: AgentIpc,
     session_id: int,
@@ -3838,7 +3927,10 @@ def wait_for_turn_advance(
     baseline: dict[str, Any],
     session_id: int,
     timeout_seconds: float = COMMAND_CONFIRM_TIMEOUT_SECONDS,
+    interrupt: Callable[[], bool] | None = None,
 ) -> dict[str, Any] | None:
+    """The next turn after a command, None on the result screen or timeout. `interrupt`
+    is asked while the action plays out; True (it regrouped) ends the wait with None."""
     baseline_key = turn_key(baseline)
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -3850,6 +3942,8 @@ def wait_for_turn_advance(
         current = ipc.decision()
         if current and turn_key(current) != baseline_key:
             return current
+        if interrupt is not None and interrupt():
+            return None
         time.sleep(0.05)
     return None
 
@@ -4185,10 +4279,13 @@ def free_regroup_and_retry_manual(
     desired_hero_ids: list[int] | None = None,
     desired_hero_type_ids: list[int] | None = None,
     boss_mode: str | None = None,
+    pause: RetryPause | None = None,
 ) -> None:
     mode = normalize_mode(boss_mode or ACTIVE_BOSS_MODE)
     label = "六头蛇" if mode == "hydra" else "奇美拉"
     team_size = 6 if mode == "hydra" else 5
+    if pause and pause.before_regroup > 0:
+        pace_on_screen(ipc, session_id, pause.before_regroup, "battle")
     before = ipc.lifecycle() or {}
     before_battle = before.get("battle") or {}
     old_context = before_battle.get("context")
@@ -4281,6 +4378,7 @@ def free_regroup_and_retry_manual(
         raise RuntimeError(ui_text("ctl.regroupTeamChanged"))
     if expected_hero_type_ids and regrouped_hero_type_ids != expected_hero_type_ids:
         raise RuntimeError(ui_text("ctl.regroupOrderChanged"))
+    pace_before_start(ipc, session_id, pause, mode)
     started = start_first_battle_if_ready(
         ipc,
         pid=pid,
@@ -4356,6 +4454,7 @@ def free_regroup_and_stop(
     agent: Path,
     session_id: int,
 ) -> None:
+    pace_on_screen(ipc, session_id, _PACING.before_regroup(), "battle")
     submit_free_regroup(
         ipc,
         pid=pid,
@@ -4379,10 +4478,14 @@ def _restart_from_result(
     action: int,
     desired_hero_ids: list[int] | None,
     desired_hero_type_ids: list[int] | None,
+    pause: RetryPause | None = None,
 ) -> bool:
     mode = normalize_mode(boss_mode)
     label = mode_spec(mode)["label"]
     team_size = mode_spec(mode)["teamSize"]
+    # A player reads the result before pressing regroup; the result is checked after it.
+    if pause and pause.before_regroup > 0:
+        pace_on_screen(ipc, session_id, pause.before_regroup, "result")
     lifecycle, _ = require_confirmed_result(ipc)
     result_state = lifecycle.get("result") or {}
     context = result_state.get("context") if isinstance(result_state, dict) else None
@@ -4427,6 +4530,7 @@ def _restart_from_result(
     stable_selection_key: tuple[Any, ...] | None = None
     stable_since = 0.0
     saw_selection = False
+    paced = False
     last_progress_key = None
     last_progress_at = restart_started - 5.0
     while time.monotonic() < deadline:
@@ -4479,6 +4583,12 @@ def _restart_from_result(
             # roster to remain unchanged before pressing Start.
             if now - stable_since < 2.0:
                 time.sleep(0.05)
+                continue
+            # Then the retry pause, once; the selection is read again after it.
+            if pause and pause.on_team_screen > 0 and not paced:
+                paced = True
+                pace_before_start(ipc, session_id, pause, mode)
+                deadline = max(deadline, time.monotonic() + 30.0)
                 continue
             started = start_first_battle_if_ready(
                 ipc,
@@ -4542,6 +4652,7 @@ def restart_hydra_from_result(
     nonce: int,
     desired_hero_ids: list[int] | None,
     desired_hero_type_ids: list[int] | None,
+    pause: RetryPause | None = None,
 ) -> bool:
     return _restart_from_result(
         ipc,
@@ -4553,6 +4664,7 @@ def restart_hydra_from_result(
         action=LIFECYCLE_RESTART_HYDRA_RESULT,
         desired_hero_ids=desired_hero_ids,
         desired_hero_type_ids=desired_hero_type_ids,
+        pause=pause,
     )
 
 
@@ -4565,6 +4677,7 @@ def restart_chimera_from_result(
     nonce: int,
     desired_hero_ids: list[int] | None,
     desired_hero_type_ids: list[int] | None,
+    pause: RetryPause | None = None,
 ) -> bool:
     return _restart_from_result(
         ipc,
@@ -4576,6 +4689,7 @@ def restart_chimera_from_result(
         action=LIFECYCLE_RESTART_CHIMERA_RESULT,
         desired_hero_ids=desired_hero_ids,
         desired_hero_type_ids=desired_hero_type_ids,
+        pause=pause,
     )
 
 
@@ -4698,6 +4812,7 @@ def result_screen_reached(
             ui_text("ctl.chimeraRegrouping", damageLabel=damage_label, missingLabel=missing_label, value=used + 1),
             flush=True,
         )
+        prestart_forecast_engine(config, pid, "chimera")
         restarted = restart_chimera_from_result(
             ipc,
             pid=pid,
@@ -4706,6 +4821,7 @@ def result_screen_reached(
             nonce=nonce,
             desired_hero_ids=desired_hero_ids,
             desired_hero_type_ids=desired_hero_type_ids,
+            pause=plan_retry_pause(),
         )
         runtime["regroupRetries"] = used + 1
         emit_telemetry(retriesUsed=used + 1)
@@ -4760,6 +4876,7 @@ def result_screen_reached(
         flush=True,
     )
     runtime.pop("hydraDevourTracker", None)
+    prestart_forecast_engine(config, pid, "hydra")
     restarted = restart_hydra_from_result(
         ipc,
         pid=pid,
@@ -4768,6 +4885,7 @@ def result_screen_reached(
         nonce=nonce,
         desired_hero_ids=desired_hero_ids,
         desired_hero_type_ids=desired_hero_type_ids,
+        pause=plan_retry_pause(),
     )
     runtime["regroupRetries"] = used + 1
     emit_telemetry(retriesUsed=used + 1)
@@ -7373,6 +7491,172 @@ def observe_chimera_forecast(
     return retry
 
 
+def prestart_forecast_engine(config: dict[str, Any], pid: Any, boss_mode: str | None = None) -> None:
+    """A new battle is about to start (a regroup, a restart, the first Start): start its
+    opening forecast's engine now, so it is ready when the game has loaded the battle."""
+    try:
+        mode = normalize_mode(boss_mode or ACTIVE_BOSS_MODE)
+        monitor = chimera_forecast_monitor() if mode == "chimera" else hydra_forecast_monitor()
+        monitor.prestart(config, int(pid))
+    except Exception:  # Without it the engine simply starts cold.
+        pass
+
+
+def cancel_prestarted_engines() -> None:
+    """The takeover ends: an engine waiting for a battle is not needed."""
+    for monitor in (_CHIMERA_FORECAST_MONITOR, _HYDRA_FORECAST_MONITOR):
+        if monitor is not None:
+            try:
+                monitor.prestarter.cancel()
+            except Exception:
+                pass
+
+
+def act_on_chimera_forecast(
+    forecast_retry: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    agent: Path,
+    ipc: AgentIpc,
+    session_id: int,
+    nonce: int,
+    runtime_state: dict[str, Any] | None,
+    execute_requested: bool,
+) -> None:
+    """The opening forecast predicts the goals will fail: regroup (or regroup and stop)."""
+    emit_telemetry(lifecycle={"event": "battle_forecast_retry", "cause": forecast_retry.cause,
+                              "recordId": forecast_retry.record_id, "context": decision_context(state)})
+    execute = execute_requested and config.get("mode") == "execute"
+    if not execute:
+        print(ui_text("ctl.observeMode"), flush=True)
+    elif forecast_retry.behavior == "free_regroup_and_stop":
+        free_regroup_and_stop(
+            ipc,
+            pid=int(state["pid"]),
+            agent=agent,
+            session_id=session_id,
+        )
+        raise FreeRegroupCompleted()
+    else:
+        request_chimera_regroup_retry(
+            config,
+            state,
+            agent=agent,
+            ipc=ipc,
+            session_id=session_id,
+            nonce=nonce,
+            runtime_state=runtime_state,
+        )
+
+
+def act_on_hydra_forecast(
+    forecast_retry: Any,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    agent: Path,
+    ipc: AgentIpc,
+    session_id: int,
+    nonce: int,
+    runtime_state: dict[str, Any],
+    execute_requested: bool,
+) -> None:
+    """The opening forecast predicts a devour-order or damage violation: say why, then regroup."""
+    if forecast_retry.cause == "damage":
+        print(
+            ui_text("ctl.forecastDamageRegroup", damage=damage_text(forecast_retry.predicted_damage), damage2=damage_text(forecast_retry.minimum_damage)),
+            flush=True,
+        )
+    else:
+        hero_names_by_type = {
+            hero.get("typeId"): str(
+                hero.get("name") or f"英雄 {hero.get('typeId')}"
+            )
+            for hero in state_entities(state, "heroes")
+            if isinstance(hero.get("typeId"), int)
+        }
+        expected_labels = ", ".join(
+            hero_names_by_type.get(type_id, f"英雄 {type_id}")
+            for type_id in forecast_retry.expected_hero_type_ids
+        )
+        requirement = hydra_devour_requirement_text(
+            forecast_retry.relation, expected_labels, forecast_retry.mark_limit
+        )
+        actual_label = hero_names_by_type.get(
+            forecast_retry.actual_hero_type_id,
+            f"英雄 {forecast_retry.actual_hero_type_id}",
+        )
+        what = (ui_text("ctl.forecastSwallow", markIndex=forecast_retry.mark_index, actualLabel=actual_label, applyTurn=forecast_retry.apply_turn)
+                if forecast_retry.swallowed else
+                ui_text("ctl.forecastMark", markIndex=forecast_retry.mark_index, applyTurn=forecast_retry.apply_turn, actualLabel=actual_label))
+        print(
+            ui_text("ctl.forecastConditionTriggered", value=forecast_retry.condition_index + 1, what=what, requirement=requirement),
+            flush=True,
+        )
+    execute = execute_requested and config.get("mode") == "execute"
+    if execute:
+        runtime_state.pop("hydraDevourTracker", None)
+        request_chimera_regroup_retry(
+            config,
+            state,
+            agent=agent,
+            ipc=ipc,
+            session_id=session_id,
+            nonce=nonce,
+            runtime_state=runtime_state,
+            boss_mode="hydra",
+        )
+    else:
+        print(ui_text("ctl.observeMode"), flush=True)
+
+
+def poll_forecast_verdict(
+    config: dict[str, Any],
+    state: Any,
+    *,
+    agent: Path,
+    ipc: AgentIpc,
+    session_id: int,
+    nonce: int,
+    runtime_state: dict[str, Any] | None,
+    execute_requested: bool,
+    capability_memory: SkillCapabilityMemory | None,
+) -> bool:
+    """Read the opening forecast's verdict (either boss) as soon as its simulation
+    finishes, also while an action plays out. Waiting for the next hero turn cost about
+    1.7 s (up to 2.5 s) per regroup. The agent allows a regroup at any point of a battle
+    that is not over. `state` is the latest decision snapshot.
+    True when it regrouped (or, observing only, reported that it would)."""
+    if not is_battle_decision_state(state):
+        return False
+    if ACTIVE_BOSS_MODE == "chimera":
+        if not chimera_forecast_monitor().verdict_ready(state) or (ipc.lifecycle() or {}).get("screen") != "battle":
+            return False
+        forecast_retry = observe_chimera_forecast(config, state, capability_memory)
+        if forecast_retry is None:
+            return False
+        act_on_chimera_forecast(forecast_retry, config, state, agent=agent, ipc=ipc, session_id=session_id,
+                                nonce=nonce, runtime_state=runtime_state, execute_requested=execute_requested)
+        return True
+    if ACTIVE_BOSS_MODE == "hydra" and runtime_state is not None:
+        monitor = hydra_forecast_monitor()
+        if not monitor.verdict_ready(state) or (ipc.lifecycle() or {}).get("screen") != "battle":
+            return False
+        # A running forecast only exists for a battle taken over from its opening.
+        forecast_retry = monitor.observe(config, state, ipc=ipc, capability_memory=capability_memory,
+                                         marked_target=hydra_marked_target, tracker_armed=True)
+        forecast_telemetry = monitor.telemetry()
+        if forecast_telemetry is not None:
+            emit_telemetry(devourForecast=forecast_telemetry)
+        if forecast_retry is None:
+            return False
+        act_on_hydra_forecast(forecast_retry, config, state, agent=agent, ipc=ipc, session_id=session_id,
+                              nonce=nonce, runtime_state=runtime_state, execute_requested=execute_requested)
+        return True
+    return False
+
+
 def hydra_forecast_monitor() -> Any:
     """One battle-start forecast monitor per controller process."""
     global _HYDRA_FORECAST_MONITOR
@@ -7403,6 +7687,7 @@ def request_chimera_regroup_retry(
     maximum = int(objective_config.get("maxRegroupRetries", 10))
     if maximum > 0 and used >= maximum:
         raise RuntimeError(ui_text("ctl.regroupLimitStop", maximum=maximum))
+    prestart_forecast_engine(config, state.get("pid"), boss_mode)
     free_regroup_and_retry_manual(
         ipc,
         pid=int(state["pid"]),
@@ -7425,6 +7710,7 @@ def request_chimera_regroup_retry(
             else None
         ),
         boss_mode=boss_mode,
+        pause=plan_retry_pause(),
     )
     runtime["regroupRetries"] = used + 1
     emit_telemetry(retriesUsed=used + 1)
@@ -7460,29 +7746,8 @@ def process_state(
         observe_chimera_capture(state, ipc, config, capability_memory)
         forecast_retry = observe_chimera_forecast(config, state, capability_memory)
         if forecast_retry is not None:
-            emit_telemetry(lifecycle={"event": "battle_forecast_retry", "cause": forecast_retry.cause,
-                                      "recordId": forecast_retry.record_id, "context": decision_context(state)})
-            execute = execute_requested and config.get("mode") == "execute"
-            if not execute:
-                print(ui_text("ctl.observeMode"), flush=True)
-            elif forecast_retry.behavior == "free_regroup_and_stop":
-                free_regroup_and_stop(
-                    ipc,
-                    pid=int(state["pid"]),
-                    agent=agent,
-                    session_id=session_id,
-                )
-                raise FreeRegroupCompleted()
-            else:
-                request_chimera_regroup_retry(
-                    config,
-                    state,
-                    agent=agent,
-                    ipc=ipc,
-                    session_id=session_id,
-                    nonce=nonce,
-                    runtime_state=runtime_state,
-                )
+            act_on_chimera_forecast(forecast_retry, config, state, agent=agent, ipc=ipc, session_id=session_id,
+                                    nonce=nonce, runtime_state=runtime_state, execute_requested=execute_requested)
             return False
     if ACTIVE_BOSS_MODE == "hydra":
         observe_hydra_capture(state, ipc, config, capability_memory)
@@ -7566,53 +7831,9 @@ def process_state(
             forecast_telemetry = monitor.telemetry()
             if forecast_telemetry is not None:
                 emit_telemetry(devourForecast=forecast_telemetry)
-            if forecast_retry is not None and forecast_retry.cause == "damage":
-                print(
-                    ui_text("ctl.forecastDamageRegroup", damage=damage_text(forecast_retry.predicted_damage), damage2=damage_text(forecast_retry.minimum_damage)),
-                    flush=True,
-                )
-            elif forecast_retry is not None:
-                hero_names_by_type = {
-                    hero.get("typeId"): str(
-                        hero.get("name") or f"英雄 {hero.get('typeId')}"
-                    )
-                    for hero in state_entities(state, "heroes")
-                    if isinstance(hero.get("typeId"), int)
-                }
-                expected_labels = ", ".join(
-                    hero_names_by_type.get(type_id, f"英雄 {type_id}")
-                    for type_id in forecast_retry.expected_hero_type_ids
-                )
-                requirement = hydra_devour_requirement_text(
-                    forecast_retry.relation, expected_labels, forecast_retry.mark_limit
-                )
-                actual_label = hero_names_by_type.get(
-                    forecast_retry.actual_hero_type_id,
-                    f"英雄 {forecast_retry.actual_hero_type_id}",
-                )
-                what = (ui_text("ctl.forecastSwallow", markIndex=forecast_retry.mark_index, actualLabel=actual_label, applyTurn=forecast_retry.apply_turn)
-                        if forecast_retry.swallowed else
-                        ui_text("ctl.forecastMark", markIndex=forecast_retry.mark_index, applyTurn=forecast_retry.apply_turn, actualLabel=actual_label))
-                print(
-                    ui_text("ctl.forecastConditionTriggered", value=forecast_retry.condition_index + 1, what=what, requirement=requirement),
-                    flush=True,
-                )
             if forecast_retry is not None:
-                execute = execute_requested and config.get("mode") == "execute"
-                if execute:
-                    runtime_state.pop("hydraDevourTracker", None)
-                    request_chimera_regroup_retry(
-                        config,
-                        state,
-                        agent=agent,
-                        ipc=ipc,
-                        session_id=session_id,
-                        nonce=nonce,
-                        runtime_state=runtime_state,
-                        boss_mode="hydra",
-                    )
-                else:
-                    print(ui_text("ctl.observeMode"), flush=True)
+                act_on_hydra_forecast(forecast_retry, config, state, agent=agent, ipc=ipc, session_id=session_id,
+                                      nonce=nonce, runtime_state=runtime_state, execute_requested=execute_requested)
                 return False
     objective_report = evaluate_objectives(config, state)
     if runtime_state is not None and ACTIVE_BOSS_MODE == "chimera":
@@ -7745,6 +7966,10 @@ def process_state(
     pointers = state.get("pointers", {})
     battle = state.get("battle", {})
     region_id = battle.get("regionTypeId")
+    # A player takes a moment to pick the skill (HumanPacing); validation only runs at once.
+    think_seconds = _PACING.action() if execute else 0.0
+    if think_seconds and not pace_before_command(ipc, session_id, state.get("sequence"), think_seconds):
+        return False
     result = queue_command(
         int(state["pid"]),
         agent,
@@ -7776,7 +8001,8 @@ def process_state(
     )
     if acknowledgement is None:
         raise RuntimeError(ui_text("ctl.ackTimeoutNonce", nonce=nonce))
-    emit_telemetry(command={"status": acknowledgement.get("status"), "reason": acknowledgement.get("reason")})
+    emit_telemetry(command={"status": acknowledgement.get("status"), "reason": acknowledgement.get("reason"),
+                            "thinkMs": round(think_seconds * 1000)})
     expected_status = "submitted" if execute else "validated"
     if acknowledgement.get("status") != expected_status:
         if recoverable_command_rejection(acknowledgement):
@@ -7834,7 +8060,21 @@ def process_state(
         if isinstance(skill_type_id, int) and not isinstance(skill_type_id, bool):
             capability_memory.mark_probed(skill_type_id)
     if execute:
-        advanced = wait_for_turn_advance(ipc, state, session_id)
+        regrouped = False
+
+        def verdict_during_action() -> bool:
+            # The opening forecast often finishes while this action plays out (about
+            # 0.8 s before the next turn): act on it now, as between hero turns.
+            nonlocal regrouped
+            regrouped = poll_forecast_verdict(config, state, agent=agent, ipc=ipc, session_id=session_id,
+                                              nonce=nonce, runtime_state=runtime_state,
+                                              execute_requested=execute_requested,
+                                              capability_memory=capability_memory)
+            return regrouped
+
+        advanced = wait_for_turn_advance(ipc, state, session_id, interrupt=verdict_during_action)
+        if regrouped:
+            return True
         if advanced is None:
             lifecycle_after = ipc.lifecycle() or {}
             if lifecycle_after.get("screen") == "result":
@@ -8112,6 +8352,8 @@ def main() -> int:
             auto_start_attempted = False
             if auto_start_enabled:
                 require_account_binding(ipc, binding)
+                if (ipc.lifecycle() or {}).get("screen") == "team_selection":
+                    prestart_forecast_engine(config, args.pid, args.boss_mode)
                 auto_start_attempted = start_first_battle_if_ready(
                     ipc,
                     pid=args.pid,
@@ -8209,6 +8451,8 @@ def main() -> int:
                     return 0
                 if auto_start_enabled and not auto_start_attempted:
                     require_account_binding(ipc, binding)
+                    if (ipc.lifecycle() or {}).get("screen") == "team_selection":
+                        prestart_forecast_engine(config, args.pid, args.boss_mode)
                     auto_start_attempted = start_first_battle_if_ready(
                         ipc,
                         pid=args.pid,
@@ -8219,6 +8463,13 @@ def main() -> int:
                         boss_mode=args.boss_mode,
                     )
                 state = ipc.decision()
+                # Between hero turns: act on the opening forecast as soon as it is ready.
+                if is_battle_decision_state(state) and state.get("sequence") == last_sequence \
+                        and poll_forecast_verdict(config, state, agent=agent, ipc=ipc, session_id=session_id, nonce=nonce,
+                                                  runtime_state=runtime_state, execute_requested=args.execute,
+                                                  capability_memory=capability_memory):
+                    nonce += 1
+                    continue
                 if is_battle_decision_state(state):
                     state_rotation_key = decision_rotation_observation_key(state)
                     if state_rotation_key != last_rotation_archive_key:
@@ -8274,6 +8525,7 @@ def main() -> int:
         print(ui_text("ctl.stoppedForSafety", error=error), flush=True)
         return 5
     finally:
+        cancel_prestarted_engines()
         try:
             capability_memory.save_if_changed(capability_cache)
         except OSError as error:

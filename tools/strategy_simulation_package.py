@@ -19,6 +19,7 @@ from typing import Any, Iterable
 import zlib
 
 from boss_stages import chimera_health_lost
+from simulation_base import battle_facts
 from strategy_storage import atomic_write_bytes
 from team_setups import ordered_team_matches, validate_simulation_snapshot
 from ui_text import ui_text
@@ -245,6 +246,7 @@ def capture_row(package: dict[str, Any], strategy_id: str, boss_mode: str,
             "capturedAt": package["opening"].get("capturedAt"),
             "difficulty": provenance.get("stageId", 0) % 10,
             **({"bossHealthLost": chimera_health_lost(setup)} if boss_mode == "chimera" and isinstance(setup, list) else {}),
+            **{key: value for key, value in battle_facts(setup).items() if key in ("ownerId", "battleTime")},
             **({"headTypeIds": [unit["i"] for unit in [*(setup[0]["s"].get("h") or []), *(setup[0]["s"].get("o") or [])]]}
                if boss_mode == "hydra" and isinstance(setup, list) and setup and isinstance(setup[0].get("s"), dict) else {}),
             **{key: provenance.get(key) for key in ("stageId", "seed", "bossHeroTypeId", "teamHeroTypeIds", "teamHeroIds")}}

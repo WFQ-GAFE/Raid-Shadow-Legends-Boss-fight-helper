@@ -88,14 +88,15 @@ const RosterCard = memo(function RosterCard({ language, hero, name, element, slo
   )
 })
 
-export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRoster, loadHeroData, effects, heroName, heroAvatar, onClose, onApply }: {
+export function TeamPicker({ language, open, teamSize, bossMode, catalogRevision = '', initial, loadRoster, loadHeroData, effects, heroName, heroAvatar, onClose, onApply }: {
   language: UiLanguage
   open: boolean
   teamSize: number
   bossMode: 'chimera' | 'hydra'
+  catalogRevision?: string
   initial: ChosenTeam
   loadRoster: () => Promise<RosterHero[]>
-  loadHeroData: () => Promise<HeroData | null>
+  loadHeroData: (retry?: boolean) => Promise<HeroData | null>
   effects: EffectLike[]
   heroName: (typeId: number) => string
   heroAvatar: (typeId: number) => ReactNode
@@ -118,6 +119,9 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   const [conditions, setConditions] = useState<string[]>([])
   const [heroData, setHeroData] = useState<HeroData | null>(null)
   const [dataState, setDataState] = useState<'loading' | 'ready' | 'unavailable'>('loading')
+  const [dataAttempt, setDataAttempt] = useState(0)
+  const retryDataRef = useRef(false)
+  const dataRevisionAttempts = useRef(new Set<string>())
   const [profile, setProfile] = useState<RosterHero | null>(null)
   const [dropIndex, setDropIndex] = useState<number | null>(null)
   const [dragging, setDragging] = useState<DragSource['kind'] | null>(null)
@@ -147,8 +151,6 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     setQuery('')
     setProfile(null)
     setHint('')
-    setDataState('loading')
-    setHeroData(null)
     updateSlots(Array(teamSize).fill(null))
     loadRoster().then((heroes) => {
       if (cancelled) return
@@ -159,15 +161,36 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
     }).catch((reason) => {
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason))
     })
-    loadHeroData().then((data) => {
+    return () => { cancelled = true }
+    // The roster is read afresh each time the dialog opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    dataRevisionAttempts.current.add(catalogRevision)
+    setDataState('loading')
+    setHeroData(null)
+    const retry = retryDataRef.current
+    retryDataRef.current = false
+    loadHeroData(retry).then((data) => {
       if (cancelled) return
       setHeroData(data)
       setDataState(data ? 'ready' : 'unavailable')
     }).catch(() => { if (!cancelled) setDataState('unavailable') })
     return () => { cancelled = true }
-    // The roster is read afresh each time the dialog opens.
+    // Retrying display data must preserve the user's chosen team and filters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
+  }, [open, dataAttempt])
+
+  useEffect(() => {
+    if (!open || dataState !== 'unavailable' || !catalogRevision || dataRevisionAttempts.current.has(catalogRevision)) return
+    // A background read or newly installed resources repaired the backend.
+    // Try that revision once, keeping the roster, search and chosen team.
+    dataRevisionAttempts.current.add(catalogRevision)
+    setDataAttempt((attempt) => attempt + 1)
+  }, [open, catalogRevision, dataState])
 
   useEffect(() => {
     if (!hint) return
@@ -176,8 +199,16 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   }, [hint])
 
   // Each champion's name and affinity are looked up once per roster.
-  const names = useMemo(() => new Map((roster ?? []).map((hero) => [hero.typeId, heroName(hero.typeId)])), [roster, heroName])
-  const nameOf = (typeId: number) => names.get(typeId) ?? heroName(typeId)
+  const resolveName = useCallback((typeId: number) => {
+    const placeholder = translate(language, 'app.champion4', { typeId })
+    const unresolved = (value?: string) => !value?.trim() || value.trim() === placeholder || /^l10n:/i.test(value.trim())
+    const primary = heroName(typeId)
+    if (!unresolved(primary)) return primary
+    const fallback = heroData?.heroes[String(championId(typeId))]?.name
+    return !unresolved(fallback) ? fallback! : primary || placeholder
+  }, [heroName, heroData, language])
+  const names = useMemo(() => new Map((roster ?? []).map((hero) => [hero.typeId, resolveName(hero.typeId)])), [roster, resolveName])
+  const nameOf = (typeId: number) => names.get(typeId) ?? resolveName(typeId)
   const elementOf = useMemo(() => new Map((roster ?? []).map((hero) =>
     [hero.typeId, heroData?.heroes[String(championId(hero.typeId))]?.forms[0]?.element])), [roster, heroData])
 
@@ -368,8 +399,8 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
   const visible = shown.length > limit ? shown.slice(0, limit) : shown
   const team = slots.filter((hero): hero is RosterHero => Boolean(hero))
   const needsData = dataState !== 'ready'
-  const dataNote = dataState === 'loading' ? t('picker.readingChampionData')
-    : t('picker.championDataUnavailableOpenThe')
+  const dataNote = dataState === 'loading' ? t('picker.championDisplayLoading')
+    : t('picker.championDisplayUnavailable')
   const toggleCondition = (condition: string) => setConditions((current) =>
     current.includes(condition) ? current.filter((item) => item !== condition) : [...current, condition])
   const chip = (active: boolean, label: ReactNode, onClick: () => void, key: string, extra = '') =>
@@ -449,7 +480,7 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
               <section><h4>{t('picker.location')}</h4><div className="chip-group">
                 {PLACES.map(([value, key]) => chip(places.has(value), t(key), () => setPlaces((current) => toggled(current, value)), value))}
               </div></section>
-              {needsData ? <p className="team-picker-note">{dataNote}</p> : <>
+              {!needsData && <>
                 <section><h4>{t('picker.affinity')}</h4><div className="chip-group">
                   {ELEMENTS.map((value) => chip(elements.has(value), <><i className={`element-dot element-${value}`} />{labels.element(value)}</>, () => setElements((current) => toggled(current, value)), value))}
                 </div></section>
@@ -489,6 +520,10 @@ export function TeamPicker({ language, open, teamSize, bossMode, initial, loadRo
             </aside>
 
             <div className="picker-main">
+              {needsData && <p className="team-picker-note" role="status">{dataNote}
+                {dataState === 'unavailable' && <> <button type="button" className="button ghost picker-clear"
+                  onClick={() => { retryDataRef.current = true; setDataAttempt((attempt) => attempt + 1) }}>{t('sim.retry')}</button></>}
+              </p>}
               <div className="picker-searches">
                 <label className="search-box"><Search size={16} /><input aria-label={t('picker.searchByName')} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('picker.searchByName')} /></label>
                 <EffectSearch options={searchOptions} chosen={conditions} onPick={(key) => setConditions((current) => [...current, key])}
