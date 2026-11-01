@@ -10,7 +10,7 @@ import secrets
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -458,9 +458,15 @@ def validate_default_skill_policy(policy: Any, *, path: str) -> None:
         )
 
 
+# Rule option: fire on the hero's last action before the Boss's next turn (wait_for_last_turn).
+LAST_TURN_BEFORE_BOSS = "lastTurnBeforeBoss"
+
+
 def validate_strategy_node(node: Any, *, path: str = "strategyTree") -> None:
     if not isinstance(node, dict):
         raise ValueError(ui_text("ctl.pathNotObject", path=path))
+    if LAST_TURN_BEFORE_BOSS in node and not isinstance(node[LAST_TURN_BEFORE_BOSS], bool):
+        raise ValueError(ui_text("ctl.lastTurnFlagInvalid", path=path))
     node_type = node.get("type", "rule")
     if node_type in {"priority", "selector"}:
         children = node.get("children")
@@ -635,6 +641,9 @@ class Decision:
     mythic_followup_action: dict[str, Any] | None = None
     mythic_followup_form_index: int | None = None
     consumes_mythic_followup: bool = False
+    # Set when this action stands in for a rule that waits for the hero's last
+    # action before the Boss's next turn (wait_for_last_turn).
+    waited_rule: str | None = None
 
 
 class SkillCapabilityMemory:
@@ -7082,6 +7091,48 @@ def require_list_execution(config: dict[str, Any]) -> None:
         raise ValueError(ui_text("ctl.flowchartRemoved"))
 
 
+def wait_for_last_turn(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    rule_index: int,
+    decision: Decision,
+    capability_memory: SkillCapabilityMemory | None,
+    planner_state: dict[str, Any] | None,
+) -> Decision:
+    """A rule set to fire on the hero's last action before the Boss's next turn.
+
+    What the hero would do without this rule (the other rules; strict rules keep
+    their skills reserved) is tried on a copy of the battle by the original
+    engine (state["_lastTurnOracle"]): when the hero is active again before the
+    Boss, this action is not the last one, so the hero takes the other action
+    now and the rule fires later. Otherwise, or without an oracle (a live battle
+    with no matching opening simulation), the rule fires now.
+
+    oracle(alternative, decision) -> "again" | "boss" | "end" | "unknown" | None:
+    offline the engine plays the alternative on a battle copy; live the opening
+    simulation's answer at this same point (chimera_last_turn_oracle)."""
+    oracle = state.get("_lastTurnOracle")
+    if not callable(oracle) or state.get("_lastTurnDepth"):
+        return decision
+    # The stand-in comes from rules that never wait: another waiting rule (a
+    # mythical's other form, say) would otherwise fire unchecked in its place.
+    waiting = {index for index, rule in enumerate(config.get("rules") or [])
+               if isinstance(rule, dict) and rule.get(LAST_TURN_BEFORE_BOSS) is True} | {rule_index}
+    alternative_state = {**state, "_lastTurnDepth": 1, "_skipRuleIndexes": waiting,
+                         "_decisionTrace": [], "_targetMisses": []}
+    alternative = evaluate(config, alternative_state, capability_memory, planner_state)
+    if alternative is None:
+        return decision
+    outcome = oracle(alternative, decision)
+    trace = state.get("_decisionTrace")
+    if isinstance(trace, list):
+        trace.append({"outcome": "last_turn_check", "rule": decision.rule, "alternative": alternative.rule,
+                      "result": outcome})
+    if outcome == "again":
+        return replace(alternative, waited_rule=decision.rule)
+    return decision
+
+
 def evaluate(
     config: dict[str, Any],
     state: dict[str, Any],
@@ -7123,10 +7174,11 @@ def evaluate(
     # Explicit cast/transform/effect rules are strict regardless of where the
     # editor happens to display an automatic-trial rule. Preserve their mutual
     # order, but always evaluate them before trial automation.
+    skipped = state.get("_skipRuleIndexes") or ()
     for rule_index, rule in enumerate(rules):
         action = rule.get("action") if isinstance(rule, dict) else None
         action_type = action.get("type") if isinstance(action, dict) else None
-        if action_type in {"defaultSkillPriority", "executeTrialRecipe"}:
+        if action_type in {"defaultSkillPriority", "executeTrialRecipe"} or rule_index in skipped:
             continue
         misses = state.get("_targetMisses")
         noted = len(misses) if isinstance(misses, list) else 0
@@ -7143,6 +7195,8 @@ def evaluate(
             for miss in misses[noted:]:
                 miss.setdefault("ruleIndex", rule_index + 1)
         record_rule(state, rule, rule_index, decision, matches, states_for_rule_targets, effect_count_checks)
+        if decision is not None and isinstance(rule, dict) and rule.get(LAST_TURN_BEFORE_BOSS) is True:
+            return wait_for_last_turn(config, input_state, rule_index, decision, capability_memory, planner_state)
         if decision is not None:
             return decision
 
@@ -7489,6 +7543,15 @@ def observe_chimera_forecast(
         _CHIMERA_FORECAST_TELEMETRY = telemetry
         emit_telemetry(battleForecast=telemetry)
     return retry
+
+
+def chimera_last_turn_oracle(state: dict[str, Any]) -> Any:
+    """The opening simulation's answers for rules that wait for their hero's last action
+    before the Boss (wait_for_last_turn), while the live battle still matches it."""
+    try:
+        return chimera_forecast_monitor().last_turn_oracle(state)
+    except Exception:  # Without it such a rule fires at once.
+        return None
 
 
 def prestart_forecast_engine(config: dict[str, Any], pid: Any, boss_mode: str | None = None) -> None:
@@ -7901,6 +7964,10 @@ def process_state(
     state["_decisionTrace"] = []
     state["_reservedStrictSkillTypeIds"] = []
     state["_targetMisses"] = []
+    if ACTIVE_BOSS_MODE == "chimera":
+        oracle = chimera_last_turn_oracle(state)
+        if oracle is not None:
+            state["_lastTurnOracle"] = oracle
     decision = (
         pending_mythic_followup_decision(runtime_state, state)
         if runtime_state is not None
@@ -7908,6 +7975,8 @@ def process_state(
     )
     if decision is None:
         decision = evaluate(config, state, capability_memory, runtime_state)
+    if decision is not None and decision.waited_rule:
+        print(ui_text("ctl.lastTurnWait", rule=decision.waited_rule, alternative=decision.rule), flush=True)
     report_target_misses(state, runtime_state)
     emit_telemetry(decision=decision_details(state, decision), command=None)
     active_hero_label = str(

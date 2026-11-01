@@ -53,6 +53,13 @@ def forecast_enabled(config: dict[str, Any]) -> bool:
     return bool(mandatory) or (isinstance(minimum, (int, float)) and not isinstance(minimum, bool) and minimum > 0)
 
 
+def waits_for_last_turn(config: dict[str, Any]) -> bool:
+    """A rule waits for its hero's last action before the Boss (the engine then tries moves ahead)."""
+    rules = config.get("rules")
+    return isinstance(rules, list) and any(
+        isinstance(rule, dict) and rule.get(controller.LAST_TURN_BEFORE_BOSS) is True for rule in rules)
+
+
 # Why a simulated battle stopped (the stuck.<reason> messages).
 STUCK_REASONS = {"no_matching_rule", "rule_command_not_legal", "no_progress", "engine_rejected_command"}
 
@@ -189,7 +196,8 @@ class ChimeraForecastMonitor:
     def prestart(self, config: dict[str, Any], pid: int) -> None:
         """Start the next battle's engine now, while the game loads that battle."""
         if forecast_enabled(config):
-            self.prestarter.prestart(lambda: self.bundle_provider(int(pid)) / "raid_offline_probe.exe")
+            self.prestarter.prestart(lambda: self.bundle_provider(int(pid)) / "raid_offline_probe.exe",
+                                     **({"fork": True} if waits_for_last_turn(config) else {}))
 
     def verdict_ready(self, state: dict[str, Any]) -> bool:
         """This battle's simulation has finished and its verdict is not read yet: the
@@ -234,6 +242,29 @@ class ChimeraForecastMonitor:
                 current.divergence_reported = True
                 self.emit(ui_text("chimeraForecast.deviated", difference=difference))
         return None
+
+    def last_turn_oracle(self, state: dict[str, Any]) -> Callable[[Any, Any], str | None] | None:
+        """For a rule that waits for its hero's last action before the Boss: the opening
+        simulation tried that move on a copy of this very battle. While the live battle
+        still matches the simulation here (turn, hero, battle random), its answer is
+        this battle's; otherwise None and the rule fires at once."""
+        current = self.battle
+        if (current is None or current.status != "applied" or not current.result or current.divergence_reported
+                or current.generation != state.get("battleGeneration")):
+            return None
+        window = live_window(state)
+        if window is None or window_difference(current.result, window, None):
+            return None
+        planned = next((item for item in current.result.get("decisions", []) if item.get("turn") == window["turn"]), None)
+        if not isinstance(planned, dict):
+            return None
+        checks = [check for check in planned.get("lastTurnChecks") or [] if isinstance(check, dict)]
+
+        def oracle(alternative: Any, decision: Any) -> str | None:
+            return next((check.get("result") for check in checks
+                         if check.get("rule") == getattr(decision, "rule", None)
+                         and check.get("alternative") == getattr(alternative, "rule", None)), None)
+        return oracle
 
     def observe_command(self, state: dict[str, Any], *, skill_type_id: Any, target_id: Any) -> None:
         current = self.battle

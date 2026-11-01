@@ -21,6 +21,8 @@ MODULES = (
     "test_boss_stages",
     "test_simulation_base",
     "test_trial_skill_reservation",
+    "test_last_turn_rule",
+    "test_raid_processes",
     "test_retired_flow",
     "test_data_root",
     "test_simulation_common",

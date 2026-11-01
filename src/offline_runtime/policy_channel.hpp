@@ -9,7 +9,7 @@
 // ("phaseMs"): the decision state, waiting for the policy, building the
 // player's or the enemy's command, applying it, and everything else.
 struct PhaseTiming {
-    enum Phase { kOther, kDecisionState, kPolicyWait, kPlayerCommand, kEnemyAi, kApply, kCount };
+    enum Phase { kOther, kDecisionState, kPolicyWait, kPlayerCommand, kEnemyAi, kApply, kLookahead, kCount };
     std::uint64_t spent[kCount]{};
     std::uint64_t last = now();
     static std::uint64_t now() {
@@ -25,7 +25,8 @@ struct PhaseTiming {
     std::string json() const {
         LARGE_INTEGER frequency{};
         QueryPerformanceFrequency(&frequency);
-        static const char* names[kCount] = {"other", "decisionState", "policyWait", "playerCommand", "enemyAi", "apply"};
+        static const char* names[kCount] = {"other", "decisionState", "policyWait", "playerCommand", "enemyAi", "apply",
+                                            "lookahead"};
         std::string result = "{";
         for (int phase = 0; phase < kCount; ++phase) {
             char value[48];
@@ -52,6 +53,10 @@ struct PolicyReply {
     // Simulation only: the policy has no action for this window, so the
     // original engine AI plays it (reported as such, never silently).
     bool automatic{};
+    // Not an answer yet: the policy asks what happens if the active hero takes
+    // this action (a copy of the battle plays on; see chimera_forecast.hpp).
+    // It answers the same request after the "probe_result" line.
+    bool probe{};
     std::uint64_t sequence{};
     int actor_id{};
     int skill_type_id{};
@@ -103,8 +108,9 @@ public:
             reply.reason = fields[2].substr(0, 128);
             for (char& c : reply.reason)
                 if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == ':')) c = '_';
-        } else if (fields.size() == 5 && fields[0] == "command") {
-            reply.command = true;
+        } else if (fields.size() == 5 && (fields[0] == "command" || fields[0] == "probe")) {
+            reply.command = fields[0] == "command";
+            reply.probe = fields[0] == "probe";
             reply.sequence = number(fields[1]);
             reply.actor_id = static_cast<int>(number(fields[2]));
             reply.skill_type_id = static_cast<int>(number(fields[3]));

@@ -25,16 +25,18 @@ CANCEL_WAIT_SECONDS = 10.0
 
 
 class PrestartedEngine:
-    def __init__(self, probe: Path, mode: str, parameter: str, work: Path, *,
+    def __init__(self, probe: Path, mode: str, parameter: str, work: Path, *, fork: bool = False,
                  clock: Callable[[], float] = time.monotonic,
                  popen: Callable[..., subprocess.Popen] = subprocess.Popen) -> None:
+        # fork: while it waits, the engine also prepares battle copies (a Chimera
+        # strategy with rules that wait for a hero's last action before the Boss).
         self.probe, self.mode, self.parameter, self.work = probe, mode, parameter, work
         self.clock = clock
         self.started_at = clock()
         self.taken = False
         work.mkdir(parents=True, exist_ok=False)
         self.process = popen(
-            [str(probe), mode, str(work), parameter, "--await-input"],
+            [str(probe), mode, str(work), parameter, "--await-input-fork" if fork else "--await-input"],
             cwd=str(probe.parent), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
@@ -90,13 +92,14 @@ class EnginePrestarter:
         self._lock = threading.Lock()
         self._pending: PrestartedEngine | None = None
 
-    def prestart(self, probe_for: Callable[[], Path]) -> None:
+    def prestart(self, probe_for: Callable[[], Path], *, fork: bool = False) -> None:
         """Start the next battle's engine in the background (finding the engine copy may take a moment)."""
         def run() -> None:
             try:
                 probe = probe_for()
                 engine = self.start(probe, self.mode, self.parameter,
-                                    self.root / f"{int(time.time() * 1000)}-{threading.get_ident()}")
+                                    self.root / f"{int(time.time() * 1000)}-{threading.get_ident()}",
+                                    **({"fork": True} if fork else {}))
             except Exception:  # Without it the battle's engine simply starts cold.
                 return
             with self._lock:

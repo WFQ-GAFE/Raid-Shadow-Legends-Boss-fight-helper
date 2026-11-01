@@ -1066,6 +1066,7 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
 .log-row.enemy { color: var(--muted); }
 .sim-usage { display: inline-block; margin-top: 2px; padding: 0 6px; border-radius: 7px; font-size: 10px; font-style: normal; color: var(--teal); background: rgba(85, 211, 192, .1); }
 .sim-usage.unused { color: var(--gold); background: rgba(228, 189, 105, .1); }
+.sim-usage.last-turn-tag { justify-self: start; overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; color: #a9c8ff; background: rgba(120, 165, 255, .1); }
 .rule-row.highlight { border-color: var(--teal); background: rgba(85, 211, 192, .1); transition: background .3s ease; }
 /* Strict simulation: a run the rules stalled, and the opening battle simulation. */
 .simulation-table .tag.bad, .log-row .tag.bad { color: var(--danger); background: rgba(255, 124, 124, .12); }

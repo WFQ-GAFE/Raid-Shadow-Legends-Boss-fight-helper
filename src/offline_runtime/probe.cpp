@@ -14,6 +14,9 @@
 //       Started ahead of its battle: the worker loads the runtime and static data
 //       first, then waits on the policy channel for "input" (the battle's files are
 //       in the directory) or "cancel" before running the battle.
+//   chimera-forecast <input-directory> <parameter> --await-input-fork
+//       The same; while waiting the worker also marks the static data a battle copy
+//       shares (battle_fork.hpp), for a strategy whose rules try moves ahead.
 //   hero-data <directory> [all | id,id,...]
 //       The champions' static definitions and skills from the copied static
 //       data, written into the report (champion search and profiles). The
@@ -176,7 +179,7 @@ std::string sanitized(std::string message) {
 
 int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
            const fs::path& input_directory, const std::wstring& parameter,
-           HANDLE policy_input, HANDLE policy_output, bool await_input) {
+           HANDLE policy_input, HANDLE policy_output, bool await_input, bool prepare_fork) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     wcscpy_s(offline_fault_path, (report.parent_path() / L"fault.json").c_str());
     SetUnhandledExceptionFilter(record_offline_fault);
@@ -298,6 +301,12 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
             emit(isolated + "\"phase\":\"static_data_loading\",\"stage\":\"" + step + "\"");
         });
         PolicyChannel policy(policy_input, policy_output);
+        std::unique_ptr<BattleCloner> fork;
+        if (await_input && chimera && prepare_fork) {
+            stage = "sharing_static_data";
+            fork = std::make_unique<BattleCloner>(model);
+            fork->share({static_data});
+        }
         if (await_input) {
             // Started ahead of its battle: the slow part (runtime, static data) is done;
             // the battle's files are written into the input directory before "input".
@@ -322,7 +331,7 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
             if (override_seed) seed = std::stoi(parameter);
             result = run_chimera_policy_forecast(model, static_data, progress, input_directory / L"battle-setup.msgpack",
                                                  input_directory / L"battle-settings.msgpack",
-                                                 override_seed ? &seed : nullptr, policy);
+                                                 override_seed ? &seed : nullptr, policy, fork.get());
         } else {
             // "<turn limit>" or "<turn limit>:<seed>" (validated by the launcher).
             const auto colon = parameter.find(L':');
@@ -344,13 +353,14 @@ int worker(const fs::path& report, DWORD launcher_pid, const std::wstring& mode,
 }
 
 int launch(const std::wstring& mode, const fs::path& input_argument, const std::wstring& parameter,
-           bool await_input) {
+           bool await_input, bool prepare_fork) {
     const bool chimera = mode == L"chimera-forecast";
     const bool forecast = mode == L"forecast" || chimera;
     const bool hero_data = mode == L"hero-data";
     if (!forecast && !hero_data && mode != L"json-convert") return 2;
     // Only a policy-driven battle can wait for its input on the policy channel.
     if (await_input && !forecast) return 2;
+    if (prepare_fork && !(await_input && chimera)) return 2;
     if (hero_data) {
         for (const wchar_t c : parameter)
             if (!(c == L',' || (c >= L'0' && c <= L'9')) && parameter != L"all")
@@ -442,7 +452,7 @@ int launch(const std::wstring& mode, const fs::path& input_argument, const std::
     if (forecast)
         command += L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(policy_input.value)) +
                    L" " + std::to_wstring(reinterpret_cast<std::uintptr_t>(policy_output.value));
-    if (await_input) command += L" --await-input";
+    if (await_input) command += prepare_fork ? L" --await-input-fork" : L" --await-input";
     if (!CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, forecast ? TRUE : FALSE,
                         EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW | CREATE_SUSPENDED,
                         nullptr, exe.parent_path().c_str(), &startup.StartupInfo, &process))
@@ -498,21 +508,24 @@ int wmain(int argc, wchar_t** argv) {
                 policy_input = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[7])));
                 policy_output = reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(std::stoull(argv[8])));
             }
-            if (argc == 10 && std::wstring(argv[9]) != L"--await-input") return 1;
+            const std::wstring tail = argc == 10 ? std::wstring(argv[9]) : L"";
+            if (argc == 10 && tail != L"--await-input" && tail != L"--await-input-fork") return 1;
             return worker(argv[2], std::stoul(argv[3]), argv[4], fs::path(argv[5]), argv[6],
-                          policy_input, policy_output, argc == 10);
+                          policy_input, policy_output, argc == 10, tail == L"--await-input-fork");
         }
         attach_parent_console_if_interactive();
         // "<mode> <input-directory> [parameter] [--await-input]": the last starts a forecast
         // worker ahead of its battle (see PolicyChannel::await_input).
-        const bool await_input = argc == 5 && std::wstring(argv[4]) == L"--await-input";
+        const std::wstring tail = argc == 5 ? std::wstring(argv[4]) : L"";
+        const bool prepare_fork = tail == L"--await-input-fork";
+        const bool await_input = tail == L"--await-input" || prepare_fork;
         if (argc < 3 || argc > 5 || (argc == 5 && !await_input)) return 1;
         const std::wstring mode = argv[1];
         if (mode == L"json-convert" && argc != 3) return 1;
         const std::wstring parameter = argc >= 4 ? std::wstring(argv[3])
                                                  : (mode == L"chimera-forecast" ? L"captured"
                                                     : mode == L"hero-data" ? L"all" : L"1000");
-        return launch(mode, fs::path(argv[2]), parameter, await_input);
+        return launch(mode, fs::path(argv[2]), parameter, await_input, prepare_fork);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 9;
