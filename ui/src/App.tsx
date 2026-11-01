@@ -198,6 +198,8 @@ type Rule = {
   name?: string
   when?: JsonObject
   action?: JsonObject
+  // Chimera casts: fire on the hero's last action before the Boss's next turn (needs a simulation).
+  lastTurnBeforeBoss?: boolean
 }
 
 type DefaultSkillPolicyDraft = {
@@ -1461,6 +1463,7 @@ function RuleEditor({
   const [turnMin, setTurnMin] = useState('')
   const [turnMax, setTurnMax] = useState('')
   const [switchWithin, setSwitchWithin] = useState('')
+  const [lastTurn, setLastTurn] = useState(false)
   const [nextForm, setNextForm] = useState('')
   const [eligibleTrialId, setEligibleTrialId] = useState(0)
   const [damageMin, setDamageMin] = useState('')
@@ -1472,7 +1475,7 @@ function RuleEditor({
   const [editorVersion, setEditorVersion] = useState(0)
   const editorBaseline = useRef('')
   const editorSnapshot = JSON.stringify({ name, ruleKind, heroId, allHeroes, forms, heroForm, actionType, slot, skillTypeId,
-    defaultPolicies, target, targetPosition, headPriorityIds, advanced, turnMin, turnMax, switchWithin, nextForm, eligibleTrialId, damageMin, conditionTree })
+    defaultPolicies, target, targetPosition, headPriorityIds, advanced, turnMin, turnMax, switchWithin, lastTurn, nextForm, eligibleTrialId, damageMin, conditionTree })
   useLayoutEffect(() => { if (open && editorVersion > 0) editorBaseline.current = editorSnapshot }, [editorVersion, open])
   function requestEditorOpenChange(next: boolean) {
     if (!next && editorBaseline.current && editorSnapshot !== editorBaseline.current) { setConfirmDiscard(true); return }
@@ -1535,6 +1538,7 @@ function RuleEditor({
     setTurnMin(turnAtLeast == null ? '' : String(turnAtLeast))
     setTurnMax(turnAtMost == null ? '' : String(turnAtMost))
     setSwitchWithin(when.turnsUntilFormChangeAtMost == null ? '' : String(when.turnsUntilFormChangeAtMost))
+    setLastTurn(initial?.lastTurnBeforeBoss === true)
     setNextForm(typeof when.nextForm === 'string' ? when.nextForm : '')
     const savedEligibleTrials = asNumberArray(when.eligibleTrialsAny)
     setEligibleTrialId(savedEligibleTrials.length === 1 ? savedEligibleTrials[0] : 0)
@@ -2120,7 +2124,8 @@ function RuleEditor({
       const autoName = ruleKind === 'default'
         ? tr('app.defaultSkillOrderOf', { name: hero?.name ?? tr('app.champion2') })
         : `${hero?.name ?? tr('app.champion2')} · ${actionType === 'transform' ? tr('app.switchForm') : actionLabel({ when, action }, heroes)} → ${targetLabel({ when, action }, heroes, hydraHeads)}`
-      onSave({ name: name.trim() || autoName, when, action })
+      const waitsForLastTurn = lastTurn && bossMode === 'chimera' && ruleKind === 'strict' && actionType === 'cast'
+      onSave({ name: name.trim() || autoName, when, action, ...(waitsForLastTurn ? { lastTurnBeforeBoss: true } : {}) })
       onOpenChange(false)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -2398,6 +2403,11 @@ function RuleEditor({
                 {bossMode === 'chimera' && <label className="field trial-active-condition"><span>{tr('app.onlyWhileThisTrialIs')}<small>{tr('app.theRuleIsIgnoredWhen')}</small></span><select value={eligibleTrialId || ''} onChange={(event) => setEligibleTrialId(Number(event.target.value) || 0)}><option value="">{tr('app.anyTrialState')}</option>{eligibleTrialId > 0 && !trials.some((trial) => trial.id === eligibleTrialId) && <option value={eligibleTrialId}>{tr('app.savedTrial', { eligibleTrialId })}</option>}{trials.map((trial) => <option key={trial.id} value={trial.id}>{formLabel(trial.form ?? '') ?? trial.form ?? tr('app.chimera')} · {trialLevel(trial.difficulty ?? '') ?? trial.difficulty ?? tr('app.trial2')} · {gameDescription(trial.description) || tr('app.trial3', { id: trial.id })}</option>)}</select></label>}
               </div>
             </fieldset>
+            {/* Chimera casts: wait for the hero's last action before the Boss (tools: wait_for_last_turn). */}
+            {bossMode === 'chimera' && ruleKind === 'strict' && actionType === 'cast' && <button type="button" className={`devour-forecast-toggle last-turn-toggle span-2 ${lastTurn ? 'selected' : ''}`} aria-pressed={lastTurn} onClick={() => setLastTurn((value) => !value)}>
+              <span className="check-box">{lastTurn && <Check size={14} />}</span>
+              <span><strong>{tr('app.lastTurnBeforeBoss')}</strong><small>{tr('app.lastTurnBeforeBossHint')}</small></span>
+            </button>}
             <fieldset className="effect-condition-builder condition-tree-builder span-2">
               <legend>{tr('app.conditionLogic')}</legend>
               <div className="effect-condition-heading">
@@ -3309,6 +3319,7 @@ function App() {
                       {bossMode === 'chimera' && usageMatches && <em className={`sim-usage${usage.uses > 0 ? '' : ' unused'}`} title={tr('app.fromTheLatestStrategySimulation')} data-i18n-skip>{usage.uses > 0
                         ? (tr('app.simulatedPerRun', { usesPerRun: usage.usesPerRun }))
                         : (tr('app.unusedInSimulation'))}</em>}
+                      {bossMode === 'chimera' && rule.lastTurnBeforeBoss === true && <em className="sim-usage last-turn-tag" title={tr('app.lastTurnBeforeBossHint')}>{tr('app.lastTurnBeforeBossTag')}</em>}
                       {mismatches.length > 0 && <TargetTag kind="never" notes={mismatches.map((mismatch) => <MismatchNote key={`${mismatch.skillTypeId}:${mismatch.target}:${mismatch.position ?? ''}`}
                         mismatch={mismatch} hero={hero} heroes={heroes} outcome={action.type === 'defaultSkillPriority' ? 'autoFallback' : 'neverActs'} />)} />}</div>
                     <div className="form-pills">{bossMode === 'chimera' ? ruleForms(rule).slice(0, 4).map((form) => <span key={form} title={formLabel(form) ?? form}>{formShort(form) ?? form}</span>) : <span>{tr('app.wholeHydraBattle')}</span>}</div>

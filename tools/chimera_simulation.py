@@ -78,6 +78,23 @@ class ChimeraOfflinePolicySession:
         self._objective_seen: set[str] = set()
         self._turn_marker: tuple[Any, Any] | None = None
         self._same_turn_decisions = 0
+        # Set by run_simulation: (actor, skill type, target) -> what a copy of the
+        # battle shows ("again", "boss", "end", "unknown"); see wait_for_last_turn.
+        self.lookahead: Callable[[int, int, int], str] | None = None
+
+    def shadow(self) -> "ChimeraOfflinePolicySession":
+        """A throwaway twin for the decisions on a copy of the battle: same rules
+        and static data, its own learning and runtime state, no lookahead."""
+        twin = copy.copy(self)
+        twin.capability_memory = copy.deepcopy(self.capability_memory)
+        twin.runtime_state = copy.deepcopy(self.runtime_state)
+        twin.previous = None
+        twin.objective_events = []
+        twin._objective_seen = set(self._objective_seen)
+        twin._turn_marker = None
+        twin._same_turn_decisions = 0
+        twin.lookahead = None
+        return twin
 
     def _prepare(self, supplied: dict[str, Any]) -> dict[str, Any]:
         state = copy.deepcopy(supplied)
@@ -151,6 +168,10 @@ class ChimeraOfflinePolicySession:
             state["_decisionTraceLite"] = True
             state["_reservedStrictSkillTypeIds"] = []
             state["_targetMisses"] = []
+            if self.lookahead is not None:
+                ask, actor = self.lookahead, state.get("activeHeroId")
+                state["_lastTurnOracle"] = lambda alternative, decision: ask(
+                    actor, alternative.skill.get("typeId"), alternative.target_id)
             decision = controller.pending_mythic_followup_decision(self.runtime_state, state)
             if decision is None:
                 decision = controller.evaluate(self.strategy, state, self.capability_memory, self.runtime_state)
@@ -185,11 +206,16 @@ class ChimeraOfflinePolicySession:
         released = any(isinstance(entry, dict) and entry.get("outcome") == "reservation_released"
                        for entry in state.get("_decisionTrace") or [])
         misses = state.get("_targetMisses") or []
+        checks = [{key: entry.get(key) for key in ("rule", "alternative", "result")}
+                  for entry in state.get("_decisionTrace") or []
+                  if isinstance(entry, dict) and entry.get("outcome") == "last_turn_check"]
         return {"status": "command", "actorId": state["activeHeroId"], "skillTypeId": skill["typeId"],
                 "skillSlot": skill.get("slot"), "targetId": decision.target_id, "rule": decision.rule,
                 "ruleIndex": decision_rule_index(self.strategy, state, decision.rule),
                 "trialId": decision.trial_id, **({"reservationReleased": True} if released else {}),
-                **({"targetMisses": misses} if misses else {})}
+                **({"targetMisses": misses} if misses else {}),
+                **({"waitedRule": decision.waited_rule} if decision.waited_rule else {}),
+                **({"lastTurnChecks": checks} if checks else {})}
 
 
 def _reply_line(decision: dict[str, Any], sequence: int) -> str:
@@ -246,6 +272,42 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
         timed_out.set()
         process.kill()
 
+    current = {"sequence": 0}
+    lookahead_stats: dict[str, Any] = {"probes": 0, "nestedDecisions": 0, "seconds": 0.0, "results": {}}
+
+    def lookahead(actor_id: int, skill_type_id: int, target_id: int) -> str:
+        """Asks the engine to play this action on a copy of the battle; answers the
+        copy's other heroes with a throwaway twin of the policy."""
+        assert process.stdout is not None and process.stdin is not None
+        probe_started = time.monotonic()
+        sequence = current["sequence"]
+        process.stdin.write(f"probe\t{sequence}\t{actor_id}\t{skill_type_id}\t{target_id}\n".encode("utf-8"))
+        process.stdin.flush()
+        twin: ChimeraOfflinePolicySession | None = None
+        while True:
+            line = process.stdout.readline(MAX_REQUEST_BYTES + 1)
+            if not line or len(line) > MAX_REQUEST_BYTES:
+                raise SimulationError("lookahead_channel_failed")
+            message = json.loads(line)
+            if not isinstance(message, dict):
+                raise SimulationError("unexpected_lookahead_output")
+            if message.get("type") == "probe_result" and message.get("sequence") == sequence:
+                outcome = str(message.get("result") or "unknown")
+                lookahead_stats["probes"] += 1
+                lookahead_stats["seconds"] += time.monotonic() - probe_started
+                lookahead_stats["results"][outcome] = lookahead_stats["results"].get(outcome, 0) + 1
+                return outcome
+            nested, nested_state = message.get("sequence"), message.get("state")
+            if (message.get("type") != "decision_request" or message.get("lookahead") is not True
+                    or type(nested) is not int or not isinstance(nested_state, dict)):
+                raise SimulationError("unexpected_lookahead_output")
+            twin = twin or session.shadow()
+            lookahead_stats["nestedDecisions"] += 1
+            process.stdin.write(_reply_line(twin.decide(nested_state), nested).encode("utf-8"))
+            process.stdin.flush()
+
+    session.lookahead = lookahead
+    result["lookahead"] = lookahead_stats
     watchdog = threading.Timer(timeout_seconds, expire)
     watchdog.daemon = True
     watchdog.start()
@@ -270,6 +332,7 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                 raise SimulationError("decision_request_invalid")
             if cancel is not None and cancel.is_set():
                 raise SimulationError("simulation_cancelled")
+            current["sequence"] = sequence
             decision = session.decide(state)
             if "openingStats" not in result:
                 result["openingStats"] = opening_stats(state)
@@ -279,7 +342,7 @@ def run_simulation(probe: Path, packed_input: Path, strategy: dict[str, Any], *,
                 "sequence": sequence, "turn": battle.get("turn"), "playerTurnCount": battle.get("playerTurnCount"),
                 "bossTurns": chimera.get("turnCount"), "form": chimera.get("currentFormIndex"),
                 "activeHeroId": state.get("activeHeroId"), "activeHeroTypeId": state.get("activeHeroTypeId"),
-                "damage": battle.get("currentDamage"), "snapshot": battle_snapshot(state), **decision})
+                "heroTurnCount": state.get("activeHeroTurnCount"), "damage": battle.get("currentDamage"), "snapshot": battle_snapshot(state), **decision})
             if on_progress is not None and len(decisions) % 10 == 1:
                 on_progress({"decisions": len(decisions), "bossTurns": chimera.get("turnCount")})
             process.stdin.write(_reply_line(decision, sequence).encode("utf-8"))

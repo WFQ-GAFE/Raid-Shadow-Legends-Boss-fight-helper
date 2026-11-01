@@ -130,6 +130,25 @@ def test_the_chimera_forecast_gives_its_prestarted_engine_to_the_simulation() ->
         assert seen["engine"] is waiting and watcher.prestarter.take() is None
 
 
+def test_a_strategy_with_a_waiting_rule_prestarts_an_engine_that_prepares_battle_copies() -> None:
+    import test_chimera_forecast_live as live
+
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        forked = PrestartedEngine(Path("probe.exe"), "chimera-forecast", "captured", root / "fork", fork=True,
+                                  popen=FakeProcess)
+        assert forked.process.args[-1] == "--await-input-fork"
+        assert forked.usable(Path("probe.exe"), "chimera-forecast", "captured")
+        watcher = live.monitor(root, live.result(), [])
+        calls: list[dict] = []
+        watcher.prestarter.prestart = lambda probe_for, **kwargs: calls.append(kwargs)
+        waiting = {**live.CONFIG, "rules": [{"name": "w", "when": {}, "action": {}, "lastTurnBeforeBoss": True}]}
+        watcher.prestart(waiting, 1)
+        watcher.prestart(live.CONFIG, 1)
+        watcher.prestart({**waiting, "objectives": {}}, 1)  # no opening simulation: nothing to prestart
+        assert calls == [{"fork": True}, {}]
+
+
 def test_a_regroup_starts_the_next_battles_engine_first() -> None:
     import chimera_controller as controller
 

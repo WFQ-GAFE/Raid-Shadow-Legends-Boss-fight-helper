@@ -186,7 +186,7 @@ from chimera_icons import (  # noqa: E402
 from named_mutex import NamedMutex  # noqa: E402
 from raid_processes import (  # noqa: E402
     attach_windows,
-    is_supported_raid_executable,
+    raid_executable_problem,
     raid_processes,
 )
 
@@ -242,6 +242,7 @@ EXPECTED_RULE_KEYS = {
     "children",
     "fallback",
     "branches",
+    "lastTurnBeforeBoss",
 }
 
 
@@ -514,6 +515,8 @@ class ChimeraService:
         self.catalog_session = secrets.token_hex(8)
         self.processes: dict[int, dict[str, Any]] = {}
         self.last_process_refresh = 0.0
+        # Raid.exe processes already written to the desktop log (pid, path, verdict).
+        self.logged_processes: set[tuple[int, Any, str]] = set()
         loaded_hero_catalog = load_hero_catalog({})
         self.hero_catalog = {key: static_entity(value) for key, value in canonicalize_hero_catalog(loaded_hero_catalog).items()}
         if self.hero_catalog != loaded_hero_catalog:
@@ -1385,7 +1388,14 @@ class ChimeraService:
         valid: dict[int, dict[str, Any]] = {}
         for raw in found.values():
             path = raw.get("path")
-            if not isinstance(path, str) or not is_supported_raid_executable(path):
+            problem = raid_executable_problem(path) if isinstance(path, str) else "path_not_readable"
+            # Once per process: why the account list is empty is otherwise invisible
+            # in the packaged app (its console output is lost).
+            verdict = (int(raw["pid"]), path, problem or "accepted")
+            if verdict not in self.logged_processes:
+                self.logged_processes.add(verdict)
+                desktop_lifecycle_log(f"raid_process pid={verdict[0]} {verdict[2]} path={path}")
+            if problem:
                 continue
             item = dict(raw)
             try:

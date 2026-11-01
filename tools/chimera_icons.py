@@ -86,19 +86,15 @@ def game_build_directory() -> Path | None:
         pass
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
-        candidates.append(
-            Path(local_app_data)
-            / "PlariumPlay"
-            / "StandAloneApps"
-            / "raid-shadow-legends"
-            / "build"
-        )
+        # Plarium Play's default folder; old installs name the game folder "raid".
+        apps = Path(local_app_data) / "PlariumPlay" / "StandAloneApps"
+        candidates.extend(apps / name / "build" for name in ("raid-shadow-legends", "raid"))
     for candidate in candidates:
         try:
             resolved = candidate.resolve()
         except (OSError, ValueError):
             continue
-        if (resolved / "Raid.exe").is_file():
+        if is_supported_raid_executable(resolved / "Raid.exe"):
             _GAME_BUILD_MEMORY = resolved
             return resolved
     return None

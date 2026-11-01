@@ -63,26 +63,37 @@ user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.IsWindowVisible.restype = wintypes.BOOL
 
 
-def is_supported_raid_executable(value: str | Path) -> bool:
-    """Accept Plarium's RAID executable on any drive or user-specific root.
+# Next to RAID's Raid.exe (a Unity IL2CPP build). The folders around it depend on when
+# and where the game was installed: "raid-shadow-legends", or "raid" on old installs, any drive.
+GAME_FILES = ("GameAssembly.dll", "UnityPlayer.dll")
+GAME_FOLDERS = ("Raid_Data",)
 
-    The old implementation compared the process directory with one developer
-    machine's absolute path.  Keeping the executable and installation-layout
-    checks preserves the narrow injection boundary while allowing normal
-    Plarium installations on another Windows PC.
-    """
+
+def raid_executable_problem(value: str | Path) -> str | None:
+    """Why this is not RAID's game executable (None when it is).
+
+    The game is recognised by its own files, not by folder names: a player's
+    install was `StandAloneApps\\raid\\build` and was never detected (1.1.4).
+    Requiring Raid.exe beside RAID's IL2CPP files keeps the injection boundary
+    narrow on any installation path."""
     try:
         path = Path(value).resolve()
     except (OSError, TypeError, ValueError):
-        return False
-    parents = path.parents
-    return bool(
-        path.name.casefold() == "raid.exe"
-        and len(parents) >= 3
-        and parents[0].name.casefold() == "build"
-        and parents[1].name.casefold() == "raid-shadow-legends"
-        and parents[2].name.casefold() == "standaloneapps"
-    )
+        return "unreadable_path"
+    if path.name.casefold() != "raid.exe":
+        return "not_raid_exe"
+    folder = path.parent
+    try:
+        missing = [name for name in GAME_FILES if not (folder / name).is_file()]
+        missing += [name for name in GAME_FOLDERS if not (folder / name).is_dir()]
+    except OSError:
+        return "unreadable_folder"
+    return f"missing {', '.join(missing)}" if missing else None
+
+
+def is_supported_raid_executable(value: str | Path) -> bool:
+    """RAID's game executable on any drive and Plarium Play folder layout."""
+    return raid_executable_problem(value) is None
 
 
 def process_path(pid: int) -> str | None:

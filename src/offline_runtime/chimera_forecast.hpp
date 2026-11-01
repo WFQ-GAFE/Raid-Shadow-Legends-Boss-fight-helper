@@ -2,6 +2,7 @@
 
 #include "managed_runtime.hpp"
 #include "battle_commands.hpp"
+#include "battle_fork.hpp"
 #include "enemy_ai_command.hpp"
 #include "policy_state.hpp"
 #include "policy_channel.hpp"
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -26,7 +28,8 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
                                                const std::function<void(const char*)>& checkpoint,
                                                const std::filesystem::path& setup_path,
                                                const std::filesystem::path& settings_path,
-                                               const int* seed_override, PolicyChannel& policy) {
+                                               const int* seed_override, PolicyChannel& policy,
+                                               BattleCloner* prepared_cloner = nullptr) {
     void* domain = model.api<void* (*)()>("il2cpp_domain_get")();
     checkpoint("load_captured_battle_settings");
     void* parameters = model.allocate("SharedModel.Meta.Users", "GameParameters", true);
@@ -118,6 +121,175 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
     breakdown.observe(state);
     auto trials_before = read_trials();
     auto dead_before = dead_flags();
+
+    // "What if" for a policy that waits for a hero's last action before the
+    // Chimera's next turn: on a copy of the battle the active hero takes the
+    // asked action, then the battle plays on (other heroes asked from the
+    // policy as lookahead requests) until this hero starts another turn
+    // ("again": an extra turn or a full turn meter), the Chimera acts ("boss")
+    // or the battle ends ("end"). A free action (a mythical's form change) keeps
+    // the same turn: the hero is asked again and the copy plays on. The original
+    // battle is never touched; its CalcHash is checked after every copy.
+    // A prestarted worker has already shared the static data (prepared_cloner).
+    std::unique_ptr<BattleCloner> own_cloner;
+    BattleCloner* cloner = prepared_cloner;
+    bool battle_shared = false;
+    std::uint64_t lookahead_requests = 0;
+    struct {
+        int probes{}, nested{}, actions{};
+        int validated{}, mismatches{}, statistics_changed{}, changed_by_full{};  // validation mode only
+        double shared_ms{}, clone_ms{}, full_clone_ms{}, total_ms{};
+        std::size_t shared_objects{}, copied_objects{}, shared_lists{};
+        std::vector<std::string> largest;  // classes of the largest copy
+    } look;
+    // RSL_FORK_VALIDATE=1 (tests): every move is also played on a full copy and compared.
+    const bool validate_fork = [] {
+        char value[4]{};
+        return GetEnvironmentVariableA("RSL_FORK_VALIDATE", value, sizeof(value)) == 1 && value[0] == '1';
+    }();
+    // The statistics of finished turns: BattleStatistics.StatisticsByHero -> HeroStatistics
+    // ._statsPerRound -> HeroBattleStatistics._statisticsByTurn / _skillInfoUsedByTurn,
+    // each a Dictionary<turn, List<...>>; the lists of turns before `turn`.
+    auto finished_turn_lists = [&](void* statistics, int turn) {
+        std::vector<void*> lists;
+        if (!statistics) return lists;
+        for (const auto& [hero_id, hero_slot] : projection.entries(model.get<void*>(statistics, "StatisticsByHero"))) {
+            void* hero = *static_cast<void**>(hero_slot);
+            if (!hero) continue;
+            for (const auto& [round, round_slot] : projection.entries(model.get<void*>(hero, "_statsPerRound"))) {
+                void* by_round = *static_cast<void**>(round_slot);
+                if (!by_round) continue;
+                for (const char* field : {"_statisticsByTurn", "_skillInfoUsedByTurn"})
+                    for (const auto& [key, list_slot] : projection.entries(model.get<void*>(by_round, field)))
+                        if (key < turn && *static_cast<void**>(list_slot)) lists.push_back(*static_cast<void**>(list_slot));
+            }
+        }
+        return lists;
+    };
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    auto ms_since = [&](std::uint64_t start) {
+        return static_cast<double>(PhaseTiming::now() - start) * 1000.0 / static_cast<double>(frequency.QuadPart);
+    };
+    auto lookahead = [&](const PolicyReply& asked, std::uint64_t request) -> std::string {
+        const auto started = PhaseTiming::now();
+        ++look.probes;
+        if (!cloner) {
+            own_cloner = std::make_unique<BattleCloner>(model);
+            cloner = own_cloner.get();
+            cloner->share({static_data});
+        }
+        if (!battle_shared) {
+            look.shared_objects = cloner->share({setup, model.get<void*>(context, "Setup"),
+                                                 model.get_static<void*>(model.klass("SharedModel", "SharedModelManager"),
+                                                                         "GameParameters"),
+                                                 model.get<void*>(processor, "Journal")});
+            battle_shared = true;
+            look.shared_ms = ms_since(started);
+        }
+        const int hash_before = model.unbox<int>(model.call(state, "CalcHash"));
+        // The battle statistics keep a record of every effect, grouped by turn (two
+        // thirds of a late copy). A finished turn's lists are never written again, so
+        // the copy shares them; the dictionaries holding them are still copied. The
+        // validation mode also plays the move on a full copy first and checks the
+        // main statistics are unchanged after the lean one.
+        void* statistics = model.get<void*>(context, "Statistics");
+        const std::uint64_t statistics_before = validate_fork && statistics ? cloner->digest(statistics) : 0;
+        const int current_turn = model.get<int>(state, "CurrentTurn");
+        auto branch = [&](bool lean, std::string& detail, int& actions_played) -> std::string {
+            const auto copy_started = PhaseTiming::now();
+            cloner->borrow_next(lean ? finished_turn_lists(statistics, current_turn) : std::vector<void*>{});
+            void* copy = cloner->clone(processor);
+            (lean ? look.clone_ms : look.full_clone_ms) += ms_since(copy_started);
+            if (lean) look.shared_lists += cloner->borrowed();
+            if (lean && cloner->copied() > look.copied_objects) {
+                look.copied_objects = cloner->copied();
+                // Validation only (it costs time): the originals are alive only now.
+                if (validate_fork) look.largest = cloner->largest_classes(6);
+            }
+            void* copy_context = model.call(copy, "get_Context");
+            void* copy_state = model.get<void*>(copy_context, "State");
+            std::string result = "end";
+            try {
+                void* asker = model.get<void*>(copy_state, "ActiveHero");
+                const int asked_turns = asker ? model.get<int>(asker, "TurnCount") : -1;
+                model.call(copy, "ApplyCommand", {make_original_player_command_from_input(
+                    model, static_data, copy_state, player_owner, asked.actor_id, asked.skill_type_id,
+                    asked.target_id, true, "Lookahead command")});
+                void* copy_generator = nullptr;
+                while (!model.get<bool>(copy_state, "BattleFinished")) {
+                    void* next = model.get<void*>(copy_state, "ActiveHero");
+                    if (!next) {
+                        detail = "no_active_hero";
+                        return "unknown";
+                    }
+                    if (model.unbox<std::int64_t>(model.call(next, "get_OwnerUserId")) != player_owner) return "boss";
+                    // The same hero in the same turn (a mythical's free form change) plays on.
+                    if (model.unbox<int>(model.call(next, "get_Id")) == asked.actor_id &&
+                        model.get<int>(next, "TurnCount") != asked_turns)
+                        return "again";
+                    if (++actions_played > 40) {
+                        detail = "too_many_actions";
+                        return "unknown";
+                    }
+                    const std::uint64_t nested = 1000000000ULL + ++lookahead_requests;
+                    ++look.nested;
+                    policy.send("{\"type\":\"decision_request\",\"sequence\":" + std::to_string(nested) +
+                                ",\"lookahead\":true,\"state\":" + projection.decision_state(copy_state, nested) + "}");
+                    const PolicyReply answer = policy.receive(nested);
+                    void* command = nullptr;
+                    if (answer.command) {
+                        command = make_original_player_command_from_input(
+                            model, static_data, copy_state, player_owner, answer.actor_id, answer.skill_type_id,
+                            answer.target_id, true, "Lookahead policy command");
+                    } else if (answer.automatic) {
+                        if (!copy_generator) {
+                            void* generator_class = model.klass("SharedModel.Battle.AI.TurnActionGeneration",
+                                                                "EnemyTurnActionGenerator");
+                            copy_generator = model.allocate(generator_class);
+                            model.invoke(model.method(generator_class, ".ctor", 1), copy_generator, {copy_context});
+                        }
+                        command = make_original_enemy_ai_command(model, static_data, copy_context, copy_generator, next);
+                    } else {
+                        detail = answer.probe ? "nested_probe" : "policy_stopped";
+                        return "unknown";
+                    }
+                    model.call(copy, "ApplyCommand", {command});
+                }
+            } catch (const std::exception& error) {
+                detail = std::string(error.what()).substr(0, 160);
+                for (char& c : detail)
+                    if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 32) c = '_';
+                return "unknown";
+            }
+            return result;
+        };
+        std::string detail;
+        int actions_played = 0;
+        std::string result;
+        if (validate_fork) {
+            // The full copy first: whatever changes the main statistics after it is the lean copy's doing.
+            std::string full_detail;
+            int full_actions = 0;
+            const std::string full = branch(false, full_detail, full_actions);
+            const bool changed_by_full = statistics && cloner->digest(statistics) != statistics_before;
+            result = branch(true, detail, actions_played);
+            const bool changed_after_lean = statistics && cloner->digest(statistics) != statistics_before;
+            ++look.validated;
+            if (full != result || full_actions != actions_played) ++look.mismatches;
+            if (changed_by_full) ++look.changed_by_full;
+            else if (changed_after_lean) ++look.statistics_changed;
+        } else {
+            result = branch(true, detail, actions_played);
+        }
+        if (model.unbox<int>(model.call(state, "CalcHash")) != hash_before)
+            throw std::runtime_error("A battle copy changed the original battle");
+        look.actions += actions_played;
+        look.total_ms += ms_since(started);
+        return "{\"type\":\"probe_result\",\"sequence\":" + std::to_string(request) + ",\"result\":\"" + result +
+               "\",\"actions\":" + std::to_string(actions_played) +
+               (detail.empty() ? std::string() : ",\"detail\":\"" + detail + "\"") + "}";
+    };
     while (!model.get<bool>(state, "BattleFinished") && commands < max_skill_commands) {
         std::size_t root_frame = model.root_mark();
         if (commands % 50 == 0) {
@@ -164,7 +336,14 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
             timing.lap(PhaseTiming::kDecisionState);
             policy.send("{\"type\":\"decision_request\",\"sequence\":" + std::to_string(request) +
                         ",\"state\":" + decision_state + "}");
-            const PolicyReply reply = policy.receive(request);
+            PolicyReply reply = policy.receive(request);
+            while (reply.probe) {
+                timing.lap(PhaseTiming::kPolicyWait);
+                const std::string answer = lookahead(reply, request);
+                timing.lap(PhaseTiming::kLookahead);
+                policy.send(answer);
+                reply = policy.receive(request);
+            }
             timing.lap(PhaseTiming::kPolicyWait);
             if (reply.automatic) {
                 command = make_original_enemy_ai_command(model, static_data, context, generator_for(auto_generator), active);
@@ -317,6 +496,26 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
            << ",\"commands\":" << commands << ",\"policyRequests\":" << policy_requests
            << ",\"policyCommands\":" << policy_commands << ",\"autoCommands\":" << auto_commands
            << ",\"phaseMs\":" << timing.json()
+           << ",\"lookahead\":{\"probes\":" << look.probes << ",\"nestedDecisions\":" << look.nested
+           << ",\"actions\":" << look.actions << ",\"sharedObjects\":" << look.shared_objects
+           << ",\"copiedObjects\":" << look.copied_objects << ",\"sharedMs\":" << look.shared_ms
+           << ",\"cloneMs\":" << look.clone_ms << ",\"totalMs\":" << look.total_ms
+           << ",\"sharedLists\":" << look.shared_lists;
+    if (validate_fork)
+        report << ",\"validated\":" << look.validated << ",\"mismatches\":" << look.mismatches
+               << ",\"statisticsChanged\":" << look.statistics_changed << ",\"changedByFull\":" << look.changed_by_full
+               << ",\"fullCloneMs\":" << look.full_clone_ms;
+    report << ",\"largestClasses\":[";
+    {
+        bool first_class = true;
+        for (auto& entry : look.largest) {
+            for (char& c : entry)
+                if (c == '"' || c == '\\' || static_cast<unsigned char>(c) < 32) c = '_';
+            report << (first_class ? "" : ",") << '"' << entry << '"';
+            first_class = false;
+        }
+    }
+    report << "]}"
            << ",\"actors\":" << actors.str() << ",\"trials\":" << trials.str() << ",\"actions\":" << actions.str();
     return report.str();
 }

@@ -140,6 +140,25 @@ def test_the_verdict_is_ready_as_soon_as_the_simulation_ends() -> None:
         assert not watcher.verdict_ready(state(1))
 
 
+def test_a_waiting_rule_follows_the_opening_simulation_while_the_battle_matches_it() -> None:
+    from types import SimpleNamespace
+
+    forecast = result()
+    forecast["decisions"][1]["lastTurnChecks"] = [{"rule": "wait", "alternative": "other", "result": "again"}]
+    retry, watcher, _, _ = run(forecast)
+    assert retry is None and watcher.battle.status == "applied"
+    wait, other = SimpleNamespace(rule="wait"), SimpleNamespace(rule="other")
+    oracle = watcher.last_turn_oracle(state(2))
+    assert oracle is not None and oracle(other, wait) == "again"
+    assert oracle(SimpleNamespace(rule="third"), wait) is None  # never tried there
+    assert watcher.last_turn_oracle(state(3))(other, wait) is None  # no check at that turn
+    # The live battle differs here, or this is another battle: no answer, the rule fires at once.
+    assert watcher.last_turn_oracle(state(2, words=(9, 9, 9, 9))) is None
+    assert watcher.last_turn_oracle(state(2, generation=6)) is None
+    watcher.battle.divergence_reported = True
+    assert watcher.last_turn_oracle(state(2)) is None
+
+
 def test_the_controller_regroups_between_hero_turns_when_the_verdict_is_ready() -> None:
     from unittest.mock import patch
     import chimera_controller as controller
