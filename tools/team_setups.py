@@ -79,7 +79,7 @@ RELIC_PERCENT_STATS = ("m",)
 SIMULATION_FORMAT = "zlib+base64"
 MAX_SIMULATION_TEXT = 256 * 1024
 MAX_SIMULATION_JSON = 2 * 1024 * 1024
-TEAM_SOURCES = ("battle", "current", "strategy", "author")
+TEAM_SOURCES = ("battle", "current", "strategy", "author", "custom")
 
 
 class TeamSetupError(ValueError):
@@ -814,9 +814,11 @@ def simulation_team(source: str, boss_mode: str, strategy_team: list[Any] | None
     * ``current``: the strategy group's heroes as they are now; a callable
       returning preview_team() of the agent's team data (bonuses included);
     * ``strategy``: the snapshot taken when the strategy group was saved;
-    * ``author``: an imported strategy's author's team.
+    * ``author``: an imported strategy's author's team;
+    * ``custom``: heroes picked for the simulation, as they are now (``current`` reads them,
+      ``strategy_team`` names them).
 
-    The last two get the current account's academy, building and area bonuses:
+    ``strategy`` and ``author`` get the current account's academy, building and area bonuses:
     ``bonuses`` is a callable taking hero type ids and returning
     decode_account_bonuses' result.
     """

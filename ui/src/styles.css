@@ -358,7 +358,7 @@ select option { color: #e9f0f5; background: #102033; }
 
 .rule-row {
   display: grid;
-  grid-template-columns: 30px 42px minmax(120px, 1.2fr) minmax(125px, .8fr) minmax(140px, 1fr) minmax(125px, .8fr) minmax(130px, 1fr) auto;
+  grid-template-columns: 30px minmax(120px, 1.2fr) var(--rule-form-col) minmax(140px, 1fr) minmax(125px, .8fr) minmax(130px, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-height: 70px;
@@ -861,7 +861,7 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
 
 @media (max-width: 1180px) {
   .workspace { grid-template-columns: 335px minmax(0, 1fr); }
-  .rule-row { grid-template-columns: 28px 40px minmax(130px, 1.2fr) minmax(125px, 1fr) minmax(120px, 1fr) auto; }
+  .rule-row, .rule-row.no-forms { grid-template-columns: 28px minmax(130px, 1.2fr) minmax(125px, 1fr) minmax(120px, 1fr) auto; }
   .rule-row .form-pills, .rule-row .rule-condition { display: none; }
   .topbar { grid-template-columns: 250px minmax(280px, 1fr) minmax(350px, .9fr); }
   .language-switcher > span { display: none; }
@@ -906,7 +906,7 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
   .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .strategy-profile-card { grid-template-columns: minmax(180px, 1fr) auto; }
   .strategy-profile-identity { display: none; }
-  .rule-row { grid-template-columns: 25px 38px minmax(130px, 1fr) minmax(125px, 1fr) auto; }
+  .rule-row, .rule-row.no-forms { grid-template-columns: 25px minmax(130px, 1fr) minmax(125px, 1fr) auto; }
   .rule-row .rule-target { display: none; }
   .hero-library, .skill-library { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .devour-retry-heroes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1055,6 +1055,17 @@ input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-o
 .simulation-log details { border: 1px solid var(--line); border-radius: 8px; }
 .simulation-log summary { display: flex; gap: 10px; align-items: baseline; padding: 7px 10px; cursor: pointer; font-size: 12px; }
 .simulation-log summary span { color: var(--muted); font-size: 10px; }
+/* The Chimera's form leads each Boss turn's title, one colour per form; the turn before a change says what comes. */
+.simulation-log summary { --form-color: #c9b6ff; }
+.simulation-log summary .form-1 { --form-color: #7cc7ff; }
+.simulation-log summary .form-2 { --form-color: #ffb45c; }
+.simulation-log summary .form-3 { --form-color: #78dc9c; }
+/* The chip's text sits on the title's baseline; its icon is centred in the chip. */
+.log-form-chip { display: inline-flex; align-items: baseline; gap: 5px; min-width: 76px; padding: 2px 9px 2px 3px; color: var(--form-color); border: 1px solid color-mix(in srgb, var(--form-color) 55%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--form-color) 13%, transparent); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.log-form-chip > :first-child { align-self: center; }
+.simulation-log summary .log-form-chip .sim-icon { color: var(--form-color); border-color: color-mix(in srgb, var(--form-color) 45%, transparent); background: transparent; }
+.log-form-next { color: var(--form-color); font-size: 11px; font-style: normal; font-weight: 650; }
+.log-form-next::before { content: "→ "; }
 .simulation-log .button { justify-self: start; }
 .log-row { display: grid; grid-template-columns: 30px 96px minmax(150px, 1.6fr) 70px minmax(120px, 1.4fr) 44px; align-items: center; gap: 8px; padding: 4px 10px; border-top: 1px solid rgba(155, 188, 210, .06); font-size: 11px; }
 .log-row .why { color: var(--muted); }
@@ -1174,6 +1185,9 @@ div.hover-anchor { display: flex; }
 .trial-tag.strong { font-size: 12px; font-weight: 650; }
 .trial-tag.trial-progress { margin: 0 4px 2px 0; color: var(--text); }
 .trial-tag.trial-progress.good { color: var(--teal); }
+/* A trial's start (no progress yet), and the trial picked above the log. */
+.trial-tag.trial-progress.start { color: var(--muted); border-style: dashed; }
+.trial-tag.trial-progress.focused { color: #fff3d6; border-color: rgba(228, 189, 105, .75); background: rgba(228, 189, 105, .16); font-weight: 650; box-shadow: inset 0 0 0 1px rgba(228, 189, 105, .35); }
 .trial-tag.trial-rate { padding: 3px 8px; }
 .trial-tag.trial-rate em { color: var(--muted); font-style: normal; }
 .trial-tag.trial-chip { margin: 0 4px 3px 0; }
@@ -1277,7 +1291,16 @@ div.hover-anchor { display: flex; }
 .use-chip.counter em, .use-chip.activate em, .use-chip.effect em { color: var(--gold); }
 .use-chip.provoke em { color: #ffb4b4; }
 .use-chip.enemy { background: rgba(255, 124, 124, .08); }
-@media (max-width: 900px) { .log-uses { padding-left: 48px; } }
+/* Per target: each actor's damage taken and health before → after (1.1.6 engine). */
+.log-hits { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 0 10px 6px 146px; font-size: 10px; }
+.log-hits > .hover-anchor em { color: var(--muted); font-style: normal; }
+.hit-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px 1px 3px; border-radius: 10px; background: rgba(155, 188, 210, .07); font-variant-numeric: tabular-nums; }
+.hit-chip.enemy { background: rgba(255, 124, 124, .08); }
+.hit-chip .hp { color: var(--muted); }
+.hit-chip .hp b { margin-left: 4px; font-weight: 650; }
+.hit-chip .hp b.loss { color: #ff9b9b; }
+.hit-chip .hp b.gain { color: var(--teal); }
+@media (max-width: 900px) { .log-uses, .log-hits { padding-left: 48px; } }
 
 /* Consistent sizing (1.1.2): one height for buttons, icon buttons, inputs, selects and search boxes,
    so controls placed side by side line up; compact windows use a smaller one. */
@@ -1307,8 +1330,7 @@ div.hover-anchor { display: flex; }
 
 /* Form chips on rules: an even grid instead of ragged wrapping. */
 @media (min-width: 1181px) {
-  .rule-row .form-pills { display: grid; grid-template-columns: repeat(2, max-content); gap: 3px; align-content: center; }
-  .rule-row .form-pills span { text-align: center; }
+  .rule-row .form-pills { align-content: center; }
 }
 
 /* Team card: unsaved team hint. */
@@ -1481,6 +1503,7 @@ html[lang="en"] .skill-policy-actions .blocked-toggle { min-width: 128px; }
 .run-trials-label { margin-right: 2px; color: var(--muted); font-size: 12px; font-weight: 600; }
 .run-trials > small { flex-basis: 100%; color: var(--muted); font-size: 11px; }
 .run-trials > small .link-button { margin-left: 8px; }
+.run-trials-state { display: block; margin-top: 3px; color: var(--gold); font-size: 12px; }
 .trial-button { min-height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; color: var(--text); border: 1px solid var(--line); border-radius: 999px; background: rgba(6, 16, 27, .45); font: inherit; font-size: 12px; cursor: pointer; }
 .trial-button .effect-glyph { width: 18px; height: 18px; }
 .trial-button b { padding: 0 6px; color: var(--gold); border: 1px solid rgba(228, 189, 105, .4); border-radius: 999px; font-size: 10px; font-weight: 600; }
@@ -1489,3 +1512,147 @@ html[lang="en"] .skill-policy-actions .blocked-toggle { min-width: 128px; }
 .trial-button.missed em { color: var(--danger); }
 .trial-button.active { border-color: var(--line-strong); background: rgba(85, 211, 192, .12); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .target-quick button.illegal.active, .position-target.illegal.active { opacity: 1; border-color: rgba(255, 124, 124, .6); background: rgba(255, 124, 124, .08); }
+
+/* Trial champions (TrialHeroes.tsx): the button under the required trials, and the window:
+   one folding section per trial with what it needs, then one row per champion with the full
+   text of its skills. Effects read like the champion profile's (icon and name, no frame). */
+.objectives-card .trial-heroes-button { width: 100%; margin-top: 10px; justify-content: center; }
+.trial-heroes-dialog { width: min(1080px, calc(100vw - 40px)); height: min(860px, calc(100vh - 40px)); grid-template-rows: auto minmax(0, 1fr); }
+.trial-heroes-dialog .dialog-heading { align-items: center; }
+.trial-heroes-dialog .dialog-heading [data-radix-dialog-title] { margin: 0; display: flex; align-items: center; gap: 8px; }
+.trial-heroes-heading-actions { display: flex; align-items: center; gap: 8px; }
+.trial-heroes-heading-actions svg.open, .trial-heroes-more svg.open { transform: rotate(180deg); }
+.trial-heroes-body { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 12px; padding-right: 4px; }
+.trial-heroes-trial { border: 1px solid var(--line); border-radius: 12px; background: rgba(6, 16, 27, .35); }
+.trial-heroes-trial-head { width: 100%; min-height: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 13px 16px; color: var(--text); border: 0; border-radius: 12px; background: none; font: inherit; text-align: left; cursor: pointer; }
+.trial-heroes-trial-head:hover { background: rgba(155, 188, 210, .04); }
+.trial-heroes-trial-head > svg { margin-top: 1px; color: var(--muted); transition: transform .15s ease; }
+.trial-heroes-trial.collapsed .trial-heroes-trial-head > svg { transform: rotate(-90deg); }
+.trial-heroes-trial-title { display: grid; gap: 4px; min-width: 0; }
+.trial-heroes-trial-title strong { font-size: 14px; }
+.trial-heroes-trial-title small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.trial-heroes-trial-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.trial-heroes-trial-body { display: grid; gap: 14px; padding: 14px 16px 16px; border-top: 1px solid var(--line); }
+.trial-heroes-needs { display: grid; gap: 8px; padding: 10px 12px; border-radius: 8px; background: rgba(155, 188, 210, .05); font-size: 13px; }
+.trial-heroes-needs > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.trial-heroes-needs-label { min-width: 104px; color: var(--muted); font-size: 12px; }
+.trial-heroes-effect { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-weight: 600; }
+.trial-heroes-effect .effect-icon { width: 24px; height: 24px; }
+.trial-heroes-joiner { color: var(--muted); font-size: 12px; font-style: normal; }
+/* A special effect or damage basis: no game icon, so a small tag. */
+.trial-heroes-effect.trait, .profile-effect.trait { padding: 2px 8px; color: var(--gold); border-radius: 6px; background: rgba(228, 189, 105, .1); font-size: 12px; font-weight: 600; }
+.trial-heroes-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.trial-hero-row { display: grid; grid-template-columns: minmax(160px, 200px) minmax(0, 1fr); align-items: start; gap: 14px; padding: 12px; border: 1px solid rgba(155, 188, 210, .1); border-radius: 10px; background: rgba(155, 188, 210, .03); }
+.trial-hero-row.in-team { border-color: rgba(85, 211, 192, .35); background: rgba(85, 211, 192, .04); }
+.trial-heroes-hero { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.trial-heroes-hero > span { display: grid; gap: 3px; min-width: 0; }
+.trial-heroes-hero strong { font-size: 14px; overflow-wrap: anywhere; }
+.trial-heroes-hero small { color: var(--muted); font-size: 12px; }
+.trial-heroes-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.trial-heroes-tags .tag { padding: 1px 7px; border-radius: 6px; color: var(--muted); background: rgba(155, 188, 210, .08); font-size: 10px; font-style: normal; white-space: nowrap; }
+.trial-heroes-tags .tag.good { color: var(--teal); background: rgba(85, 211, 192, .1); }
+.trial-heroes-tags .tag.strong { color: var(--gold); background: rgba(228, 189, 105, .12); }
+.trial-heroes-skills { display: grid; gap: 8px; min-width: 0; }
+.hero-profile-skill.trial-heroes-skill { grid-template-columns: 40px minmax(0, 1fr); gap: 11px; padding: 9px 11px; }
+.trial-heroes-skill .skill-icon { width: 40px; height: 40px; }
+.trial-heroes-skill p { margin: 4px 0 7px; font-size: 12.5px; }
+.trial-heroes-more { justify-self: start; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+@media (max-width: 760px) { .trial-hero-row { grid-template-columns: minmax(0, 1fr); } }
+/* Software update: the button beside the version under the app name. */
+.version-row { display: flex; align-items: center; gap: 8px; }
+.update-button { display: inline-flex; align-items: center; gap: 4px; min-height: 0; height: 20px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: rgba(6, 16, 27, .45); font-size: 11px; line-height: 1; white-space: nowrap; cursor: pointer; }
+.update-button:hover, .update-button:focus-visible { color: var(--text); border-color: var(--line-strong); }
+.update-button.available { color: var(--teal); border-color: var(--line-strong); background: rgba(85, 211, 192, .1); font-weight: 650; }
+.update-button.available:hover { background: rgba(85, 211, 192, .18); }
+.dialog-content.update-dialog { width: min(720px, calc(100vw - 40px)); max-height: min(780px, calc(100vh - 40px)); grid-template-rows: auto minmax(0, 1fr) auto; }
+.update-body { min-height: 0; overflow: auto; display: grid; align-content: start; gap: 12px; padding-right: 4px; font-size: 13px; }
+.update-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; }
+.update-line small { color: var(--muted); font-size: 12px; }
+.update-good { color: var(--teal); }
+.update-problem { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid rgba(228, 189, 105, .28); border-radius: 10px; background: rgba(228, 189, 105, .07); }
+.update-problem p { margin: 0; color: var(--gold); }
+.update-problem small, .update-note { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.update-release { display: grid; gap: 10px; }
+.update-release > header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+.update-release > header strong { font-size: 16px; }
+.update-release > header small { color: var(--muted); font-size: 12px; }
+.update-release h4 { margin: 4px 0 0; color: var(--muted); font-size: 12px; font-weight: 650; letter-spacing: .04em; }
+.update-notes { display: grid; gap: 6px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: rgba(6, 16, 27, .45); line-height: 1.55; }
+.update-notes p { margin: 0; }
+.update-notes-item { padding-inline-start: 14px; position: relative; }
+.update-notes-item::before { content: ""; position: absolute; left: 3px; top: .68em; width: 5px; height: 5px; border-radius: 50%; background: var(--teal); }
+.update-notes code { padding: 0 4px; border-radius: 4px; background: rgba(155, 188, 210, .12); font-size: .92em; }
+.update-installed { display: flex; align-items: flex-start; gap: 10px; padding: 11px 13px; border-radius: 10px; }
+.update-installed > div { display: grid; gap: 6px; min-width: 0; flex: 1; }
+.update-installed small { color: var(--muted); font-size: 12px; }
+.update-installed.good { border: 1px solid var(--line-strong); background: rgba(85, 211, 192, .07); }
+.update-installed.good > svg { color: var(--teal); flex: 0 0 auto; margin-top: 2px; }
+.update-installed.bad { border: 1px solid rgba(255, 124, 124, .26); background: rgba(255, 124, 124, .07); color: #ffc0c0; }
+.update-installed.bad > svg { flex: 0 0 auto; margin-top: 2px; }
+
+/* Trial condition check (trial_diagnosis.py): how often each condition held at the moments a trial could progress. */
+.trial-check-section { display: grid; gap: 8px; margin-top: 18px; }
+.trial-check-section h3 { margin: 0 0 2px; font-size: 14px; }
+.trial-check-row { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(6, 16, 27, .35); }
+.trial-check-row > span:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.trial-check-row > span:first-child small { color: var(--muted); font-size: 11px; }
+.trial-check { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.trial-check.muted { color: var(--muted); }
+.trial-check-moments { margin-right: 4px; color: var(--muted); }
+.trial-check-condition { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 9px; border: 1px solid var(--line); border-radius: 8px; background: rgba(155, 188, 210, .05); }
+.trial-check-condition b { padding: 1px 7px; border-radius: 5px; font-variant-numeric: tabular-nums; font-weight: 650; }
+.trial-check-condition.good { border-color: rgba(85, 211, 192, .35); }
+.trial-check-condition.good b { color: var(--teal); background: rgba(85, 211, 192, .12); }
+.trial-check-condition.warn { border-color: rgba(228, 189, 105, .35); }
+.trial-check-condition.warn b { color: var(--gold); background: rgba(228, 189, 105, .12); }
+.trial-check-condition.bad { border-color: rgba(255, 124, 124, .35); }
+.trial-check-condition.bad b { color: #ff9b9b; background: rgba(255, 124, 124, .12); }
+.trial-check-all { margin-left: 4px; font-weight: 650; }
+.trial-check-all.bad { color: #ff9b9b; }
+.trial-check > small { color: var(--muted); font-size: 11px; }
+.trial-check-effects { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.trial-check-effects > span { display: inline-flex; align-items: center; gap: 3px; }
+.trial-check-effects img { width: 18px; height: 18px; }
+/* In the report's findings and the log's focus line the check reads inline. */
+.simulation-findings .trial-check-effects { vertical-align: middle; margin: 0 2px; }
+.simulation-findings .trial-check-effects img { width: 16px; height: 16px; }
+
+/* Rules by champion (ruleOrder.ts): one section per champion of the team, its rules as they are
+   checked (strict, trial automation, default skill order last), then champions outside the team. */
+.rule-group { display: grid; gap: 6px; margin-bottom: 14px; }
+.rule-group:last-child { margin-bottom: 0; }
+.rule-group-head { position: sticky; top: -9px; z-index: 2; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.rule-group-head strong { font-size: 14px; }
+.rule-group-head small { color: var(--muted); font-size: 12px; }
+.rule-group-head .tag { padding: 1px 8px; border-radius: 6px; color: var(--gold); background: rgba(228, 189, 105, .1); font-size: 11px; font-style: normal; }
+.rule-group-add { margin-left: auto; }
+.rule-group.outside .rule-group-head strong { color: var(--muted); }
+.rule-group-any { width: 30px; height: 30px; display: grid; place-items: center; color: var(--teal); border: 1px solid var(--line); border-radius: 8px; }
+.rule-group-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 9px 12px; color: var(--gold); border: 1px dashed rgba(228, 189, 105, .45); border-radius: 10px; background: rgba(228, 189, 105, .06); font-size: 12px; }
+.rule-group-hint > svg { flex: 0 0 auto; }
+.rule-group-hint > span { flex: 1 1 260px; }
+/* The Chimera form column has one width for every row (the form names' length per language), so the
+   columns after it line up; Hydra rules have no form column. */
+:root { --rule-form-col: 100px; }
+html[lang="en"], html[lang="pt-BR"] { --rule-form-col: 132px; }
+/* (.rule-row.no-forms takes its columns in uiRefinements.css, wide windows only.) */
+.rule-row .form-pills { width: var(--rule-form-col); }
+.rule-row .form-pills span.all { color: var(--muted); }
+/* The rule editor's champions: the strategy's team, then "any acting champion". */
+.hero-library.team-heroes { max-height: none; margin-top: 0; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.hero-option.any-hero { border-style: dashed; border-color: var(--line); }
+.hero-option.any-hero.active { border-style: solid; border-color: var(--line-strong); }
+.any-hero-icon { width: 30px; height: 30px; flex: 0 0 auto; display: grid; place-items: center; color: var(--teal); border: 1px solid var(--line); border-radius: 8px; }
+
+/* Rules: show all champions, or one (the row under the search box). */
+.rule-champion-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.rule-champion-filter button { display: inline-flex; align-items: center; gap: 6px; min-height: 0; height: 30px; padding: 0 10px 0 4px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; background: rgba(6, 16, 27, .45); font: inherit; font-size: 12px; cursor: pointer; }
+.rule-champion-filter button:first-child { padding-left: 10px; }
+.rule-champion-filter button:hover { color: var(--text); border-color: var(--line-strong); }
+.rule-champion-filter button.active { color: var(--text); border-color: var(--teal); background: rgba(85, 211, 192, .1); }
+.rule-champion-filter button.outside span { color: var(--muted); }
+.rule-champion-filter button > svg { margin-left: 4px; color: var(--teal); }
+.rule-champion-filter .avatar { width: 22px; height: 22px; border-radius: 6px; }
+.rule-champion-filter span { max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-champion-filter b { color: var(--muted); font-size: 11px; font-weight: 600; }
+.rule-champion-filter button.active b { color: var(--teal); }

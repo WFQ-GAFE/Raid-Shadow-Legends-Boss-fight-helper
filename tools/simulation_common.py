@@ -205,9 +205,10 @@ def action_uses(raw: Any) -> list[dict[str, Any]]:
     """
     uses = []
     for entry in raw if isinstance(raw, list) else ():
-        # A sixth item (1.1.3 engine): the actors the use's damage hit, when a
-        # skill picks its own target (the Head of Mischief's steal).
-        if not isinstance(entry, list) or len(entry) not in (5, 6):
+        # A sixth item (1.1.3 engine): the actors the use's damage hit (a skill may
+        # pick its own target, like the Head of Mischief's steal); a seventh (1.1.6
+        # engine): its damage to each of them, in the same order.
+        if not isinstance(entry, list) or len(entry) not in (5, 6, 7):
             continue
         actor_id, skill_type_id, target_id, trigger, damage = entry[:5]
         if trigger not in USE_TRIGGERS or not isinstance(actor_id, int) or not isinstance(damage, (int, float)):
@@ -215,11 +216,61 @@ def action_uses(raw: Any) -> list[dict[str, Any]]:
         use = {"actorId": actor_id, "skillTypeId": skill_type_id if isinstance(skill_type_id, int) else 0,
                "targetId": target_id if isinstance(target_id, int) else -1, "trigger": trigger,
                "damage": round(float(damage))}
-        hits = entry[5] if len(entry) == 6 and isinstance(entry[5], list) else []
+        hits = entry[5] if len(entry) >= 6 and isinstance(entry[5], list) else []
         if hits and all(isinstance(hit, int) and not isinstance(hit, bool) for hit in hits):
             use["hits"] = hits
+            amounts = entry[6] if len(entry) == 7 and isinstance(entry[6], list) else []
+            if len(amounts) == len(hits) and all(isinstance(amount, (int, float)) and not isinstance(amount, bool)
+                                                 for amount in amounts):
+                use["hitDamage"] = [round(float(amount)) for amount in amounts]
         uses.append(use)
     return uses
+
+
+def effects_snapshot(raw: Any, actors: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    """The state before a boss command (1.1.6 engine) in battle_snapshot's shape, for the log and the trial checks.
+
+    [[actorId, healthPercent, [[effectTypeId, turnsLeft], ...]], ...] from command_breakdown.hpp
+    (living actors only); `actors` gives each one's type and side (the engine's actor list).
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    rows = []
+    for entry in raw:
+        if not isinstance(entry, list) or len(entry) != 3 or not isinstance(entry[0], int) or not isinstance(entry[2], list):
+            continue
+        actor = actors.get(entry[0])
+        if not isinstance(actor, dict) or not isinstance(actor.get("heroTypeId"), int):
+            continue
+        folded: dict[int, list[Any]] = {}
+        for effect in entry[2]:
+            if isinstance(effect, list) and len(effect) == 2 and isinstance(effect[0], int) and effect[0] > 0:
+                turns = effect[1] if isinstance(effect[1], int) and not isinstance(effect[1], bool) else -1
+                item = folded.setdefault(effect[0], [effect[0], turns, 0])
+                item[1] = max(item[1], turns)
+                item[2] += 1
+        health = entry[1]
+        rows.append({"id": entry[0], "t": actor["heroTypeId"], "s": "a" if actor.get("player") else "e",
+                     "hp": round(float(health), 1) if isinstance(health, (int, float)) and not isinstance(health, bool) else None,
+                     "fx": list(folded.values())})
+    return {"actors": rows} if rows else None
+
+
+def action_health(raw: Any) -> list[dict[str, Any]]:
+    """Whose health one engine command changed, in HP (1.1.6 engine; none before).
+
+    [[actorId, before, after, max], ...] from command_breakdown.hpp: what a hit
+    really took once shields, Unkillable and the like had their say, and heals.
+    """
+    changes = []
+    for entry in raw if isinstance(raw, list) else ():
+        if not isinstance(entry, list) or len(entry) != 4 or not isinstance(entry[0], int) or isinstance(entry[0], bool) \
+                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in entry[1:]):
+            continue
+        actor_id, before, after, maximum = entry
+        changes.append({"actorId": actor_id, "before": round(float(before)), "after": round(float(after)),
+                        "max": round(float(maximum))})
+    return changes
 
 
 MISS_FIELDS = ("heroTypeId", "skillTypeId", "target", "position", "reach")

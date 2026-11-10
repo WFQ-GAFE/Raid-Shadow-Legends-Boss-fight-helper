@@ -88,11 +88,13 @@ export function SimulationReadFeedback({ resource, log = false }: { resource: { 
     <button type="button" className="button ghost" onClick={resource.retry}>{t('sim.retry')}</button></div>
 }
 
+// Said only when some runs did not complete: damage then counts the ones that did.
 export function SimulationSampleNote({ aggregate, runs }: { aggregate: { runs: number; finishedRuns: number; battleEndRuns?: number }; runs?: { status: string }[] }) {
   const { t } = useSim()
   const samples = simulationSamples(aggregate, runs)
-  return <div className="simulation-sample-note"><p className="muted">{t('sim.sampleCounts', samples)}</p>
-    <p className={samples.hasValid ? 'muted' : 'simulation-warning'}>{t(samples.hasValid ? 'sim.damageSamples' : 'sim.noValidSamples', samples)}</p></div>
+  if (samples.valid >= samples.total) return null
+  return <div className="simulation-sample-note"><p className={samples.hasValid ? 'muted' : 'simulation-warning'}>
+    {t(samples.hasValid ? 'sim.sampleCounts' : 'sim.noValidSamples', samples)}</p></div>
 }
 export type SimSkill = { typeId?: number; slot: number; name?: string; description?: string; defaultCooldown?: number }
 export type SimulationHero = { typeId: number; name: string; runtimeTypeIds?: number[]; skills: SimSkill[] }
@@ -584,7 +586,6 @@ export function SimulationBase({ capture, difficultyText, teamSwapped, children 
     <span className="simulation-base-line"><strong>{t('sim.baseBattle')}</strong><span>{when} · {difficultyText(capture.difficulty)}</span>{children}</span>
     {capture.rotationStageId !== undefined && <small className="simulation-base-note">{t('sim.baseRotationRebuilt')}</small>}
     {teamSwapped && capture.otherAccount && !capture.teamLevelKnown && <small className="simulation-base-note warn">{t('sim.baseOtherAccount')}</small>}
-    <small>{t('sim.baseBattleHint')}</small>
   </div>
 }
 
@@ -606,7 +607,8 @@ export function useRunDifficulty(boss: BossKind, base: number | undefined, choic
 
 // --- Team source: whose heroes and gear the simulation uses ---
 
-export type TeamSource = 'battle' | 'current' | 'strategy' | 'author'
+export type TeamSource = 'battle' | 'current' | 'strategy' | 'author' | 'custom'
+// Heroes picked for a simulation in the team picker (the account's hero ids and their type ids).
 export type TeamCheck = { checkedAt?: string; compared?: number; matched?: number; orderMatched?: number; rule?: string | null; area?: string | null }
 export type TeamSources = {
   strategyId?: string
@@ -627,6 +629,7 @@ export function teamSourceLabel(lang: Lang, source?: string | null) {
     case 'current': return translate(lang, 'sim.strategySTeamNow')
     case 'strategy': return translate(lang, 'sim.teamWhenTheStrategyWas')
     case 'author': return translate(lang, 'sim.theAuthorSTeam')
+    case 'custom': return translate(lang, 'sim.customTeam')
     case 'preparation': return translate(lang, 'sim.preparationScreenTeam')  // reports before 1.1.1's final build
     default: return translate(lang, 'sim.theBattleSOwnTeam')
   }
@@ -722,7 +725,8 @@ export function simulationInputs<Capture extends CaptureOption>(lang: Lang, stra
   const teamOptions = teamSourceOptions(lang, sources, strategyTeam)
   const preferredSource = teamOptions.find((option) => option.source === preferred?.teamSource && option.ready)
   const author = teamOptions.find((option) => option.source === 'author' && option.ready)
-  const teamSource = preferredSource?.source ?? author?.source ?? teamOptions.find((option) => option.ready)?.source ?? 'current'
+  const teamSource = preferredSource?.source ?? author?.source
+    ?? teamOptions.find((option) => option.ready)?.source ?? 'current'
   return { sources, capture, captureId: capture?.id ?? '', teamOptions, teamSource,
     teamReady: Boolean(teamOptions.find((option) => option.source === teamSource)?.ready) }
 }
@@ -735,10 +739,10 @@ export function useSimulationInputs<Capture extends CaptureOption>(lang: Lang, s
   return { ...inputs, setTeamSource }
 }
 
+// Only a mismatch is worth a line: champions whose gear data differs from a real battle's.
 export function teamCheckText(lang: Lang, check?: TeamCheck | null) {
-  const t: Translate = (key, params) => translate(lang, key, params)
-  if (!check || !check.compared) return t('sim.gearDataNotYetChecked')
-  return t('sim.gearDataCheckedAgainstReal', { matched: check.matched ?? 0, compared: check.compared, value: check.checkedAt?.slice(5, 16) ?? '' })
+  if (!check?.compared || (check.matched ?? 0) >= check.compared) return ''
+  return translate(lang, 'sim.gearDataCheckedAgainstReal', { matched: check.matched ?? 0, compared: check.compared })
 }
 
 export function TeamSourcePicker({ options, value, onChange, disabled }: {
@@ -893,7 +897,7 @@ export function RulesTable({ rules, finishedRuns, withTrials, onJump }: { rules:
   const { lang, t } = useSim()
   return <div className="simulation-scroll">
     <table className="simulation-table rules">
-      <thead><tr><th>#</th><th>{t('sim.rule2')}</th><th>{t('sim.usesPerRun')}</th><th>{t('sim.runsUsed')}</th><th>{t('sim.damageShare')}</th>{withTrials && <th>{t('sim.trialContribution')}</th>}</tr></thead>
+      <thead><tr><th>#</th><th>{t('sim.rule2')}</th><th>{t('sim.usesPerRun')}</th><th>{t('sim.runsUsed')}</th><th>{t('sim.damageShare')}</th>{withTrials && <th title={t('sim.trialContributionHint')}>{t('sim.trialContribution')}</th>}</tr></thead>
       <tbody>
         {rules.map((rule, index) => {
           const label = rule.auto ? t('sim.noUsableRuleAutoBattle') : ruleLabel(lang, rule.rule)
@@ -933,6 +937,7 @@ export type LogRow = {
   state?: BattleSnapshot
   form?: number
   uses?: ActionUse[]
+  health?: HealthChange[]
   // Rules before this one whose target could not be chosen.
   targetMisses?: TargetMiss[]
 }
@@ -974,8 +979,11 @@ function ownSkillDamage(row: LogRow) {
 // --- What one action set off (tools/simulation_common.action_uses) ---
 
 export type UseTrigger = 'input' | 'team' | 'counter' | 'provoke' | 'activate' | 'effect' | 'passive' | 'other'
-// hits: the actors its damage reached, when known (a skill may pick its own target).
-export type ActionUse = { actorId: number; skillTypeId: number; targetId: number; trigger: UseTrigger; damage: number; hits?: number[] }
+// hits: the actors its damage reached, when known (a skill may pick its own target);
+// hitDamage: its damage to each of them (1.1.6 engine).
+export type ActionUse = { actorId: number; skillTypeId: number; targetId: number; trigger: UseTrigger; damage: number; hits?: number[]; hitDamage?: number[] }
+// An actor whose health the action changed, in HP (1.1.6 engine).
+export type HealthChange = { actorId: number; before: number; after: number; max: number }
 
 // Who a boss's skill actually hit, when the game picked someone else than the
 // command named (the Head of Mischief's steal hits the enemy with the most buffs).
@@ -1011,6 +1019,48 @@ export function chainUses(uses: ActionUse[] | undefined, byId: Map<number, Actor
 // An ally attack, counterattack, provoked attack or other skill the action set off (the filter).
 export function hasChainedSkill(uses: ActionUse[] | undefined) {
   return (uses ?? []).some((use) => use.trigger !== 'input' && use.trigger !== 'other')
+}
+
+type ActorHit = { actorId: number; damage: number; change?: HealthChange }
+
+// Each actor an action damaged or whose health it changed, in team order: the damage
+// (shields included) and the health before and after. A lone boss-side unit is left
+// out, the row's own damage is about it.
+export function actorHits(row: LogRow, byId: Map<number, ActorInfo>): ActorHit[] {
+  const damage = new Map<number, number>()
+  for (const use of row.uses ?? []) {
+    use.hits?.forEach((id, index) => {
+      const amount = use.hitDamage?.[index]
+      if (typeof amount === 'number' && amount > 0) damage.set(id, (damage.get(id) ?? 0) + amount)
+    })
+  }
+  const health = new Map((row.health ?? []).map((change) => [change.actorId, change]))
+  const ids = [...new Set([...damage.keys(), ...health.keys()])]
+  const bossSide = ids.filter((id) => byId.get(id)?.player !== true)
+  const order = [...byId.keys()]
+  return ids.filter((id) => bossSide.length > 1 || byId.get(id)?.player === true)
+    .sort((left, right) => order.indexOf(left) - order.indexOf(right))
+    .map((actorId) => ({ actorId, damage: damage.get(actorId) ?? 0, change: health.get(actorId) }))
+}
+
+// Health in percent, one decimal when whole numbers would hide the change.
+function healthPercents(change: HealthChange) {
+  const ratio = (value: number) => change.max > 0 ? value * 100 / change.max : 0
+  const digits = Math.round(ratio(change.before)) === Math.round(ratio(change.after)) ? 1 : 0
+  return [ratio(change.before), ratio(change.after)].map((value) => `${value.toFixed(digits)}%`)
+}
+
+function HitChip({ hit, actor, form }: { hit: ActorHit; actor: ActorInfo | undefined; form?: number }) {
+  const { t } = useSim()
+  const change = hit.change
+  const delta = change ? change.after - change.before : 0
+  const [before, after] = change ? healthPercents(change) : ['', '']
+  return <span className={`hit-chip${actor && !actor.player ? ' enemy' : ''}`}>
+    {actor && <ActorIcon typeId={actor.heroTypeId} player={actor.player} size="xs" form={form} />}
+    {hit.damage > 0 && <span>{t('sim.hitDamage', { damage: damageText(hit.damage) })}</span>}
+    {change ? <span className="hp">{before}→{after}<b className={delta < 0 ? 'loss' : 'gain'}>{delta < 0 ? '−' : '+'}{damageText(Math.abs(delta))}</b></span>
+      : <span className="hp unchanged">{t('sim.healthUnchanged')}</span>}
+  </span>
 }
 
 function UseChip({ use, actor, form }: { use: ActionUse; actor: ActorInfo | undefined; form?: number }) {
@@ -1267,6 +1317,13 @@ function ActionLogView<Row extends LogRow>({ rows, actors, runs, runIndex, setRu
                 const chain = chainUses(row.uses, byId)
                 return chain.length > 0 && <div className="log-uses">{chain.map((use, useIndex) =>
                   <UseChip key={useIndex} use={use} actor={byId.get(use.actorId)} form={row.form} />)}</div>
+              })()}
+              {(() => {
+                const damaged = actorHits(row, byId)
+                return damaged.length > 0 && <div className="log-hits">
+                  <HoverCard content={<div className="hover-list"><strong>{t('sim.perTarget')}</strong><span>{t('sim.perTargetHint')}</span></div>}>
+                    <em>{t('sim.perTarget')}</em></HoverCard>
+                  {damaged.map((hit) => <HitChip key={hit.actorId} hit={hit} actor={byId.get(hit.actorId)} form={row.form} />)}</div>
               })()}
               {open && row.state && <><div className="log-state-label">{t('sim.beforeActionState')}</div>
                 <StateStrip state={row.state} actorId={row.actorId} targetId={row.targetId} /></>}

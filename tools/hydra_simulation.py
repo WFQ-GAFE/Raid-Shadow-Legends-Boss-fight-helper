@@ -24,8 +24,8 @@ from typing import Any, Callable
 import chimera_controller as controller
 from hydra_forecast import ForecastError, _command_line, evaluate_conditions, mark_stream, swallow_stream
 from hydra_offline_policy import HydraOfflinePolicySession
-from simulation_common import (action_uses, attach_target_misses, battle_snapshot, decision_rule_index, opening_stats,
-                               stuck_report, target_misses)
+from simulation_common import (action_health, action_uses, attach_target_misses, battle_snapshot, decision_rule_index,
+                               opening_stats, stuck_report, target_misses)
 
 
 SCHEMA = 1
@@ -473,7 +473,8 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
             "source": "policy" if row.get("playerAction") else "enemy",
             "skillTypeId": row.get("skillTypeId"), "targetId": row.get("targetId"),
             "damage": round(float(row.get("damage") or 0)), "deaths": row.get("deaths") or [],
-            "uses": action_uses(row.get("uses")), "marked": marks_by_command.get(index, []),
+            "uses": action_uses(row.get("uses")), "health": action_health(row.get("health")),
+            "marked": marks_by_command.get(index, []),
             "rule": decision.get("rule"), "ruleIndex": decision.get("ruleIndex"),
             "reservationReleased": decision.get("reservationReleased") is True,
             **({"targetMisses": decision["targetMisses"]} if decision.get("targetMisses") else {}),

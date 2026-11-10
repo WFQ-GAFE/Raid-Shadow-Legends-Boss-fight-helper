@@ -26,10 +26,11 @@ from boss_stages import (DIFFICULTIES, StageSetupError, chimera_health_lost, chi
                          load_stages, prepare_stage_input, stage_with_difficulty, strategy_on_difficulty)
 from chimera_catalog_cache import ensure_ui_catalog_cache
 from chimera_simulation import action_window, form_window, run_simulation, summarize_run
+from trial_diagnosis import diagnose_run, merge as merge_diagnoses
 from convert_hydra_replay_source import ConversionError, convert
 from hydra_forecast_live import (ForecastSetupError, RUNTIME_ROOT, ensure_runtime_bundle, game_build_directory,
                                  newest_static_data, probe_source)
-from simulation_common import action_uses, attach_target_misses, read_run, write_run
+from simulation_common import action_health, action_uses, attach_target_misses, effects_snapshot, read_run, write_run
 from forecast_advice import advice, failure_advice
 from capture_identity import unique_first
 from team_preview import TeamSnapshotStore
@@ -290,7 +291,20 @@ def aggregate(summaries: list[dict[str, Any]], strategy: dict[str, Any]) -> dict
         "regroupEvents": [{"event": entry["event"], "runs": entry["runs"],
                            "bossTurnMedian": _median([float(t) for t in entry["bossTurns"]]),
                            "trialIds": sorted(entry["trialIds"])} for entry in regroup.values()],
+        # The mandatory trials' conditions at the moments they could progress (reports from 1.1.6 on).
+        "trialDiagnosis": merge_diagnoses([item.get("trialDiagnosis") for item in finished if item.get("trialDiagnosis")]),
     }
+
+
+def run_diagnosis(result: dict[str, Any], timeline: list[dict[str, Any]], trial_ids: list[int]) -> list[dict[str, Any]]:
+    """trial_diagnosis.diagnose_run for one run (an empty list without recipes)."""
+    try:
+        recipes = controller.load_trial_recipes()
+    except (OSError, ValueError):
+        return []
+    players = {actor["actorId"] for actor in (result.get("engine") or {}).get("actors", [])
+               if isinstance(actor, dict) and actor.get("player")}
+    return diagnose_run(timeline, trial_ids, recipes, players)
 
 
 def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -300,11 +314,20 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
     decisions = result.get("decisions") or []
     rows = []
     player_index = 0
+    # A trial's first started entry is its start: an Easy one on the Boss turn before its form,
+    # a Normal or Hard one in the action that completed the level before it.
+    started_ids: set[int] = set()
+    actors = {actor["actorId"]: actor for actor in engine.get("actors", []) if isinstance(actor, dict)}
     for action in engine.get("actions", []):
         decision: dict[str, Any] = {}
         if action.get("source") != "enemy":
             decision = decisions[player_index] if player_index < len(decisions) else {}
             player_index += 1
+        else:
+            # The 1.1.6 engine writes who carried what before each Chimera action.
+            before = effects_snapshot(action.get("effects"), actors)
+            if before is not None:
+                decision = {"snapshot": before}
         changes = []
         for trial_id, before, after, counter_before, counter_after, started, completed in action.get("trials") or []:
             target = trials.get(trial_id, {}).get("targetRaw") or 0
@@ -312,7 +335,10 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
                             "before": round(before / target, 4) if target else None,
                             "after": round(after / target, 4) if target else None,
                             "counterBefore": counter_before, "counterAfter": counter_after,
-                            "started": bool(started), "completed": bool(completed)})
+                            "started": bool(started), "completed": bool(completed),
+                            **({"start": True} if started and trial_id not in started_ids else {})})
+            if started:
+                started_ids.add(trial_id)
         boss_turns = action.get("bossTurns") or 0
         rows.append({
             "turn": action.get("turn"), "bossTurns": boss_turns, "window": action_window(action),
@@ -320,6 +346,7 @@ def run_timeline(result: dict[str, Any]) -> list[dict[str, Any]]:
             "source": action.get("source"), "skillTypeId": action.get("skillTypeId"), "targetId": action.get("targetId"),
             "damage": round(float(action.get("damage") or 0)), "trials": changes,
             "deaths": action.get("deaths") or [], "uses": action_uses(action.get("uses")),
+            "health": action_health(action.get("health")),
             "rule": decision.get("rule"), "ruleIndex": decision.get("ruleIndex"),
             "reservationReleased": decision.get("reservationReleased") is True,
             **({"targetMisses": decision["targetMisses"]} if decision.get("targetMisses") else {}),
@@ -557,7 +584,11 @@ class SimulationService:
 
     @staticmethod
     def _summarize(result: dict[str, Any], strategy: dict[str, Any]) -> dict[str, Any]:
-        return summarize_run(result, strategy)
+        summary = summarize_run(result, strategy)
+        mandatory = [entry["trialId"] for entry in summary.get("mandatory") or []]
+        if mandatory:
+            summary["trialDiagnosis"] = run_diagnosis(result, run_timeline(result), mandatory)
+        return summary
 
     @staticmethod
     def _aggregate(summaries: list[dict[str, Any]], strategy: dict[str, Any]) -> dict[str, Any]:
@@ -566,8 +597,11 @@ class SimulationService:
     @staticmethod
     def _run_view(result: dict[str, Any]) -> dict[str, Any]:
         engine = result.get("engine") or {}
-        return {"actors": engine.get("actors", []), "trials": engine.get("trials", []),
-                "timeline": run_timeline(result)}
+        timeline = run_timeline(result)
+        # Every trial of the battle, so the log can say why the one picked did not move.
+        trial_ids = [trial["id"] for trial in engine.get("trials", []) if isinstance(trial, dict) and isinstance(trial.get("id"), int)]
+        return {"actors": engine.get("actors", []), "trials": engine.get("trials", []), "timeline": timeline,
+                "trialDiagnosis": run_diagnosis(result, timeline, trial_ids)}
 
     def _update(self, **values: Any) -> None:
         with self.lock:

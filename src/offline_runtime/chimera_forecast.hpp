@@ -69,6 +69,23 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
     void* random = model.get<void*>(state, "Random");
     void* chimera = model.call(state, "Chimera");
     if (!chimera) throw std::runtime_error("Original Chimera battle has no Chimera hero");
+    // The HP the Chimera has lost. RAID 11.90 renamed the Fixed DamageTaken to
+    // LimitedDamageTaken and added a LongFixed UnlimitedDamageTaken (whole HP in
+    // ConvertedValue plus a Fixed remainder in _buffer) for the units the game
+    // counts beyond the Fixed range.
+    const bool limited_damage_taken = !model.has_field(chimera, "DamageTaken");
+    auto boss_damage_taken = [&]() -> double {
+        if (!limited_damage_taken) return static_cast<double>(model.get<std::int64_t>(chimera, "DamageTaken")) / 4294967296.0;
+        double taken = static_cast<double>(model.get<std::int64_t>(chimera, "LimitedDamageTaken")) / 4294967296.0;
+        if (void* unlimited = model.get<void*>(chimera, "UnlimitedDamageTaken")) {
+            taken += static_cast<double>(model.get<std::int64_t>(unlimited, "ConvertedValue"));
+            const auto buffer = model.get<std::array<unsigned char, 16>>(unlimited, "_buffer");
+            std::int64_t remainder = 0;
+            if (buffer[0]) std::memcpy(&remainder, buffer.data() + 8, 8);
+            taken += static_cast<double>(remainder) / 4294967296.0;
+        }
+        return taken;
+    };
     const auto player_owner = model.get<std::int64_t>(model.get<void*>(setup, "FirstTeam"), "TeamOwnerId");
 
     struct TrialValue { bool started{}; std::int64_t current{}; int counter{-1}; bool completed{}; };
@@ -119,6 +136,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
             ? projection.chimera_damage(state) : -1.0;
     });
     breakdown.observe(state);
+    breakdown.observe_health(state);
     auto trials_before = read_trials();
     auto dead_before = dead_flags();
 
@@ -308,7 +326,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
         // number the objectives use); Boss DamageTaken only when a setup
         // keeps no statistics (it saturates at the Q32.32 maximum).
         const double statistics_before = projection.chimera_damage(state);
-        const double taken_before = static_cast<double>(model.get<std::int64_t>(chimera, "DamageTaken")) / 4294967296.0;
+        const double taken_before = boss_damage_taken();
         const auto rng_before = offline_rng_words(model, random);
         void* command = nullptr;
         const char* source = "enemy";
@@ -381,6 +399,10 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
         void* skill = model.get<void*>(command, "SkillCommand");
         void* target = skill ? model.get<void*>(skill, "Target") : nullptr;
         const int skill_type_id = skill ? model.get<int>(skill, "SkillTypeId") : 0;
+        // The Chimera's commands have no decision state: who carried which effects when it acted.
+        std::ostringstream effects_before;
+        effects_before.precision(15);
+        if (!player_action) breakdown.append_effects(effects_before, state);
         timing.lap(PhaseTiming::kOther);
         void* processed = model.call(processor, "ApplyCommand", {command});
         timing.lap(PhaseTiming::kApply);
@@ -394,7 +416,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
                 << [&] {
                        const double statistics_after = projection.chimera_damage(state);
                        if (statistics_after != 0.0 || statistics_before != 0.0) return statistics_after - statistics_before;
-                       return static_cast<double>(model.get<std::int64_t>(chimera, "DamageTaken")) / 4294967296.0 - taken_before;
+                       return boss_damage_taken() - taken_before;
                    }()
                 << ",[";
         bool first_trial = true;
@@ -421,7 +443,9 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
         actions << "],\"" << reason << "\",[" << rng_before[0] << ',' << rng_before[1] << ',' << rng_before[2] << ','
                 << rng_before[3] << "],";
         breakdown.append(actions, processed, state);
-        actions << ']';
+        actions << ',';
+        breakdown.append_health(actions, state);
+        actions << ',' << (player_action ? std::string("[]") : effects_before.str()) << ']';
         trials_before = trials_after;
         dead_before = dead_after;
         ++commands;
@@ -492,7 +516,7 @@ inline std::string run_chimera_policy_forecast(const ManagedRuntime& model, void
            << ",\"resultType\":" << (result ? std::to_string(model.get<int>(result, "ResultType")) : "null")
            << ",\"finishCause\":" << (result ? std::to_string(model.get<int>(result, "FinishCause")) : "null")
            << ",\"damage\":" << projection.chimera_damage(state)
-           << ",\"bossDamageTaken\":" << static_cast<double>(model.get<std::int64_t>(chimera, "DamageTaken")) / 4294967296.0
+           << ",\"bossDamageTaken\":" << boss_damage_taken()
            << ",\"commands\":" << commands << ",\"policyRequests\":" << policy_requests
            << ",\"policyCommands\":" << policy_commands << ",\"autoCommands\":" << auto_commands
            << ",\"phaseMs\":" << timing.json()

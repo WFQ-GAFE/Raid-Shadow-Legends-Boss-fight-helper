@@ -23,7 +23,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 from desktop_lifecycle import WindowStartup
 from ui_text import LOCALES, match_locale, render, system_locale, ui_text
@@ -123,6 +123,8 @@ from team_setups import (STRATEGY_TEAM_ROOT, TEAM_SIZE, StrategyTeamStore, TeamS
                          decode_account_bonuses, decode_roster, exported_team, latest_check, preview_team,
                          remember_check, same_team, simulation_team, team_sources, unpack_simulation)
 from simulation_base import CurrentStages, account_team_level, base_notes  # noqa: E402
+from simulation_rules import with_default_rules  # noqa: E402
+from app_update import AppUpdater, open_in_browser, wait_for_process  # noqa: E402
 from team_setups import CAPTURE_ROOTS as TEAM_CAPTURE_ROOTS  # noqa: E402
 from strategy_simulation_package import (capture_row, materialize_opening, package_status,  # noqa: E402
                                          pack_opening, sanitize_package, select_opening,
@@ -233,6 +235,16 @@ def team_hero_ids(team: Any) -> list[int]:
             or not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in values)):
         return []
     return list(values)
+
+
+def custom_team(value: Any, size: int) -> dict[str, list[int]]:
+    """A team picked for a simulation: the account's hero ids and their type ids, a full team or none."""
+    team = value if isinstance(value, dict) else {}
+    type_ids, hero_ids = team.get("heroTypeIds"), team.get("heroInstanceIds")
+    valid = (isinstance(type_ids, list) and isinstance(hero_ids, list) and len(type_ids) == len(hero_ids) == size
+             and all(isinstance(item, int) and not isinstance(item, bool) and item > 0 for item in [*type_ids, *hero_ids])
+             and len(set(hero_ids)) == size)
+    return {"heroTypeIds": list(type_ids), "heroInstanceIds": list(hero_ids)} if valid else {}
 
 
 EXPECTED_RULE_KEYS = {
@@ -485,6 +497,11 @@ class ChimeraService:
         self.controller = ControllerManager()
         self.simulations = SimulationService()
         self.hydra_simulations = HydraSimulationService()
+        # Newer releases on GitHub; the packaged tool installs them in place (app_update).
+        self.updater = AppUpdater(APP_VERSION, PROJECT_ROOT,
+                                  Path(sys.executable) if getattr(sys, "frozen", False) else None)
+        # Closes the window for an update's restart (set by main; None without a window).
+        self.request_restart: Callable[[], None] | None = None
         # The boss stage the team screen last showed: the current rotation for simulations.
         self.current_stages = CurrentStages()
         # Champion search tags and profiles from the game's static data.
@@ -719,6 +736,45 @@ class ChimeraService:
     def shutdown(self) -> None:
         self.stopping.set()
         self.controller.shutdown()
+
+    def update_busy(self) -> str | None:
+        """Why an update cannot restart the tool now, or None."""
+        if self.controller.snapshot().get("running"):
+            return ui_text("update.busyTakeover")
+        for simulations in (self.simulations, self.hydra_simulations):
+            job = simulations.status()
+            if job and job.get("status") == "running":
+                return ui_text("update.busySimulation")
+        return None
+
+    def update_state(self, full: bool = False) -> dict[str, Any]:
+        """The update status for the window; ``full`` adds the notes and what blocks a restart."""
+        updater = getattr(self, "updater", None)
+        if updater is None:  # A service built without __init__ (tests).
+            return {}
+        state = updater.snapshot(full)
+        return {**state, "busy": self.update_busy()} if full else state
+
+    def update_action(self, action: str) -> dict[str, Any]:
+        if action == "check":
+            self.updater.check(force=True)
+        elif action == "download":
+            self.updater.download()
+        elif action == "install":
+            restart = self.request_restart
+            if restart is None:
+                raise RuntimeError(ui_text("update.restartUnavailable"))
+            self.updater.stage(self.update_busy())
+            desktop_lifecycle_log(f"update_restart_requested version={self.updater.snapshot()['version']}")
+            # Answer the window first, then close it; main swaps the files at exit.
+            threading.Timer(0.8, restart).start()
+        elif action == "open":
+            open_in_browser(self.updater.snapshot()["page"])
+        elif action == "dismiss":
+            self.updater.dismiss_installed()
+        else:
+            raise ValueError(ui_text("web.badRequest"))
+        return self.update_state(full=True)
 
     def use_strategy_account(self, pid: Any = None, account: Any = None) -> StrategyAccount:
         """Strategy groups of the account logged in to this client (else the last account) for this request."""
@@ -1949,6 +2005,8 @@ class ChimeraService:
                 "hydraHeads": self.hydra_heads(),
                 "effects": list(self.effect_options),
                 "difficulties": self.ui_catalog.get("difficulties", []),
+                # What each trial asks of whom (data/chimera-trial-recipes.json), for the trial hero reference.
+                "trialRecipes": self.ui_catalog.get("trialRecipes", []),
             }
 
     def state_payload(self, pid: int | None, boss_mode: str,
@@ -1977,6 +2035,7 @@ class ChimeraService:
             **({"hydraSimulation": {**self.hydra_simulation_overview(), "teamSources": sources}}
                if boss_mode == "hydra" else {}),
             "teamPreview": self.team_preview_summary(pid, prepared),
+            "update": self.update_state(),
             **self.catalog_payload(catalog_revision),
         }
 
@@ -2280,6 +2339,11 @@ class ChimeraService:
         stored = strategy_for_mode(self.strategy_store(), boss_mode, strategy_id) if strategy_id else {}
         config = stored if isinstance(stored.get("team"), dict) else config
         team = config.get("team") if isinstance(config.get("team"), dict) else {}
+        if source == "custom":
+            # Heroes picked for this simulation (the team picker), read as they are now.
+            team = custom_team(body.get("customTeam"), MODE_SPECS[boss_mode]["teamSize"])
+            if not team:
+                raise TeamSetupError(ui_text("teams.noCustomTeam"))
         hero_ids = team_hero_ids(team)
         package = sanitize_package(config.get("simulationPackage"), boss_mode, team.get("heroTypeIds")) or {}
         reference = package.get("team") or sanitize_reference_team(config.get("referenceTeam"))
@@ -2377,6 +2441,15 @@ class ChimeraService:
         root = getattr(self, "portable_capture_root", PROJECT_ROOT / "cache" / "strategy-openings") / (self.strategy_account().key or "shared")
         return materialize_opening(package.get("opening"), root, boss_mode)
 
+    def team_rules(self, config: dict[str, Any], team: dict[str, Any] | None) -> dict[str, Any]:
+        """A picked team's champions without a rule play a default skill order (simulation_rules)."""
+        if not team or team.get("source") != "custom":
+            return config
+        data = (self.hero_data.snapshot(None).get("data") if getattr(self, "hero_data", None) else None) or {}
+        type_ids = [hero["model"].get("typeId") for hero in team.get("heroes") or []
+                    if isinstance(hero, dict) and isinstance(hero.get("model"), dict)]
+        return with_default_rules(config, type_ids, data)[0]
+
     def start_hydra_simulation(self, body: dict[str, Any]) -> dict[str, Any]:
         config = normalized_strategy(body.get("config"), {}, "hydra")
         runs = body.get("runs")
@@ -2384,12 +2457,13 @@ class ChimeraService:
             raise ValueError(ui_text("web.badRunCount"))
         pid = body.get("pid")
         difficulty = body.get("difficulty")
+        team = self.simulation_team(body, config, "hydra")
         return self.hydra_simulations.start(
-            config,
+            self.team_rules(config, team),
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
-            team=self.simulation_team(body, config, "hydra"),
+            team=team,
             capture_folder=self._portable_capture(body, "hydra"),
             difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None,
             current_stage=self.current_stage("hydra"))
@@ -2401,12 +2475,13 @@ class ChimeraService:
             raise ValueError(ui_text("web.badRunCount"))
         pid = body.get("pid")
         difficulty, health = body.get("difficulty"), body.get("bossHealth")
+        team = self.simulation_team(body, config, "chimera")
         return self.simulations.start(
-            config,
+            self.team_rules(config, team),
             {"id": str(body.get("strategyId") or ""), "name": str(body.get("strategyName") or config.get("name") or "")},
             str(body.get("captureId") or ""), runs,
             pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
-            team=self.simulation_team(body, config, "chimera"),
+            team=team,
             capture_folder=self._portable_capture(body, "chimera"),
             difficulty=difficulty if isinstance(difficulty, int) and not isinstance(difficulty, bool) else None,
             boss_health=float(health) if isinstance(health, (int, float)) and not isinstance(health, bool) else None,
@@ -2460,6 +2535,7 @@ class ChimeraService:
             "difficulties": difficulties if isinstance(difficulties, list) else [],
             "state": live,
             "controller": self.controller.snapshot(boss_mode),
+            "update": self.update_state(),
             "cacheStatus": (
                 ui_text("web.cacheStatus", difficultiesCount=len(difficulties) if isinstance(difficulties, list) else 0, get=self.visual_cache_status.get('avatars', 0), get2=self.visual_cache_status.get('skills', 0), get3=self.visual_cache_status.get('rewards', 0))
             ),
@@ -2698,6 +2774,12 @@ class ChimeraHandler(BaseHTTPRequestHandler):
                 retry = query.get("retry", [""])[0] == "1"
                 self._json(self.server.service.hero_data_snapshot(pid, retry=retry))
                 return
+            if parsed.path == "/api/update":
+                if not self._write_authorized():
+                    self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
+                    return
+                self._json(self.server.service.update_state(full=True))
+                return
             if parsed.path == "/api/team-preview":
                 if not self._write_authorized():
                     self._error(PermissionError(ui_text("web.sessionExpired")), HTTPStatus.FORBIDDEN)
@@ -2877,6 +2959,9 @@ class ChimeraHandler(BaseHTTPRequestHandler):
             if self.path == "/api/hydra-simulation/stop":
                 self.server.service.hydra_simulations.stop()
                 self._json({"job": self.server.service.hydra_simulations.status()})
+                return
+            if self.path == "/api/update":
+                self._json(self.server.service.update_action(str(body.get("action") or "")))
                 return
             if self.path == "/api/logs/clear":
                 boss_mode = normalize_mode(body.get("bossMode", "chimera"))
@@ -3136,6 +3221,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="奇美拉 React 策略中心")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--no-window", action="store_true", help=argparse.SUPPRESS)
+    # Started by an update: the previous instance's process id, which still holds the lock.
+    parser.add_argument("--after-update", type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.self_test:
         return self_test()
@@ -3146,17 +3233,25 @@ def main() -> int:
     # The hidden no-window mode exists only for local UI verification.  It may
     # coexist with an already-open user window and never launches a controller.
     if not args.no_window:
+        if args.after_update:
+            wait_for_process(args.after_update, 60)
         mutex = NamedMutex(r"Local\RaidChimeraTool.Singleton")
-        try:
-            mutex.acquire()
-        except RuntimeError:
-            ctypes.windll.user32.MessageBoxW(
-                None,
-                render(ui_text("web.alreadyOpen", app=APP_NAME), dialog_locale()),
-                APP_NAME,
-                0x40,
-            )
-            return 4
+        deadline = time.monotonic() + (10 if args.after_update else 0)
+        while True:
+            try:
+                mutex.acquire()
+                break
+            except RuntimeError:
+                if time.monotonic() < deadline:
+                    time.sleep(0.25)
+                    continue
+                ctypes.windll.user32.MessageBoxW(
+                    None,
+                    render(ui_text("web.alreadyOpen", app=APP_NAME), dialog_locale()),
+                    APP_NAME,
+                    0x40,
+                )
+                return 4
         if getattr(sys, "frozen", False):
             # Only the single running instance copies, before anything reads the data.
             from data_root import DATA_DIR_NAME, migrate_legacy_data
@@ -3182,6 +3277,10 @@ def main() -> int:
         url = f"http://127.0.0.1:{port}/?token={token}"
         server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="chimera-ui-http")
         server_thread.start()
+        # One update check per launch, in the packaged tool (or with a local test feed);
+        # after that only when the user asks in the update dialog.
+        if service.updater.can_install or service.updater.local:
+            service.updater.check()
         if args.no_window:
             desktop_log(url)
             while True:
@@ -3215,6 +3314,7 @@ def main() -> int:
             desktop_lifecycle_log("window_close_requested")
 
         window.events.closing += closing_window
+        service.request_restart = window.destroy
         window.events.closed += startup.close
 
         def startup_failed(message: str) -> None:
@@ -3261,6 +3361,15 @@ def main() -> int:
                 desktop_lifecycle_log("server_shutdown_failed", error)
         if mutex is not None:
             mutex.close()
+        if service is not None and service.updater.pending:
+            # The update the user started: swap the files, then open the tool again.
+            try:
+                exe = service.updater.apply()
+                desktop_lifecycle_log(f"update_applied exe={exe}")
+                if exe is not None:
+                    service.updater.restart(exe, os.getpid())
+            except Exception as error:
+                desktop_lifecycle_log("update_restart_failed", error)
         desktop_lifecycle_log("shutdown_complete")
 
 

@@ -32,7 +32,7 @@ DEFAULT_TIMEOUT_SECONDS = 330.0
 FIXED_ONE = 4294967296.0
 # One engine action row (see src/offline_runtime/chimera_forecast.hpp).
 ACTION_FIELDS = ("turn", "bossTurns", "form", "actorId", "actorTypeId", "source", "skillTypeId",
-                 "targetId", "damage", "trials", "deaths", "autoReason", "rng", "uses")
+                 "targetId", "damage", "trials", "deaths", "autoReason", "rng", "uses", "health", "effects")
 FORM_INTERVAL = 5
 # Decisions for the same actor on the same battle turn before a run counts as
 # not progressing (e.g. rules switching a mythic form back and forth).

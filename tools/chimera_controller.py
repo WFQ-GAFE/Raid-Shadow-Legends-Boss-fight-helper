@@ -4104,6 +4104,40 @@ def start_first_battle_if_ready(
     raise RuntimeError(ui_text("ctl.startNotConfirmed", label=label))
 
 
+def regroup_reached_team_screen(
+    ipc: AgentIpc,
+    *,
+    session_id: int,
+    battle_context: int,
+    deadline: float,
+    settle_seconds: float = 5.0,
+) -> bool:
+    """True once the team screen appears after the game left the battle on its own.
+
+    Between the battle exit and the team screen the game is briefly on no screen
+    (or still on the finished battle). Any other screen (a result, another battle)
+    means this was not the regroup.
+    """
+    settle_deadline = min(deadline, time.monotonic() + settle_seconds)
+    while True:
+        require_takeover_active(ipc, session_id)
+        lifecycle = ipc.lifecycle() or {}
+        screen = lifecycle.get("screen")
+        if screen == "team_selection":
+            return True
+        battle = lifecycle.get("battle")
+        same_battle = (
+            screen == "battle"
+            and isinstance(battle, dict)
+            and battle.get("context") == battle_context
+        )
+        if screen != "unknown" and not same_battle:
+            return False
+        if time.monotonic() >= settle_deadline:
+            return False
+        time.sleep(0.02)
+
+
 def submit_free_regroup(
     ipc: AgentIpc,
     *,
@@ -4174,11 +4208,10 @@ def submit_free_regroup(
         # Some server responses finish the regroup between queueing action 2
         # and its main-thread guard. In that race the old battle context is
         # correctly rejected, but arrival at a verified team screen is the
-        # successful terminal state of the regroup.
-        latest_lifecycle = ipc.lifecycle() or {}
-        if (
-            reason == "battle_context_changed"
-            and latest_lifecycle.get("screen") == "team_selection"
+        # successful terminal state of the regroup. The team screen can follow
+        # the battle exit by up to ~0.2 s, so wait for it to settle.
+        if reason == "battle_context_changed" and regroup_reached_team_screen(
+            ipc, session_id=session_id, battle_context=context, deadline=deadline
         ):
             return preparation_ack
         if reason not in {

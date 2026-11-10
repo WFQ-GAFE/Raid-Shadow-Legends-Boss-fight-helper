@@ -10,7 +10,7 @@ import { describeFormula, type FormulaContext } from './formula'
 // stats at 6 stars level 60 for its ascension level, leader aura and every
 // skill with what it does (damage basis, buffs, debuffs, other effects, books).
 
-function SkillImage({ typeId, skillId }: { typeId: number; skillId: number }) {
+export function SkillImage({ typeId, skillId }: { typeId: number; skillId: number }) {
   const [failed, setFailed] = useState(false)
   return (
     <span className="skill-icon">
@@ -19,7 +19,7 @@ function SkillImage({ typeId, skillId }: { typeId: number; skillId: number }) {
   )
 }
 
-function EffectIcon({ icon, ready }: { icon?: string; ready: boolean }) {
+export function EffectIcon({ icon, ready }: { icon?: string; ready: boolean }) {
   const [failed, setFailed] = useState(false)
   return (
     <span className="effect-icon">

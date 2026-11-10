@@ -195,6 +195,7 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
     // Damage to a head as the Hydra counter counts it (the HP it lost; shields excluded).
     CommandBreakdown breakdown(model, [&](void* head) { return projection.hydra_taken(head); });
     breakdown.observe(state);
+    breakdown.observe_health(state);
     while (!model.get<bool>(state, "BattleFinished") &&
            model.get<int>(state, "CurrentTurn") < max_game_turn &&
            commands < max_skill_commands) {
@@ -301,6 +302,8 @@ inline std::string run_policy_forecast(const ManagedRuntime& model, void* static
         }
         turns << "],\"uses\":";
         breakdown.append(turns, processed, state);
+        turns << ",\"health\":";
+        breakdown.append_health(turns, state);
         turns << '}';
         dead_before = dead_after;
         ++commands;
