@@ -7,11 +7,15 @@ import { DecisionRows } from './DecisionRows'
 import { CollapsiblePanel } from './CollapsiblePanel'
 import { TeamPreviewDialog, TeamPreviewSummary, type TeamPreviewSummaryState, type TeamSnapshot } from './TeamPreview'
 import { TeamPicker, type ChosenTeam, type RosterHero } from './TeamPicker'
+import { TrialHeroesDialog } from './TrialHeroes'
+import { UpdateDialog, UpdateVersion, type UpdateAction, type UpdateDetails, type UpdateSummary } from './AppUpdate'
+import type { TrialRecipe } from './trialHeroMatch'
 import { championId, loadHeroData, withoutStrength, type HeroData } from './heroData'
 import { HeroAvatar, HeroAvatarRevisionProvider } from './HeroAvatar'
 import { ruleTargetMismatches, skillReach, targetFits, type TargetMismatch } from './ruleTargets'
 import { describeRuleConditions, type RuleDescriptionContext } from './ruleDescriptions'
-import { canMoveRule, logDrawerPreference, revealRuleAfterRender } from './ruleNavigation'
+import { logDrawerPreference, revealRuleAfterRender } from './ruleNavigation'
+import { groupRules, moveInGroup, normalizeRuleOrder, ruleKind } from './ruleOrder'
 import { TargetNote, TargetTag } from './TargetNote'
 import { effectName } from './effectNames'
 import { BattleForecastPanel, ChimeraSimulationPanel, SimulationReport, ruleUsageByIndex, type BattleForecastTelemetry, type SimulationOverview, type SimulationSummary } from './ChimeraSimulation'
@@ -19,6 +23,7 @@ import { HydraSimulationPanel, HydraSimulationReport, type HydraSimulationOvervi
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   Activity,
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   BookOpenCheck,
@@ -434,10 +439,12 @@ type Bootstrap = {
   hydraHeads: HydraHead[]
   difficulties: Difficulty[]
   effects: EffectOption[]
+  trialRecipes?: TrialRecipe[]
   language?: UiLanguage
   selectedPid?: number
   state?: LiveState
   controller: ControllerState
+  update?: UpdateSummary
   cacheStatus?: string
 }
 
@@ -466,7 +473,7 @@ const backendRuleName = (number: number) => `规则 ${number}`
 const modeName = (id: string) => hasMessage(`mode.${id}`) ? tr(`mode.${id}` as MessageKey) : id
 
 // What the user was doing when unsaved changes interrupted it (app.unsaved.saveBefore).
-type UnsavedAction = 'rename' | 'switch' | 'export' | 'start'
+type UnsavedAction = 'rename' | 'switch' | 'export' | 'start' | 'update'
 
 const FORM_INDEX: Record<string, number> = { Ultimate: 0, Ram: 1, Lion: 2, Snake: 3, Viper: 3 }
 const formShort = (form: string) => FORM_INDEX[form] === undefined ? undefined : tr(`chimera.form.${FORM_INDEX[form]}` as MessageKey)
@@ -1416,6 +1423,7 @@ function RuleEditor({
   open,
   onOpenChange,
   initial,
+  template,
   allRules,
   heroes,
   hydraHeads,
@@ -1429,6 +1437,8 @@ function RuleEditor({
   open: boolean
   onOpenChange: (value: boolean) => void
   initial?: Rule
+  // A new rule's starting point: its champion, and a default skill order or not.
+  template?: Rule
   allRules: Rule[]
   heroes: Hero[]
   hydraHeads: HydraHead[]
@@ -1447,7 +1457,6 @@ function RuleEditor({
   const [ruleKind, setRuleKind] = useState<'strict' | 'default'>('strict')
   const [heroId, setHeroId] = useState(firstHero)
   const [allHeroes, setAllHeroes] = useState(false)
-  const [heroSearch, setHeroSearch] = useState('')
   const [heroChooserExpanded, setHeroChooserExpanded] = useState(!initial)
   const [forms, setForms] = useState<string[]>(ALL_FORMS)
   const [heroForm, setHeroForm] = useState('any')
@@ -1484,17 +1493,17 @@ function RuleEditor({
 
   useEffect(() => {
     if (!open) return
-    const when = { ...(initial?.when ?? {}) }
+    const seed = initial ?? template
+    const when = { ...(seed?.when ?? {}) }
     const ids = asNumberArray(when.activeHeroTypeId)
     const initialHero = heroes.find((candidate) => heroMatchesIds(candidate, ids))
-    setName(initial?.name ?? '')
+    setName(seed?.name ?? '')
     setHeroId(initialHero?.typeId ?? firstHero)
     setAllHeroes(ids.length > 1 && heroes.length > 0 && heroes.every((hero) => heroRuntimeIds(hero).some((id) => ids.includes(id))))
-    setHeroSearch('')
     setHeroChooserExpanded(!initial)
-    setForms(ruleForms(initial ?? {}))
+    setForms(ruleForms(seed ?? {}))
     setHeroForm(when.activeHeroFormIndex === 0 ? 'original' : when.activeHeroFormIndex === 1 ? 'transformed' : 'any')
-    const action = initial?.action ?? {}
+    const action = seed?.action ?? {}
     const defaultRule = action.type === 'defaultSkillPriority'
     setRuleKind(defaultRule ? 'default' : 'strict')
     setActionType(typeof action.type === 'string' ? action.type : 'cast')
@@ -1522,7 +1531,7 @@ function RuleEditor({
             )
       }
       setDefaultPolicies(nextPolicies)
-      setDefaultPolicyForm(ruleForms(initial ?? {})[0] ?? 'Ultimate')
+      setDefaultPolicyForm(ruleForms(seed ?? {})[0] ?? 'Ultimate')
     } else {
       setDefaultPolicies({ all: basePolicy })
       setDefaultPolicyForm('all')
@@ -1538,7 +1547,7 @@ function RuleEditor({
     setTurnMin(turnAtLeast == null ? '' : String(turnAtLeast))
     setTurnMax(turnAtMost == null ? '' : String(turnAtMost))
     setSwitchWithin(when.turnsUntilFormChangeAtMost == null ? '' : String(when.turnsUntilFormChangeAtMost))
-    setLastTurn(initial?.lastTurnBeforeBoss === true)
+    setLastTurn(seed?.lastTurnBeforeBoss === true)
     setNextForm(typeof when.nextForm === 'string' ? when.nextForm : '')
     const savedEligibleTrials = asNumberArray(when.eligibleTrialsAny)
     setEligibleTrialId(savedEligibleTrials.length === 1 ? savedEligibleTrials[0] : 0)
@@ -1695,7 +1704,7 @@ function RuleEditor({
     setConfirmTargets(false)
     setConfirmDiscard(false)
     setEditorVersion((version) => version + 1)
-  }, [open, initial, firstHero, bossMode])
+  }, [open, initial, template, firstHero, bossMode])
 
   const hero = heroes.find((item) => item.typeId === heroId)
   const allHeroSkills = hero?.skills ?? []
@@ -1758,22 +1767,12 @@ function RuleEditor({
   const skills = heroForm === 'any'
     ? allHeroSkills
     : allHeroSkills.filter((item) => (item.formIndex ?? 0) === (heroForm === 'transformed' ? 1 : 0))
-  const teamHeroRank = new Map<number, number>()
-  team.forEach((typeId, index) => {
-    const teamHero = heroByRuntimeId(heroes, typeId)
-    if (teamHero && !teamHeroRank.has(teamHero.typeId)) teamHeroRank.set(teamHero.typeId, index)
-  })
-  const visibleHeroes = heroes
-    .filter((item) => item.name.toLocaleLowerCase().includes(heroSearch.trim().toLocaleLowerCase()))
-    .sort((left, right) => {
-      const leftRank = teamHeroRank.get(left.typeId)
-      const rightRank = teamHeroRank.get(right.typeId)
-      if (leftRank === undefined && rightRank === undefined) return 0
-      if (leftRank === undefined) return 1
-      if (rightRank === undefined) return -1
-      return leftRank - rightRank
-    })
-    .slice(0, 48)
+  // The champions a rule can be for: the strategy's team, plus the edited rule's own champion
+  // when it is no longer in the team.
+  const teamChoices = team.slice(0, bossMode === 'hydra' ? 6 : 5).map((typeId) => heroByRuntimeId(heroes, typeId))
+    .filter((item, index, list): item is Hero => item !== undefined && list.findIndex((other) => other?.typeId === item.typeId) === index)
+  const outsideHero = initial && hero && !teamChoices.some((item) => item.typeId === hero.typeId) ? hero : undefined
+  const visibleHeroes = outsideHero ? [...teamChoices, outsideHero] : teamChoices
   const teamSize = bossMode === 'hydra' ? 6 : 5
   const teamHeroes = team.slice(0, teamSize).map((typeId) => heroByRuntimeId(heroes, typeId))
   const selectedSkillCandidate = skills.find((item) => item.typeId === skillTypeId)
@@ -2288,14 +2287,11 @@ function RuleEditor({
               <span>{tr('app.actingChampion')}</span>
               {initial && !heroChooserExpanded && <div className="acting-hero-summary"><HeroAvatar hero={allHeroes ? undefined : hero} size="sm" /><strong>{allHeroes ? tr('app.anyActingChampion') : hero?.name ?? tr('app.noChampionSet')}</strong><button type="button" className="button ghost" onClick={() => setHeroChooserExpanded(true)}><Edit3 size={15} />{tr('rules.changeActingHero' as MessageKey)}</button></div>}
               {(!initial || heroChooserExpanded) && <>
-              <div className="hero-chooser">
-                <label className="hero-search"><Search size={15} /><input value={heroSearch} onChange={(event) => setHeroSearch(event.target.value)} placeholder={tr('app.searchChampionName')} /></label>
-                {ruleKind === 'strict' && <button type="button" aria-pressed={allHeroes} className={allHeroes ? 'all-heroes active' : 'all-heroes'} onClick={() => { const next = !allHeroes; setAllHeroes(next); setActionType(next && bossMode === 'chimera' ? 'executeTrialRecipe' : 'cast') }}><Users size={15} />{allHeroes ? tr('app.stopUsingAnyChampion') : tr('app.anyActingChampion')}</button>}
+              <div className="hero-library team-heroes">
+                {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId && !allHeroes ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); resetDefaultPoliciesForHero(item); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item === outsideHero ? tr('rules.notInTeam' as MessageKey) : item.isMetamorph ? tr('app.mythicalTwoForms') : tr('app.activeSkillCount', { skillsCount: item.skills.length })}</small></span></button>)}
+                {ruleKind === 'strict' && visibleHeroes.length > 0 && <button type="button" aria-pressed={allHeroes} className={allHeroes ? 'hero-option any-hero active' : 'hero-option any-hero'} onClick={() => { const next = !allHeroes; setAllHeroes(next); setActionType(next && bossMode === 'chimera' ? 'executeTrialRecipe' : 'cast') }}><span className="any-hero-icon"><Users size={16} /></span><span><strong>{tr('app.anyActingChampion')}</strong></span></button>}
+                {!visibleHeroes.length && <span className="library-empty">{tr('rules.chooseTeamFirst' as MessageKey)}</span>}
               </div>
-              {!allHeroes && <div className="hero-library">
-                {visibleHeroes.map((item) => <button type="button" key={item.typeId} className={item.typeId === heroId ? 'hero-option active' : 'hero-option'} onClick={() => { setHeroId(item.typeId); setAllHeroes(false); setSkillTypeId(undefined); setSlot(1); setHeroForm('any'); resetDefaultPoliciesForHero(item); setActionType(ruleKind === 'default' ? 'defaultSkillPriority' : 'cast') }}><HeroAvatar hero={item} size="sm" /><span><strong>{item.name}</strong><small>{item.isMetamorph ? tr('app.mythicalTwoForms') : tr('app.activeSkillCount', { skillsCount: item.skills.length })}</small></span></button>)}
-                {!visibleHeroes.length && <span className="library-empty">{tr('app.noChampionFound')}</span>}
-              </div>}
               {initial && <button type="button" className="button ghost hero-chooser-done" onClick={() => setHeroChooserExpanded(false)}>{tr('rules.doneChoosingHero' as MessageKey)}</button>}
               </>}
             </div>
@@ -2512,6 +2508,22 @@ function App() {
   const [ruleSearch, setRuleSearch] = useState('')
   const strategyImportRef = useRef<HTMLInputElement | null>(null)
   const [trialOpen, setTrialOpen] = useState(false)
+  const [trialHeroesOpen, setTrialHeroesOpen] = useState(false)
+  // Newer releases (AppUpdate.tsx): the short status from each poll, and the dialog.
+  const [update, setUpdate] = useState<UpdateSummary | null>(null)
+  const [updateOpen, setUpdateOpen] = useState(false)
+  const [updateCheckOnOpen, setUpdateCheckOnOpen] = useState(false)
+  const updateRequest = useCallback((action?: UpdateAction) => action
+    ? api<UpdateDetails>('/api/update', { method: 'POST', body: JSON.stringify({ action }) })
+    : api<UpdateDetails>('/api/update'), [])
+  // Right after an update the dialog opens once with its result.
+  const installedShown = useRef(false)
+  useEffect(() => {
+    if (!update?.installed || installedShown.current) return
+    installedShown.current = true
+    setUpdateCheckOnOpen(false)
+    setUpdateOpen(true)
+  }, [update?.installed])
   const [hydraDevourRetryOpen, setHydraDevourRetryOpen] = useState(false)
   const [hydraForecasts, setHydraForecasts] = useState<HydraForecastSummary[]>([])
   const [chimeraSimulation, setChimeraSimulation] = useState<SimulationOverview>()
@@ -2545,6 +2557,9 @@ function App() {
   const [pendingRuleJump, setPendingRuleJump] = useState<{ index: number; version: number } | null>(null)
   const [ruleOpen, setRuleOpen] = useState(false)
   const [editIndex, setEditIndex] = useState<number | null>(null)
+  const [ruleTemplate, setRuleTemplate] = useState<Rule | undefined>()
+  // The one champion whose rules the rules card shows (its section key), or null for all.
+  const [ruleChampionFilter, setRuleChampionFilter] = useState<string | null>(null)
   const [trialSearchDifficulty, setTrialSearchDifficulty] = useState<number>(5)
 
   useLayoutEffect(() => {
@@ -2604,6 +2619,7 @@ function App() {
       setStrategyProfiles(next.strategyProfiles ?? [])
       setController(next.controller)
       setLive(next.state ?? {})
+      if (next.update) setUpdate(next.update)
       setSelectedPid(next.selectedPid ?? next.processes[0]?.pid)
       setConnectionError('')
       const inferredDifficulty = next.state?.chimeraDifficultyId ?? configuredTrialDifficulty(next.config)
@@ -2636,7 +2652,7 @@ function App() {
     return () => { cancelled = true }
   }, [teamPreviewRevision, selectedPid])
 
-  type StateResponse = { _fence?: number; strategyAccount?: StrategyAccount; state: LiveState; controller: ControllerState; hydraForecasts?: HydraForecastSummary[]; chimeraSimulation?: SimulationOverview; hydraSimulation?: HydraSimulationOverview; teamPreview?: TeamPreviewSummaryState | null; storageHealth?: StorageHealth; catalogRevision?: string; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[] }
+  type StateResponse = { _fence?: number; strategyAccount?: StrategyAccount; state: LiveState; controller: ControllerState; hydraForecasts?: HydraForecastSummary[]; chimeraSimulation?: SimulationOverview; hydraSimulation?: HydraSimulationOverview; teamPreview?: TeamPreviewSummaryState | null; storageHealth?: StorageHealth; catalogRevision?: string; strategyProfiles?: StrategyProfile[]; heroes?: Hero[]; hydraHeads?: HydraHead[]; effects?: EffectOption[]; difficulties?: Difficulty[]; trialRecipes?: TrialRecipe[]; update?: UpdateSummary }
   const pollRequest = useCallback((signal: AbortSignal) => {
     const params = new URLSearchParams({ mode: bossMode, catalogRevision: catalogRevisionRef.current })
     if (selectedPid) params.set('pid', String(selectedPid))
@@ -2652,6 +2668,7 @@ function App() {
     if (next.chimeraSimulation) setChimeraSimulation(next.chimeraSimulation)
     if (next.hydraSimulation) setHydraSimulation(next.hydraSimulation)
     setTeamPreviewRevision(next.teamPreview?.revision ?? '')
+    if (next.update) setUpdate(next.update)
     // Another account logged in: its own strategy groups replace these.
     if (next.strategyAccount && next.strategyAccount.key !== strategyAccountRef.current.key) {
       setStrategyAccountChanged(value => value + 1)
@@ -2667,6 +2684,7 @@ function App() {
       hydraHeads: next.hydraHeads ?? current.hydraHeads,
       effects: next.effects ?? current.effects,
       difficulties: next.difficulties ?? current.difficulties,
+      trialRecipes: next.trialRecipes ?? current.trialRecipes,
     } : current)
     setConnectionError(next.state.error ?? '')
   }, [setController])
@@ -2711,6 +2729,10 @@ function App() {
   const selectedProcess = data?.processes.find((process) => process.pid === selectedPid)
   const strategyTeamIds = config.team?.heroTypeIds ?? config.team?.heroIds ?? []
   const team = strategyTeamIds.length ? strategyTeamIds : live.teamHeroIds ?? []
+  // The strategy's champions (by account hero id when saved), marked in the trial hero reference.
+  const trialHeroTeam = useMemo(() => ({ heroIds: config.team?.heroInstanceIds ?? [], typeIds: team }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [config.team?.heroInstanceIds?.join(','), team.join(',')])
   // Who each skill can target, for the rule target warnings.
   useEffect(() => {
     if (heroData) return
@@ -2764,6 +2786,7 @@ function App() {
   const jumpToRule = useCallback((index: number) => {
     if (!Number.isInteger(index) || index < 1 || index > rules.length) return
     setRuleSearch('')
+    setRuleChampionFilter(null)
     setRuleRevealVersion((version) => version + 1)
     setHighlightRule(index)
     setPendingRuleJump((current) => ({ index, version: (current?.version ?? 0) + 1 }))
@@ -2778,7 +2801,14 @@ function App() {
     const timer = window.setTimeout(() => setHighlightRule(null), 2800)
     return () => window.clearTimeout(timer)
   }, [pendingRuleJump])
-  useEffect(() => { setPendingRuleJump(null); setHighlightRule(null) }, [bossMode, activeStrategyId])
+  useEffect(() => { setPendingRuleJump(null); setHighlightRule(null); setRuleChampionFilter(null) }, [bossMode, activeStrategyId])
+  // The rules by champion (ruleOrder.ts): the team in team order, each champion's rules as they are checked.
+  const ruleGroups = groupRules(rules, team)
+  const groupKey = (champion: number | null) => champion === null ? 'any' : String(champion)
+  // A chosen champion that left the team (or lost its rules) shows all again.
+  const shownChampion = ruleChampionFilter && ruleGroups.some((group) => groupKey(group.champion) === ruleChampionFilter) ? ruleChampionFilter : null
+  const shownChampionId = shownChampion && shownChampion !== 'any' ? Number(shownChampion) : undefined
+  const canMoveRuleInGroup = (index: number, direction: -1 | 1) => !ruleSearch.trim() && moveInGroup(rules, index, direction, team) !== null
   const filteredRules = rules.flatMap((rule, index) => {
     const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
     const query = ruleSearch.trim().toLocaleLowerCase()
@@ -2860,8 +2890,10 @@ function App() {
     try {
       const result = await api<StrategyBundle>('/api/config', {
         method: 'POST',
+        // Saved by champion (ruleOrder.ts): the numbers run on per champion; what runs is the same.
         body: JSON.stringify({ bossMode: context.mode, strategyId: activeStrategyId,
-          config: context.value, pid: selectedPid,
+          config: context.value.rules ? { ...context.value, rules: normalizeRuleOrder(context.value.rules, context.value.team?.heroTypeIds ?? team) } : context.value,
+          pid: selectedPid,
           expectedRevision: entry?.revision || undefined }),
       })
       const updated = drafts.saved(context.key, generation, result.config, result.revision)
@@ -3150,18 +3182,26 @@ function App() {
       const next = [...(current.rules ?? [])]
       if (editIndex === null) next.push(rule)
       else next[editIndex] = rule
-      return { ...current, rules: next }
+      // Kept by champion: a new rule goes after its champion's others.
+      return { ...current, rules: normalizeRuleOrder(next, team) }
     })
     setEditIndex(null)
   }
 
-  function moveRule(index: number, direction: number) {
-    const target = index + direction
-    if (!canMoveRule(index, direction, rules.length, ruleSearch)) return
+  // A new rule, for a champion of the team (and as its default skill order) when given.
+  function openNewRule(champion?: number, kind: 'strict' | 'default' = 'strict') {
+    const hero = champion ? heroByRuntimeId(heroes, champion) : undefined
+    setRuleTemplate(hero ? { when: { activeHeroTypeId: heroRuntimeIds(hero) }, ...(kind === 'default' ? { action: { type: 'defaultSkillPriority' } } : {}) } : undefined)
+    setEditIndex(null)
+    setRuleOpen(true)
+  }
+
+  // Up / down among the same champion's rules of the same kind (the others' order changes nothing).
+  function moveRule(index: number, direction: -1 | 1) {
+    if (ruleSearch.trim()) return
     setConfig((current) => {
-      const next = [...(current.rules ?? [])]
-      ;[next[index], next[target]] = [next[target], next[index]]
-      return { ...current, rules: next }
+      const next = moveInGroup(current.rules ?? [], index, direction, team)
+      return next ? { ...current, rules: next } : current
     })
   }
 
@@ -3174,7 +3214,7 @@ function App() {
     <HeroAvatarRevisionProvider value={avatarRevision}>
     <div className="app-shell">
       <header className="topbar">
-        <div className="brand" data-i18n-skip><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><span><strong>{APP_NAME}</strong><small>{__APP_VERSION__}</small></span></div>
+        <div className="brand" data-i18n-skip><span className="brand-mark"><img src="/app-icon.png" alt="" /></span><span><strong>{APP_NAME}</strong><UpdateVersion version={__APP_VERSION__} update={update} onOpen={(check) => { setUpdateCheckOnOpen(check); setUpdateOpen(true) }} /></span></div>
         <div className="account-picker">
           <span className={`status-dot ${selectedProcess?.accountName ? 'online' : ''}`} />
           <select value={selectedPid ?? ''} onChange={(event) => { const pid = Number(event.target.value); void load(pid, true, bossMode) }} disabled={controller.running || loadingContext || profileBusy || saving}>
@@ -3263,6 +3303,8 @@ function App() {
               <span><small>{tr('app.requiredTrials')}</small><strong>{selectedTrials.length ? tr('app.trialsSelected', { selectedTrialsCount: selectedTrials.length }) : tr('app.clickToChooseTrials')}</strong><em>{selectedTrialDescriptions[0] || tr('app.readsEveryTrialForThe')}</em></span>
               <ChevronDown size={18} />
             </button>}
+            {bossMode === 'chimera' && selectedTrials.length > 0 && <button type="button" className="button ghost trial-heroes-button" onClick={() => setTrialHeroesOpen(true)}>
+              <Users size={15} />{tr('trialHeroes.open')}</button>}
             {bossMode === 'hydra' && <button className={`trial-trigger early-retry-trigger ${hydraDevourRetryConditions.length ? 'has-selection' : ''}`} disabled={!team.some((value) => value > 0)} onClick={() => setHydraDevourRetryOpen(true)}>
               <span className="trial-trigger-icon"><RefreshCw size={20} /></span>
               <span><small>{tr('app.devourOrderRegroup')}</small><strong>{hydraDevourRetryConditions.length ? tr('app.devourConditionsSet', { hydraDevourRetryConditionsCount: hydraDevourRetryConditions.length }) : tr('app.setByMarkOrderAnd')}</strong><em>{openingForecastOn ? tr('app.forecastAtBattleStartThen') : tr('app.firstTargetReadAtBattle')}</em></span>
@@ -3295,13 +3337,42 @@ function App() {
             <div className="rules-header">
               <div><span className="eyebrow"><Sparkles size={14} />{tr('app.strategyTree')}</span><h2>{tr('app.actionRules')}</h2></div>
               <label className="rule-search"><Search size={16} /><input value={ruleSearch} onChange={(event) => setRuleSearch(event.target.value)} placeholder={tr('app.findChampionSkillOrRule')} aria-label={tr('app.findActionRules')} />{ruleSearch && <button type="button" className="icon-button" onClick={() => setRuleSearch('')} aria-label={tr('app.clearSearch')}><X size={15} /></button>}</label>
-              <div className="toolbar">{drafts.dirty(editorRef.current.key) && <><span className="draft-dirty">{tr('app.unsaved')}</span><button className="button ghost" disabled={saving || profileBusy || loadingContext || data?.storageHealth?.ok === false} onClick={() => void discardDraft()}>{tr('app.loadSavedVersion')}</button></>}<button className="button ghost" disabled={saving || loadingContext || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={17} />{tr('app.save')}</button><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />{tr('app.addRule')}</button></div>
+              <div className="toolbar">{drafts.dirty(editorRef.current.key) && <><span className="draft-dirty">{tr('app.unsaved')}</span><button className="button ghost" disabled={saving || profileBusy || loadingContext || data?.storageHealth?.ok === false} onClick={() => void discardDraft()}>{tr('app.loadSavedVersion')}</button></>}<button className="button ghost" disabled={saving || loadingContext || data?.storageHealth?.ok === false} onClick={() => void save()}><Save size={17} />{tr('app.save')}</button><button className="button primary" onClick={() => openNewRule(shownChampionId)}><Plus size={17} />{tr('app.addRule')}</button></div>
             </div>
-            <div className="rule-results-heading"><span>{tr('rules.resultCount' as MessageKey, { shown: filteredRules.length, total: rules.length })}</span><small>{ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('rules.executionOrder' as MessageKey)}</small></div>
+            <div className="rule-results-heading">
+              {ruleGroups.length > 1 ? <div className="rule-champion-filter" role="group" aria-label={tr('rules.showChampion' as MessageKey)}>
+                <button type="button" aria-pressed={shownChampion === null} className={shownChampion === null ? 'active' : ''} onClick={() => setRuleChampionFilter(null)}>
+                  {tr('rules.allChampions' as MessageKey)}<b>{rules.length}</b></button>
+                {ruleGroups.map((group) => {
+                  const key = groupKey(group.champion)
+                  const groupHero = group.champion === null ? undefined : heroByRuntimeId(heroes, group.champion)
+                  return <button type="button" key={key} aria-pressed={shownChampion === key} className={`${shownChampion === key ? 'active' : ''}${group.inTeam ? '' : ' outside'}`}
+                    onClick={() => setRuleChampionFilter(shownChampion === key ? null : key)}>
+                    {group.champion === null ? <Users size={14} /> : <HeroAvatar hero={groupHero} size="sm" />}
+                    <span>{group.champion === null ? tr('app.anyActingChampion') : groupHero?.name ?? tr('app.champion4', { typeId: group.champion })}</span><b>{group.entries.length}</b></button>
+                })}
+              </div> : <span>{tr('rules.resultCount' as MessageKey, { shown: filteredRules.length, total: rules.length })}</span>}
+              <small>{ruleSearch.trim() ? `${tr('rules.resultCount' as MessageKey, { shown: filteredRules.length, total: rules.length })} · ${tr('rules.clearFilterToReorder' as MessageKey)}` : tr('rules.executionOrder' as MessageKey)}</small>
+            </div>
             <div className="rules-list">
-              {!rules.length && <div className="empty-state"><Database size={34} /><strong>{tr('app.noStrategyRulesYet')}</strong><button className="button primary" onClick={() => { setEditIndex(null); setRuleOpen(true) }}><Plus size={17} />{tr('app.addRule')}</button></div>}
+              {!rules.length && !ruleGroups.length && <div className="empty-state"><Database size={34} /><strong>{tr('app.noStrategyRulesYet')}</strong><button className="button primary" onClick={() => openNewRule()}><Plus size={17} />{tr('app.addRule')}</button></div>}
               {rules.length > 0 && !filteredRules.length && <div className="empty-state rule-search-empty"><Search size={26} /><strong>{tr('rules.noMatchingRules' as MessageKey)}</strong><span>{tr('rules.noMatchingRulesHelp' as MessageKey)}</span><button type="button" className="button ghost" onClick={() => setRuleSearch('')}>{tr('app.clearSearch')}</button></div>}
-              {filteredRules.map(({ rule, index }) => {
+              {ruleGroups.map((group) => {
+                const searching = Boolean(ruleSearch.trim())
+                const entries = searching ? group.entries.filter((entry) => filteredRules.some((match) => match.index === entry.index)) : group.entries
+                if (searching && !entries.length) return null
+                if (shownChampion !== null && groupKey(group.champion) !== shownChampion) return null
+                const groupHero = group.champion === null ? undefined : heroByRuntimeId(heroes, group.champion)
+                const hasDefault = group.entries.some((entry) => ruleKind(entry.rule) === 'default')
+                return <section className={`rule-group${group.inTeam ? '' : ' outside'}`} key={group.champion ?? 'any'}>
+                  <header className="rule-group-head">
+                    {group.champion === null ? <span className="rule-group-any"><Users size={16} /></span> : <HeroAvatar hero={groupHero} size="sm" />}
+                    <strong>{group.champion === null ? tr('app.anyActingChampion') : groupHero?.name ?? tr('app.champion4', { typeId: group.champion })}</strong>
+                    {!group.inTeam && group.champion !== null && <em className="tag">{tr('rules.notInTeam' as MessageKey)}</em>}
+                    <small>{tr('app.ruleCount', { count: group.entries.length })}</small>
+                    {group.inTeam && group.champion !== null && <button type="button" className="button ghost rule-group-add" onClick={() => openNewRule(group.champion!)}><Plus size={15} />{tr('app.addRule')}</button>}
+                  </header>
+                  {entries.map(({ rule, index }) => {
                 const hero = heroes.find((item) => heroMatchesIds(item, ruleHeroIds(rule)))
                 const action = rule.action ?? {}
                 const firstPriority = Array.isArray(action.prioritySkills) && action.prioritySkills[0] && typeof action.prioritySkills[0] === 'object' ? action.prioritySkills[0] as JsonObject : undefined
@@ -3312,17 +3383,20 @@ function App() {
                 const usageMatches = usage !== undefined && usage.rule === (rule.name || backendRuleName(index + 1))
                 const mismatches = ruleMismatches(heroData, rule, heroes, team, hero)
                 return (
-                  <article className={`rule-row${highlightRule === index + 1 ? ' highlight' : ''}`} id={`rule-row-${index + 1}`} tabIndex={-1} key={`${index}-${rule.name ?? ''}`}>
+                  <article className={`rule-row${bossMode === 'chimera' ? '' : ' no-forms'}${highlightRule === index + 1 ? ' highlight' : ''}`} id={`rule-row-${index + 1}`} tabIndex={-1} key={`${index}-${rule.name ?? ''}`}>
                     <span className="priority" title={tr('rules.priorityNumber' as MessageKey, { number: index + 1 })}>{String(index + 1).padStart(2, '0')}</span>
-                    <HeroAvatar hero={hero} />
-                    <div className="rule-primary"><strong>{rule.name || tr('app.rule', { value: index + 1 })}</strong><span>{hero?.name ?? (action.type === 'executeTrialRecipe' ? tr('app.anyActingChampion') : tr('app.noChampionSet'))}</span>
+                    {/* The section names the champion: a generated "Champion · Skill → Target" name drops it. */}
+                    <div className="rule-primary"><strong title={rule.name || undefined}>{(hero && rule.name?.startsWith(`${hero.name} · `) ? rule.name.slice(hero.name.length + 3) : rule.name) || tr('app.rule', { value: index + 1 })}</strong>
                       {bossMode === 'chimera' && usageMatches && <em className={`sim-usage${usage.uses > 0 ? '' : ' unused'}`} title={tr('app.fromTheLatestStrategySimulation')} data-i18n-skip>{usage.uses > 0
                         ? (tr('app.simulatedPerRun', { usesPerRun: usage.usesPerRun }))
                         : (tr('app.unusedInSimulation'))}</em>}
                       {bossMode === 'chimera' && rule.lastTurnBeforeBoss === true && <em className="sim-usage last-turn-tag" title={tr('app.lastTurnBeforeBossHint')}>{tr('app.lastTurnBeforeBossTag')}</em>}
                       {mismatches.length > 0 && <TargetTag kind="never" notes={mismatches.map((mismatch) => <MismatchNote key={`${mismatch.skillTypeId}:${mismatch.target}:${mismatch.position ?? ''}`}
                         mismatch={mismatch} hero={hero} heroes={heroes} outcome={action.type === 'defaultSkillPriority' ? 'autoFallback' : 'neverActs'} />)} />}</div>
-                    <div className="form-pills">{bossMode === 'chimera' ? ruleForms(rule).slice(0, 4).map((form) => <span key={form} title={formLabel(form) ?? form}>{formShort(form) ?? form}</span>) : <span>{tr('app.wholeHydraBattle')}</span>}</div>
+                    {/* The Chimera forms the rule applies in, in a column of fixed width; one chip for all four. */}
+                    {bossMode === 'chimera' && <div className="form-pills">{ruleForms(rule).length >= ALL_FORMS.length
+                      ? <span className="all" title={ALL_FORMS.map((form) => formLabel(form) ?? form).join(' · ')}>{tr('rules.allForms' as MessageKey)}</span>
+                      : ruleForms(rule).map((form) => <span key={form} title={formLabel(form) ?? form}>{formShort(form) ?? form}</span>)}</div>}
                     <HoverCard className="rule-action" inline={false} focusable={false} content={skill ? <SkillDetailCard hero={hero} skill={skill} slot={slot} /> : null}>
                       <SkillIcon hero={hero} skill={skill} slot={slot} /><span><small>{tr('app.action')}</small><strong>{actionLabel(rule, heroes)}</strong></span></HoverCard>
                     <div className="rule-target"><Crosshair size={16} /><span><small>{tr('app.target')}</small><strong>{targetLabel(rule, heroes, hydraHeads)}</strong></span></div>
@@ -3331,13 +3405,18 @@ function App() {
                       : <HoverCard className="rule-condition" inline={false} focusable={false} content={<><strong>{tr('rules.fullLogicPreview' as MessageKey)}</strong><p>{conditionDescription(rule, effects, heroes, trials, true).full}</p></>}>
                         <small>{tr('app.strictRule')}</small><span>{conditionDescription(rule, effects, heroes, trials).summary}</span></HoverCard>}
                     <div className="rule-buttons">
-                      <button className="icon-button" title={ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('app.moveUp')} aria-label={tr('rules.moveRuleUp' as MessageKey, { number: index + 1 })} disabled={!canMoveRule(index, -1, rules.length, ruleSearch)} onClick={() => moveRule(index, -1)}><ArrowUp size={16} /></button>
-                      <button className="icon-button" title={ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('app.moveDown')} aria-label={tr('rules.moveRuleDown' as MessageKey, { number: index + 1 })} disabled={!canMoveRule(index, 1, rules.length, ruleSearch)} onClick={() => moveRule(index, 1)}><ArrowDown size={16} /></button>
-                      <button className="icon-button" title={tr('app.edit')} aria-label={tr('rules.editRule' as MessageKey, { number: index + 1 })} onClick={() => { setEditIndex(index); setRuleOpen(true) }}><Edit3 size={16} /></button>
+                      <button className="icon-button" title={ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('app.moveUp')} aria-label={tr('rules.moveRuleUp' as MessageKey, { number: index + 1 })} disabled={!canMoveRuleInGroup(index, -1)} onClick={() => moveRule(index, -1)}><ArrowUp size={16} /></button>
+                      <button className="icon-button" title={ruleSearch.trim() ? tr('rules.clearFilterToReorder' as MessageKey) : tr('app.moveDown')} aria-label={tr('rules.moveRuleDown' as MessageKey, { number: index + 1 })} disabled={!canMoveRuleInGroup(index, 1)} onClick={() => moveRule(index, 1)}><ArrowDown size={16} /></button>
+                      <button className="icon-button" title={tr('app.edit')} aria-label={tr('rules.editRule' as MessageKey, { number: index + 1 })} onClick={() => { setRuleTemplate(undefined); setEditIndex(index); setRuleOpen(true) }}><Edit3 size={16} /></button>
                       <button className="icon-button danger" title={tr('app.delete')} aria-label={tr('rules.deleteRule' as MessageKey, { number: index + 1 })} onClick={() => setConfig((current) => ({ ...current, rules: (current.rules ?? []).filter((_, itemIndex) => itemIndex !== index) }))}><Trash2 size={16} /></button>
                     </div>
                   </article>
                 )
+              })}
+                  {group.inTeam && group.champion !== null && !hasDefault && !searching && <div className="rule-group-hint"><AlertTriangle size={15} />
+                    <span>{tr((group.entries.length ? 'rules.noDefaultHint' : 'rules.noRulesHint') as MessageKey)}</span>
+                    <button type="button" className="button ghost" onClick={() => openNewRule(group.champion!, 'default')}><Sparkles size={15} />{tr('rules.setDefaultOrder' as MessageKey)}</button></div>}
+                </section>
               })}
             </div>
           </section>
@@ -3462,8 +3541,15 @@ function App() {
       </Dialog.Root>
 
       {bossMode === 'chimera' && <TrialPicker open={trialOpen} onOpenChange={setTrialOpen} trials={trials} selected={selectedTrials} onApply={applyRequiredTrials} />}
+      <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} request={updateRequest} checkOnOpen={updateCheckOnOpen} beforeRestart={() => settleUnsaved('update')} />
+      {bossMode === 'chimera' && <TrialHeroesDialog open={trialHeroesOpen} onOpenChange={setTrialHeroesOpen} language={language} trialIds={selectedTrials}
+        trialTitle={(id) => {
+          const trial = trials.find((item) => item.id === id)
+          return <><strong>{trialShortLabel(language, trial, id)}</strong><small>{gameDescription(trial?.description)}</small></>
+        }}
+        recipes={data?.trialRecipes ?? []} data={heroData} effects={effects} team={trialHeroTeam} loadRoster={loadRoster} />}
       {bossMode === 'hydra' && <HydraDevourRetryPicker open={hydraDevourRetryOpen} onOpenChange={setHydraDevourRetryOpen} heroes={heroes} team={team} conditions={hydraDevourRetryConditions} onApply={(conditions) => setConfig((current) => ({ ...current, objectives: { ...(current.objectives ?? {}), devourOrderRetryConditions: conditions } }))} />}
-      <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} heroData={heroData} onSave={saveRule} />
+      <RuleEditor open={ruleOpen} onOpenChange={setRuleOpen} initial={editIndex === null ? undefined : rules[editIndex]} template={editIndex === null ? ruleTemplate : undefined} allRules={rules} heroes={heroes} hydraHeads={hydraHeads} team={team} effects={effects} trials={trials} bossMode={bossMode} heroData={heroData} onSave={saveRule} />
       <TeamPreviewDialog language={language}
         snapshot={teamDialog === 'live' ? teamPreview : teamDialog === 'reference' ? config.referenceTeam ?? null : null}
         title={teamDialog === 'reference' ? (tr('app.authorSTeamSetup')) : (tr('app.currentTeamSetup'))}

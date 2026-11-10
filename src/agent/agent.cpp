@@ -63,7 +63,7 @@ constexpr std::uint32_t kCommandFlagExecute = 1;
 
 constexpr std::uint32_t kSharedStateMagic = 0x52434950;  // RCIP
 constexpr std::uint32_t kSharedStateVersion = 7;
-constexpr std::uint64_t kAgentBuildId = 2026100401ULL;
+constexpr std::uint64_t kAgentBuildId = 2026111101ULL;
 constexpr LONG kAgentStateInitializing = 1;
 constexpr LONG kAgentStateReady = 2;
 constexpr LONG kAgentStateFailed = 3;
@@ -360,8 +360,9 @@ bool read_hydra_ui_damage(std::int64_t* total, std::size_t* head_count) {
     return valid;
 }
 
+// raw_damage counts in units of `unit` (1: whole HP; 2^32: Fixed raw).
 double observe_hydra_damage(void* battle_context, std::int32_t actor_id,
-                            void* hero, std::int64_t raw_damage) {
+                            void* hero, std::int64_t raw_damage, double unit) {
     if (!battle_context || !hero || actor_id < 0 || raw_damage < 0) {
         return -1.0;
     }
@@ -383,9 +384,7 @@ double observe_hydra_damage(void* battle_context, std::int32_t actor_id,
             ? raw_damage - observation.raw_damage
             : raw_damage;
         if (delta > 0) {
-            constexpr double kFixedOne = 4294967296.0;
-            g_hydra_accumulated_damage +=
-                static_cast<double>(delta) / kFixedOne;
+            g_hydra_accumulated_damage += static_cast<double>(delta) / unit;
         }
         observation.raw_damage = raw_damage;
     } catch (...) {
@@ -545,6 +544,9 @@ const MethodInfo* g_cancel_chimera_method{};
 const MethodInfo* g_execute_cancel_hydra_method{};
 const MethodInfo* g_cancel_hydra_method{};
 const MethodInfo* g_hydra_total_damage_method{};
+// RAID 11.90 returns the whole HP a head lost (Int64); earlier versions returned
+// the Fixed (Q32.32) total.
+bool g_hydra_total_damage_whole{};
 const MethodInfo* g_hydra_result_restart_pressed_method{};
 const MethodInfo* g_chimera_result_restart_pressed_method{};
 std::array<std::int32_t, 256> g_last_completed_challenge_ids{};
@@ -5825,7 +5827,8 @@ ChimeraBattleMetrics read_hydra_battle_metrics(void* mode) {
     // assumed by the earlier implementation does not exist.  Read every head
     // actor retained by the battle dictionary and remember each monotonic
     // contribution, so replacements never erase earlier damage and long
-    // battles are not capped at an arbitrary number of heads.
+    // battles are not capped at an arbitrary number of heads.  RAID 11.90
+    // changed the extension's result from Fixed to whole HP (Int64).
     void* bosses_dictionary = nullptr;
     if (!safe_read(mode, 128, bosses_dictionary)) {
         return metrics;
@@ -5846,19 +5849,26 @@ ChimeraBattleMetrics read_hydra_battle_metrics(void* mode) {
             continue;
         }
         std::int64_t head_damage_raw = 0;
+        // The damage-taken field stays Fixed; the extension is whole HP since 11.90.
+        constexpr double kFixedOne = 4294967296.0;
+        double unit = g_hydra_total_damage_whole ? 1.0 : kFixedOne;
         bool damage_read = runtime_get_fixed_raw_one_object(
             g_hydra_total_damage_method, hero, &head_damage_raw);
         used_extension = used_extension || damage_read;
         if (!damage_read) {
+            unit = kFixedOne;
+            // RAID 11.90 renamed the field to LimitedDamageTaken.
             damage_read = safe_read_field(
-                hero, "DamageTaken", nullptr, head_damage_raw);
+                hero, "DamageTaken", nullptr, head_damage_raw) ||
+                safe_read_field(
+                    hero, "LimitedDamageTaken", nullptr, head_damage_raw);
             used_field_fallback = used_field_fallback || damage_read;
         }
         if (!damage_read || head_damage_raw < 0) {
             continue;
         }
         const double observed = observe_hydra_damage(
-            context, actor_id, hero, head_damage_raw);
+            context, actor_id, hero, head_damage_raw, unit);
         if (observed >= 0) {
             accumulated_damage = observed;
             ++metrics.sample_count;
@@ -9900,6 +9910,15 @@ DWORD WINAPI probe_thread(void*) {
     g_cancel_hydra_method = cancel_hydra.method;
     g_hydra_total_damage_method =
         find_hydra_total_damage_method(hydra_extensions.klass);
+    if (g_hydra_total_damage_method) {
+        char* return_type = api.type_get_name(
+            api.method_get_return_type(g_hydra_total_damage_method));
+        g_hydra_total_damage_whole = return_type &&
+            std::strcmp(return_type, "System.Int64") == 0;
+        if (return_type) {
+            api.free(return_type);
+        }
+    }
     g_hydra_result_restart_pressed_method =
         hydra_finish_restart_pressed.method;
     g_chimera_result_restart_pressed_method =

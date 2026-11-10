@@ -250,6 +250,9 @@ def test_preview_team_store_and_sources() -> None:
         # The team as it is now, read from the game.
         now = simulation_team("current", "chimera", type_ids, check=None, current=lambda: team)
         assert now["rule"] == "building"  # real Chimera battles add no area bonus
+        # Heroes picked for the simulation are read the same way; the picked team names them.
+        picked = simulation_team("custom", "chimera", type_ids, check=None, current=lambda: team)
+        assert picked["source"] == "custom" and picked["heroes"] == now["heroes"]
         assert simulation_team("battle", "chimera", [], saved=None) is None
         for source, strategy_team, arguments, message in (
                 ("strategy", [], {"saved": saved, "bonuses": bonuses}, "还没有设定队伍"),

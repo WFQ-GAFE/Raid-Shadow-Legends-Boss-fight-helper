@@ -19,7 +19,7 @@ def test_agent_source_and_controller_share_the_input_capture_build_id() -> None:
     source = (PROJECT_ROOT / "src" / "agent" / "agent.cpp").read_text(encoding="utf-8")
     match = re.search(r"kAgentBuildId\s*=\s*(\d+)ULL", source)
     assert match is not None
-    assert int(match.group(1)) == AGENT_BUILD_ID == 2026100401
+    assert int(match.group(1)) == AGENT_BUILD_ID == 2026111101
 
 
 def test_retired_hydra_research_capture_is_gone_and_blocked_at_package_time() -> None:

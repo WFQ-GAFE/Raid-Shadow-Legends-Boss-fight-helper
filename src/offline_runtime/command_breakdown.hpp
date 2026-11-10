@@ -20,10 +20,15 @@
 // user dealt to the other team, plus damage no skill use accounts for (damage
 // over time at turn start, effects placed by another hero), per dealer.
 //
-// JSON: [[actorId, skillTypeId, targetId, "trigger", damage], ...] where trigger
-// is input | team | counter | provoke | activate | effect | passive | other
-// (other: skillTypeId 0, targetId -1; actorId -1 when no hero dealt it, e.g.
-// damage reflected onto an attacker).
+// JSON: [[actorId, skillTypeId, targetId, "trigger", damage, hits, hitDamage], ...]
+// where trigger is input | team | counter | provoke | activate | effect | passive
+// | other (other: skillTypeId 0, targetId -1; actorId -1 when no hero dealt it,
+// e.g. damage reflected onto an attacker). hits: the actors the use's damage
+// reached; hitDamage (1.1.6 engine): its damage to each of them, in that order.
+// Both are left out when the use dealt no damage.
+//
+// Every actor's health before and after the command (append_health): who lost or
+// gained how much, which damage alone does not say (shields, Unkillable, heals).
 //
 // Damage to the boss side is what the game counts: each damage record (the
 // DamageResult value, before shields) is reconciled per target with the
@@ -58,7 +63,7 @@ public:
         for (int i = 0; i < size(heroes); ++i) players.insert(actor_id(item(heroes, i)));
         // target: the one the command or trigger named; hits: the actors its damage
         // reached (a skill such as the Head of Mischief's steal picks its own target).
-        struct Use { int actor, skill, target; const char* trigger; double damage; std::vector<int> hits; };
+        struct Use { int actor, skill, target; const char* trigger; double damage; std::vector<int> hits; std::vector<double> hit_damage; };
         // One damage record: its target, the use it belongs to (-1: other damage) and its dealer.
         struct Record { int target, use, dealer; double amount; };
         std::vector<Use> uses;
@@ -72,7 +77,7 @@ public:
                 void* skill = optional(info, "Skill");
                 user = actor_id(optional(info, "Producer"));
                 uses.push_back({user, skill ? model_.get<int>(skill, "TypeId") : 0,
-                                actor_id(optional(info, "Target")), trigger(optional(info, "Source")), 0.0, {}});
+                                actor_id(optional(info, "Target")), trigger(optional(info, "Source")), 0.0, {}, {}});
             }
             void* actions = model_.get<void*>(result, "Results");
             for (int j = 0; j < size(actions); ++j) {
@@ -95,25 +100,36 @@ public:
                     continue;
                 }
                 const bool own = info && by == user;
-                if (own && std::find(uses.back().hits.begin(), uses.back().hits.end(), to) == uses.back().hits.end())
+                if (own && std::find(uses.back().hits.begin(), uses.back().hits.end(), to) == uses.back().hits.end()) {
                     uses.back().hits.push_back(to);
+                    uses.back().hit_damage.push_back(0.0);
+                }
                 records.push_back({to, own ? static_cast<int>(uses.size()) - 1 : -1, by, amount});
             }
         }
         std::map<int, double> other;
         reconcile(records, players, state, other);
         for (const Record& record : records) {
-            if (record.use >= 0) uses[record.use].damage += record.amount;
-            else other[record.dealer] += record.amount;
+            if (record.use < 0) {
+                other[record.dealer] += record.amount;
+                continue;
+            }
+            Use& use = uses[record.use];
+            use.damage += record.amount;
+            const auto hit = std::find(use.hits.begin(), use.hits.end(), record.target);
+            if (hit != use.hits.end()) use.hit_damage[static_cast<std::size_t>(hit - use.hits.begin())] += record.amount;
         }
         out << '[';
         bool first = true;
-        auto entry = [&](int actor, int skill, int target, const char* kind, double damage, const std::vector<int>& hits) {
+        auto entry = [&](int actor, int skill, int target, const char* kind, double damage, const std::vector<int>& hits,
+                         const std::vector<double>& hit_damage) {
             out << (first ? "" : ",") << '[' << actor << ',' << skill << ',' << target << ",\"" << kind << "\","
                 << damage;
             if (!hits.empty()) {
                 out << ",[";
                 for (std::size_t i = 0; i < hits.size(); ++i) out << (i ? "," : "") << hits[i];
+                out << "],[";
+                for (std::size_t i = 0; i < hit_damage.size(); ++i) out << (i ? "," : "") << hit_damage[i];
                 out << ']';
             }
             out << ']';
@@ -121,16 +137,86 @@ public:
         };
         for (const Use& use : uses)
             if (std::string(use.trigger) != "passive" || use.damage > 0.0)
-                entry(use.actor, use.skill, use.target, use.trigger, use.damage, use.hits);
+                entry(use.actor, use.skill, use.target, use.trigger, use.damage, use.hits, use.hit_damage);
         for (const auto& [actor, damage] : other)
-            if (damage > 0.0) entry(actor, 0, -1, "other", damage, {});
+            if (damage > 0.0) entry(actor, 0, -1, "other", damage, {}, {});
         out << ']';
+    }
+
+    // Every living actor's health and effects now, written before a boss-side command
+    // (the player side's commands carry their decision state): who carried what when
+    // the boss acted. [[actorId, healthPercent, [[effectTypeId, turnsLeft], ...]], ...]
+    void append_effects(std::ostream& out, void* state) {
+        out << '[';
+        bool first = true;
+        for (const char* side : {"FirstTeam", "SecondTeam"}) {
+            void* team = model_.get<void*>(state, side);
+            void* units = team ? model_.get<void*>(team, "Heroes") : nullptr;
+            for (int i = 0; i < size(units); ++i) {
+                void* unit = item(units, i);
+                void* hero_state = unit ? model_.get<void*>(unit, "_heroState") : nullptr;
+                if (!hero_state || model_.get<bool>(hero_state, "IsDead")) continue;
+                const auto maximum = model_.unbox<std::int64_t>(model_.call(unit, "get_MaxHealth"));
+                const double percent = maximum > 0
+                    ? static_cast<double>(model_.get<std::int64_t>(unit, "Health")) * 100.0 / static_cast<double>(maximum) : 0.0;
+                out << (first ? "" : ",") << '[' << actor_id(unit) << ',' << std::round(percent * 10.0) / 10.0 << ",[";
+                first = false;
+                void* effects = model_.get<void*>(hero_state, "AppliedEffects");
+                bool first_effect = true;
+                for (int j = 0; j < size(effects); ++j) {
+                    void* effect = item(effects, j);
+                    if (!effect) continue;
+                    out << (first_effect ? "" : ",") << '[' << model_.get<int>(effect, "EffectTypeId") << ','
+                        << model_.get<int>(effect, "TurnLeft") << ']';
+                    first_effect = false;
+                }
+                out << "]]";
+            }
+        }
+        out << ']';
+    }
+
+    // Every actor's health now: call once before the first command.
+    void observe_health(void* state) { health_before_ = health(state); }
+
+    // [[actorId, healthBefore, healthAfter, maxHealth], ...] in HP for the actors
+    // whose health the command changed (the maximum read only for those).
+    void append_health(std::ostream& out, void* state) {
+        std::map<int, std::pair<void*, double>> after = health(state);
+        out << '[';
+        bool first = true;
+        for (const auto& [id, now] : after) {
+            const auto found = health_before_.find(id);
+            if (found == health_before_.end() || found->second.second == now.second) continue;
+            const double maximum = static_cast<double>(
+                model_.unbox<std::int64_t>(model_.call(now.first, "get_MaxHealth"))) / 4294967296.0;
+            out << (first ? "" : ",") << '[' << id << ',' << found->second.second << ',' << now.second << ','
+                << maximum << ']';
+            first = false;
+        }
+        out << ']';
+        health_before_ = std::move(after);
     }
 
 private:
     const ManagedRuntime& model_;
     Counted counted_;
     std::unordered_map<int, double> counted_before_;
+    // Each actor (both teams) and its health in HP before the next command.
+    std::map<int, std::pair<void*, double>> health_before_;
+
+    std::map<int, std::pair<void*, double>> health(void* state) {
+        std::map<int, std::pair<void*, double>> values;
+        for (const char* side : {"FirstTeam", "SecondTeam"}) {
+            void* team = model_.get<void*>(state, side);
+            void* units = team ? model_.get<void*>(team, "Heroes") : nullptr;
+            for (int i = 0; i < size(units); ++i) {
+                void* unit = item(units, i);
+                if (unit) values[actor_id(unit)] = {unit, static_cast<double>(model_.get<std::int64_t>(unit, "Health")) / 4294967296.0};
+            }
+        }
+        return values;
+    }
     // Enum values by name, read once per enum field.
     std::unordered_map<std::string, std::unordered_map<std::string, int>> enums_;
     // BattleHero.Id (an auto property's backing field, the value get_Id returns):
@@ -152,7 +238,9 @@ private:
             const double counted = after - (previous == before.end() ? 0.0 : previous->second);
             const auto found = recorded.find(unit);
             const double total = found == recorded.end() ? 0.0 : found->second;
-            if (std::abs(counted - total) <= 0.5 + 1e-9 * total) continue;
+            // Since 11.90 the Hydra counter counts whole HP: a command's share can
+            // differ from its records by up to 1 without anything absorbed.
+            if (std::abs(counted - total) <= 1.0 + 1e-9 * total) continue;
             if (counted > total) {
                 other[-1] += counted - total;
                 continue;

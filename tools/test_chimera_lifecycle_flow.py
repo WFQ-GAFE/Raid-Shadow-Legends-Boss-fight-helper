@@ -330,6 +330,63 @@ def test_prepare_transition_does_not_repeat_execute() -> None:
     assert queued_actions == [LIFECYCLE_PREPARE_FREE_REGROUP]
 
 
+class ScriptedIpc(FakeIpc):
+    """Serves each queued lifecycle once, then keeps the last one."""
+
+    def __init__(self, lifecycle: dict) -> None:
+        super().__init__(lifecycle)
+        self.upcoming: list[dict] = []
+
+    def lifecycle(self) -> dict:
+        if self.upcoming:
+            self.current_lifecycle = self.upcoming.pop(0)
+        return self.current_lifecycle
+
+
+def run_regroup_race(after_exit: dict) -> tuple[ScriptedIpc, dict | None, str]:
+    # 2026-11-11: the game left the battle on its own before action 2 reached
+    # the main thread, and the team screen came ~0.1 s after the rejection.
+    battle = active_lifecycle("battle", {"battle": {"context": 1001, "heroIds": HERO_IDS}})
+    between = active_lifecycle("unknown", {})
+    ipc = ScriptedIpc(battle)
+    acknowledgements = iter(
+        [
+            {"status": "submitted", "reason": "free_regroup_validation_started"},
+            {"status": "rejected", "reason": "battle_context_changed"},
+        ]
+    )
+
+    def acknowledge(*args, **kwargs):
+        acknowledgement = next(acknowledgements)
+        if acknowledgement["status"] == "rejected":
+            ipc.current_lifecycle = between
+            ipc.upcoming = [between] * 4 + [after_exit]
+        return acknowledgement
+
+    with (
+        patch("chimera_controller.queue_lifecycle_command", return_value={"queued": True}),
+        patch("chimera_controller.wait_for_command_ack", side_effect=acknowledge),
+    ):
+        try:
+            return ipc, submit_free_regroup(ipc, pid=1, agent=AGENT, session_id=SESSION, nonce=7), ""
+        except RuntimeError as error:
+            return ipc, None, str(error)
+
+
+def test_regroup_waits_for_late_team_screen() -> None:
+    team = active_lifecycle("team_selection", {"selection": {"context": 2001, "heroIds": HERO_IDS}})
+    _, acknowledgement, error = run_regroup_race(team)
+    assert error == ""
+    assert acknowledgement and acknowledgement["reason"] == "free_regroup_validation_started"
+
+
+def test_regroup_race_still_stops_on_other_screen() -> None:
+    result = active_lifecycle("result", {"result": {"context": 9001}})
+    _, acknowledgement, error = run_regroup_race(result)
+    assert acknowledgement is None
+    assert "battle_context_changed" in error
+
+
 def test_refresh_selection_uses_read_only_action() -> None:
     lifecycle = active_lifecycle(
         "team_selection",

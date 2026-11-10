@@ -188,6 +188,9 @@ def test_service_runs_saves_and_loads_a_simulation() -> None:
         assert [row["source"] for row in detail["timeline"]] == ["enemy", "policy", "policy", "policy"]
         assert detail["timeline"][1]["ruleIndex"] == 1 and detail["timeline"][2]["reservationReleased"] is True
         assert detail["timeline"][3]["trials"][0]["after"] == 1.0
+        # The trial starts on the Boss turn before its form; later entries are progress, not starts.
+        assert detail["timeline"][0]["trials"][0]["start"] is True
+        assert all("start" not in row["trials"][0] for row in detail["timeline"][1:] if row["trials"])
 
 
 def test_service_swaps_the_strategy_team_into_the_opening() -> None:

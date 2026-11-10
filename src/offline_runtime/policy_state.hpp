@@ -34,6 +34,9 @@ public:
         hydra_damage_ = model_.method_exact(
             model_.klass("SharedModel.Battle.Extensions", "HydraExtensions"),
             "HydraTotalTakenDamage", {"SharedModel.Battle.Core.Hero.BattleHero"});
+        // RAID 11.90 returns the whole HP a head lost (Int64); earlier versions
+        // returned the Fixed (Q32.32) total.
+        hydra_damage_whole_ = model_.return_type_name(hydra_damage_) == "System.Int64";
         selector_ = model_.method_exact(
             model_.klass("SharedModel.Battle.Core.TargetSelection", "SkillTargetSelector"),
             "GetTargets", {
@@ -78,9 +81,11 @@ public:
     // HydraTotalTakenDamage, summed over every head the battle has had
     // (killed and replaced heads keep their contribution). Summing raw
     // Q32.32 values would overflow at this scale.
-    // One head's HydraTotalTakenDamage (the HP it lost), unrounded.
+    // One head's HydraTotalTakenDamage (the HP it lost): whole HP since 11.90,
+    // unrounded before.
     double hydra_taken(void* head) const {
-        return static_cast<double>(model_.unbox<std::int64_t>(model_.invoke(hydra_damage_, nullptr, {head}))) / 4294967296.0;
+        const auto raw = model_.unbox<std::int64_t>(model_.invoke(hydra_damage_, nullptr, {head}));
+        return hydra_damage_whole_ ? static_cast<double>(raw) : static_cast<double>(raw) / 4294967296.0;
     }
 
     std::int64_t hydra_damage(void* state) const {
@@ -91,7 +96,7 @@ public:
         for (int i = 0; i < model_.get<int>(heads, "_size"); ++i) {
             void* head = model_.call(heads, "get_Item", {&i});
             const std::int64_t raw = model_.unbox<std::int64_t>(model_.invoke(hydra_damage_, nullptr, {head}));
-            if (raw > 0) total += raw >> 32;
+            if (raw > 0) total += hydra_damage_whole_ ? raw : raw >> 32;
         }
         return total;
     }
@@ -185,6 +190,7 @@ private:
     void* hero_types_{};
     void* selector_{};
     void* hydra_damage_{};
+    bool hydra_damage_whole_{};
     std::string setup_id_;
     int seed_{};
     int stage_id_{};

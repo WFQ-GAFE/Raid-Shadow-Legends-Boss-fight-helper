@@ -161,6 +161,7 @@ export function HydraSimulationPanel({ language, overview, heroes, heads, effect
   strategyTeam: number[]
   pid?: number
   onOpenReport: (id: string) => void
+  // Heroes picked for the simulation (the team picker) and how to pick them.
 }) {
   const { t } = useI18n()
   const job = overview?.job ?? null
@@ -196,7 +197,8 @@ export function HydraSimulationPanel({ language, overview, heroes, heads, effect
     setError('')
     try {
       const result = await request<{ job?: SimulationJob }>('/api/hydra-simulation/start', { method: 'POST', body: JSON.stringify({
-        config: draft, strategyId, strategyName, captureId, runs, pid, teamSource, ...(rebuilt ? { difficulty: chosenDifficulty } : {}) }) })
+        config: draft, strategyId, strategyName, captureId, runs, pid, teamSource,
+        ...(rebuilt ? { difficulty: chosenDifficulty } : {}) }) })
       if (result.job?.id) setOrigins((current) => ({ ...current, [result.job!.id]: inputSignature }))
     } catch (reason) {
       setError(toolText(language, reason instanceof Error ? reason.message : String(reason)))
@@ -228,10 +230,9 @@ export function HydraSimulationPanel({ language, overview, heroes, heads, effect
       <CollapsiblePanel id="hydra:simulation" title={t('chimeraSim.strategySimulation')} hint={hint}>
         <section className="card simulation-card" data-i18n-skip>
           {!capture ? <p className="muted">{t('hydraSim.noHydraBattleHasBeen')}</p> : <>
-            <p className="muted">{t('hydraSim.simulatesOnDifficulty')}</p>
             <div className="field team-source-field"><span>{t('chimeraSim.team')}</span>
               <TeamSourcePicker options={teamOptions} value={teamSource} onChange={setTeamSource} disabled={blocked} /></div>
-            <p className="team-source-check">{teamCheckText(language, sources?.check)}</p>
+            {teamCheckText(language, sources?.check) && <p className="team-source-check">{teamCheckText(language, sources?.check)}</p>}
             <SimulationBase capture={capture} difficultyText={(difficulty) => difficultyText(language, difficulty)} teamSwapped={teamSource !== 'battle'}>
               {baseHeads.length ? <span className="simulation-base-icons">{baseHeads.map((typeId, index) =>
                 <span key={`${typeId}-${index}`} className={index >= 4 ? 'reserve' : ''}><HeadIcon typeId={typeId} size="xs" /></span>)}</span> : null}
@@ -248,7 +249,6 @@ export function HydraSimulationPanel({ language, overview, heroes, heads, effect
                 ? <button className="button ghost" onClick={() => void stop()} disabled={stopping || stopSent}><CircleStop size={16} />{stopping ? t('sim.stopping') : t('chimeraSim.stop')}</button>
                 : <button className="button primary" onClick={() => void start()} disabled={starting || !captureId || !teamReady}><CirclePlay size={16} />{starting ? t('sim.starting') : t('chimeraSim.simulateCurrentRules')}</button>}
             </div>
-            {rebuilt && <p className="muted">{t('hydraSim.otherDifficultyHint', { difficulty: difficultyText(language, chosenDifficulty) })}</p>}
             {stopSent && running && <p className="muted simulation-request-status" role="status">{t('sim.stopSent')}</p>}
             {error && <p className="simulation-warning" role="alert"><AlertTriangle size={14} />{error}</p>}
             {job && job.status !== 'complete' && <div className="simulation-progress">
@@ -299,7 +299,6 @@ function Digest({ summary, onOpen }: { summary: Summary; onOpen: () => void }) {
       <div className="simulation-facts">
         <span>{t('chimeraSim.medianDamage')} {simulationSamples(aggregate, summary.runs).hasValid ? damageText(aggregate.damage.median) : '—'}{simulationSamples(aggregate, summary.runs).hasValid && aggregate.minimumDamage > 0 && aggregate.minimumDamageRuns !== null
           ? t('hydraSim.goalMetIn', { minimumDamageRuns: aggregate.minimumDamageRuns, battleEndRuns: aggregate.battleEndRuns }) : ''}</span>
-        {aggregate.minimumDamage <= 0 && <span>{t('sim.goalNotSet')}</span>}
         {aggregate.marks.length > 0 && <span>{t('hydraSim.devourMarks')}<MarkChips marks={aggregate.marks} /></span>}
         {aggregate.deaths.length > 0 && <span className="inline-heroes">{t('chimeraSim.deaths')}{aggregate.deaths.map((death) => <span key={death.heroTypeId}><HeroIcon typeId={death.heroTypeId} size="xs" />{t('chimeraSim.text3', { runs: death.runs })}</span>)}</span>}
         {aggregate.regroupRuns > 0 && <span className="bad">{t('hydraSim.runsWouldRegroup', { regroupRuns: aggregate.regroupRuns })}</span>}
@@ -367,7 +366,6 @@ export function HydraSimulationReport({ language, simulationId, onClose, heroes,
               {summary?.status === 'failed' && <p className="simulation-warning"><AlertTriangle size={14} />{t('chimeraSim.simulationFailed')}{toolText(language, summary.reason ?? '')}</p>}
               {aggregate && summary && tab === 'overview' && <OverviewTab summary={summary} onRun={(index) => { setRunIndex(index); setTab('log') }} onJump={jump} />}
               {aggregate && tab === 'rules' && <>
-                <p className="muted">{t('hydraSim.everyRuleInStrategyOrder')}</p>
                 <RulesTable rules={aggregate.rules} finishedRuns={aggregate.finishedRuns} withTrials={false} onJump={jump} /></>}
               {summary && tab === 'log' && <LogTab summary={summary} runIndex={runIndex} setRunIndex={setRunIndex} request={request} onJump={jump} />}
             </div>

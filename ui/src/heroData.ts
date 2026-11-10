@@ -11,6 +11,8 @@ export type HeroDataSkill = {
   cd?: number
   passive?: boolean
   hidden?: boolean
+  // A hidden part of another skill: the skill the game shows (and levels) for it.
+  levelOf?: number
   damage?: string[]
   // Who each damage formula hits when not only the target: "all", "random", ...
   damageScopes?: string[]
@@ -32,6 +34,8 @@ export type HeroDataHero = {
   forms: HeroDataForm[]
   aura?: HeroAura[]
   ascension?: Record<string, { stats: number[][]; skills: number[][] }>
+  // Every skill of each form by ascension level ("0" = base), as the game lists them.
+  catalogForms?: Record<string, number[][]>
 }
 // A buff or debuff type: the game's kind, name and description (client
 // language), and its strength when the kind comes in several (25% / 50%).

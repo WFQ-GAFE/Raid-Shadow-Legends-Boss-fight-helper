@@ -129,11 +129,12 @@ test('the system language picks the closest offered one; missing text falls back
 // UI code keeps no tool text in Chinese. The exceptions are data values that
 // arrive in Chinese (effect groups, the game's "蛇头 N" head names, the stored
 // default strategy name), the language menu's own names, the recognizers of
-// backend data (i18n/backendData.ts) and the 1.1.1 phrase
-// table for old records.
+// backend data (i18n/backendData.ts), the 1.1.1 phrase table for old records and the
+// game's own wording for a skill using itself (trialHeroMatch.ts SELF_REFERENCES).
 test('UI code holds no Chinese tool text', () => {
   const allowed = [/\/\^蛇头\\s\*/, /增益: 'effect\.group\.buff'/, /group(\)?)? === '(增益|减益)'/, /group: '特殊'/,
-    /name === '默认策略'/, /backendRuleName = .*`规则 /, /DATA_VALUES|^\s*\[\/\^/, /name: '简体中文'/, /aria-label="Language \/ 语言 \/ Idioma"/];
+    /name === '默认策略'/, /backendRuleName = .*`规则 /, /DATA_VALUES|^\s*\[\/\^/, /name: '简体中文'/, /aria-label="Language \/ 语言 \/ Idioma"/,
+    /^const SELF_REFERENCES = /];
   const root = path.join(__dirname, '../src');
   const files = fs.readdirSync(root, { recursive: true }).map(String)
     .filter((file) => /\.tsx?$/.test(file) && !/(legacy|backendData)\.ts$/.test(file));

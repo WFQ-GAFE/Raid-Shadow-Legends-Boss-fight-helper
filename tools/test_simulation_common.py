@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 
-from simulation_common import action_uses, battle_snapshot, read_run, rule_index_by_name, write_run
+from simulation_common import action_health, action_uses, battle_snapshot, read_run, rule_index_by_name, write_run
 
 
 def test_snapshot_folds_stacks_and_keeps_what_the_turn_log_shows() -> None:
@@ -75,3 +75,16 @@ def test_action_uses_name_what_an_action_set_off() -> None:
     # The Head of Mischief's steal names one hero and hits the one with the most buffs.
     assert action_uses([[11, 262001, 5, "input", 2346.0, [4]]]) == [
         {"actorId": 11, "skillTypeId": 262001, "targetId": 5, "trigger": "input", "damage": 2346, "hits": [4]}]
+    # 1.1.6 engine: an area attack's damage to each actor it hit; amounts that do not pair up are dropped.
+    assert action_uses([[5, 3266902, 1, "input", 30000.4, [1, 2, 3], [20000.2, 6000.1, 4000.1]],
+                        [5, 3266903, 1, "input", 10.0, [1, 2], [10.0]]]) == [
+        {"actorId": 5, "skillTypeId": 3266902, "targetId": 1, "trigger": "input", "damage": 30000,
+         "hits": [1, 2, 3], "hitDamage": [20000, 6000, 4000]},
+        {"actorId": 5, "skillTypeId": 3266903, "targetId": 1, "trigger": "input", "damage": 10, "hits": [1, 2]}]
+
+
+def test_action_health_says_whose_health_an_action_changed() -> None:
+    raw = [[1, 50000.0, 30000.4, 50000.0], [2, 0, 25000, 50000], [3, "x", 1, 2], [True, 1, 2, 3], "bad"]
+    assert action_health(raw) == [{"actorId": 1, "before": 50000, "after": 30000, "max": 50000},
+                                  {"actorId": 2, "before": 0, "after": 25000, "max": 50000}]
+    assert action_health(None) == [] and action_health([]) == []

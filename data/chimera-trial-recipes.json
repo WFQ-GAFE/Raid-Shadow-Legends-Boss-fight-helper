@@ -24,6 +24,7 @@
       "automation": "assisted",
       "actionGoal": "periodicDamage",
       "requirements": [],
+      "sources": [{"scaling": "TRG_HP"}, {"debuff": [80, 81]}, {"debuff": [470]}, {"debuff": [740]}],
       "requiredMechanics": ["enemyMaxHpDamage", "poison", "hpBurn", "smite", "allFiveBossTurns"]
     },
     {
@@ -166,7 +167,7 @@
       "automation": "automatic",
       "actionGoal": "absorbDamage",
       "requirements": [
-        {"scope": "activeHero", "effect": {"effectTypeId": 280}, "keepTurnsAtLeast": 1}
+        {"scope": "activeHero", "anyOf": [{"effectTypeId": 280}, {"effectTypeId": 880}], "keepTurnsAtLeast": 1}
       ],
       "requiredMechanics": ["shieldAbsorption"]
     },
@@ -218,6 +219,7 @@
       "automation": "manual",
       "actionGoal": "manual",
       "requirements": [],
+      "sources": [{"buff": [50]}, {"special": "Counterattack"}, {"special": "TeamAttack"}],
       "requiredMechanics": ["counterattackDamage", "allyAttackDamage"]
     },
     {
@@ -264,6 +266,7 @@
       "automation": "manual",
       "actionGoal": "manual",
       "requirements": [],
+      "sources": [{"buff": [410, 411]}, {"debuff": [640]}, {"special": "ReflectDamage"}],
       "requiredMechanics": ["reflectDamage", "painLink", "passiveReflect"]
     },
     {
@@ -350,6 +353,7 @@
       "automation": "manual",
       "actionGoal": "manual",
       "requirements": [],
+      "sources": [{"special": "Revive"}],
       "requiredMechanics": ["multiTargetRevive"]
     },
     {

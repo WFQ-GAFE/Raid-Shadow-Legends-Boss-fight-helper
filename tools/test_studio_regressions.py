@@ -241,3 +241,12 @@ def test_export_recovery_validates_before_touching_original() -> None:
         assert service.strategy_bundle("hydra")["config"]["name"] == "Restored export"
         assert storage_health(path)["ok"]
         assert next(path.parent.glob("*.recovery-*.json")).read_bytes() == b"broken original"
+
+
+def test_a_picked_simulation_team_is_a_full_team_of_distinct_heroes() -> None:
+    picked = {"heroTypeIds": [1, 2, 3, 4, 5], "heroInstanceIds": [11, 12, 13, 14, 15]}
+    assert web.custom_team(picked, 5) == picked
+    assert web.custom_team({**picked, "heroInstanceIds": [11, 11, 13, 14, 15]}, 5) == {}
+    assert web.custom_team({"heroTypeIds": [1, 2, 3, 4], "heroInstanceIds": [11, 12, 13, 14]}, 5) == {}
+    assert web.custom_team({**picked, "heroTypeIds": [1, 2, 3, 4, True]}, 5) == {}
+    assert web.custom_team(None, 6) == {}

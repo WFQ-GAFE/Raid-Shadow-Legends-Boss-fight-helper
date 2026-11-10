@@ -113,6 +113,12 @@ struct ManagedRuntime {
         if (!value) throw std::runtime_error(std::string("Missing field: ") + name);
         return value;
     }
+    bool has_field(void* object, const char* name) const {
+        void* type = object_class(object);
+        return cached(type, name, kFieldLookup, [&] {
+            return api<void* (*)(void*, const char*)>("il2cpp_class_get_field_from_name")(type, name);
+        }) != nullptr;
+    }
     void* field_class(void* object, const char* name) const {
         auto type = api<void* (*)(void*)>("il2cpp_field_get_type")(field(object, name));
         return api<void* (*)(void*)>("il2cpp_class_from_type")(type);
@@ -141,6 +147,14 @@ struct ManagedRuntime {
             if (matches) return candidate;
         }
         throw std::runtime_error(std::string("Missing exact overload: ") + name);
+    }
+    // A method's return type as il2cpp names it, e.g. "System.Int64".
+    std::string return_type_name(void* method) const {
+        void* type = api<void* (*)(void*)>("il2cpp_method_get_return_type")(method);
+        char* name = type ? api<char* (*)(void*)>("il2cpp_type_get_name")(type) : nullptr;
+        std::string result = name ? name : "";
+        if (name) api<void (*)(void*)>("il2cpp_free")(name);
+        return result;
     }
     void* type_object(void* type) const {
         auto info = api<void* (*)(void*)>("il2cpp_class_get_type")(type);
